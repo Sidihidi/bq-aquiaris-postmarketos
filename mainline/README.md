@@ -113,3 +113,56 @@ scp el .bin y: strings -n 5 ramoops.bin | grep -E "^\[ *[0-9]" > dmesg-mainline.
 - [ ] **M2**: eMMC con mtk-sd (`mt8135-mmc` + parche pinctrl) — v5 en pruebas
 - [ ] M2b: USB gadget (MUSB mt6582 — sin driver mainline, habría que portarlo)
 - [ ] M3: driver display DSI/DRM → colores correctos, Lima/GPU → Phosh
+
+## 6. Vigilantes (automatización en la Pi)
+
+Para iterar sin teclear: bucles en la Pi que reaccionan cuando el teléfono
+aparece en fastboot (tras el combo Power+Vol+). Correr con `nohup ... &` o tmux.
+
+### Vigilante restaurador simple (vuelve a pmOS)
+```sh
+while true; do
+  if sudo fastboot devices 2>/dev/null | grep -q fastboot; then
+    sudo fastboot flash boot ~/pmos-artifacts/boot-pstore.img
+    sudo fastboot reboot; echo RESTAURADO; break
+  fi; sleep 3
+done
+```
+
+### Vigilante de dos fases (probar imagen nueva + restaurar + cosechar logs)
+```sh
+FASE=1
+while true; do
+  if sudo fastboot devices 2>/dev/null | grep -q fastboot; then
+    if [ $FASE = 1 ]; then            # combo 1: flashear la imagen de prueba
+      sudo fastboot flash boot ~/mainline/pkg/boot-mainline-vN.img
+      sudo fastboot reboot; FASE=2; sleep 30
+    else                              # combo 2: restaurar pmOS y cosechar
+      sudo fastboot flash boot ~/pmos-artifacts/boot-pstore.img
+      sudo fastboot reboot
+      # esperar ssh del teléfono y leer ramoops:
+      #   memdump 0xBF300000 0x100000 > ramoops.bin (ver §5)
+      break
+    fi
+  fi; sleep 3
+done
+```
+
+### ⚠️ Lección: verificar la subida antes del dd-flash
+Una subida por `cat > /tmp/img` truncada + dd = boot a medias = teléfono en el
+logo de BQ (recuperable con combo+fastboot, pero susto). **Siempre** comparar
+`md5sum` local y remoto antes de ejecutar `flash_boot_dd.sh`, o flashear por
+fastboot directamente (verifica solo).
+
+## 7. Estado de la sesión 2026-06-10 (para retomar)
+
+- v5: driver MSDC probó — eMMC respondió OCR (falló por voltajes) ✅ parche pinctrl OK
+- v6: + reguladores vmmc/vqmmc → **eMMC COMPLETA enumerada** (8GB, boot0/boot1/rpmb) ✅
+  pero SIN particiones p1-p7: el parser MSDOS de 7.0.12 no traga el MBR de MTK
+  (entrada extendida con tamaño 0xFFFFFFFF; el 6.12 de la Pi sí lo parsea con loop)
+- v7 (EN PRUEBAS): particiones declaradas a mano vía `blkdevparts=` en bootargs
+  del DT (CONFIG_CMDLINE_PARTITION) — mapa exacto del dumchar_info.
+  Si v7 monta mmcblk0p5 → **M2 conseguido** → siguiente: rootfs Alpine mínima
+  en usrdata (p7) y arrancar mainline con sistema completo en pantalla.
+- Tinte amarillo en mainline: NO es el formato de píxel (probados ambos) — es
+  config de gamma/CCORR del pipeline que deja el LK; se arreglará en M3 (driver display).
