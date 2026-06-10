@@ -121,6 +121,7 @@ static void mt6582_phy_slew_cal(struct mt6582_glue *g)
 /* Power on the PHY in DEVICE mode (ported from usb_phy_poweron) */
 static void mt6582_phy_poweron(struct mt6582_glue *g)
 {
+	dev_info(g->dev, "mt6582-musb: PHY poweron START\n");
 	/* USB 48M PHY clock (UNIVPLL_CON0 bit26) */
 	writel(readl(g->apmixed + UNIVPLL_CON0_OFF) | UNIVPLL_USB48M,
 	       g->apmixed + UNIVPLL_CON0_OFF);
@@ -308,6 +309,8 @@ static int mt6582_musb_probe(struct platform_device *pdev)
 	struct device_node *np = dev->of_node;
 	int ret;
 
+	dev_info(dev, "mt6582-musb: PROBE ENTER\n");
+
 	glue = devm_kzalloc(dev, sizeof(*glue), GFP_KERNEL);
 	if (!glue)
 		return -ENOMEM;
@@ -359,6 +362,7 @@ static int mt6582_musb_probe(struct platform_device *pdev)
 		dev_err(dev, "failed to register musb device: %d\n", ret);
 		goto err_unregister_usb_phy;
 	}
+	dev_info(dev, "mt6582-musb: PROBE OK, musb-hdrc child registered\n");
 	return 0;
 
 err_unregister_usb_phy:
