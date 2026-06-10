@@ -8,6 +8,7 @@
 		reg = <0x11200000 0x1000>, <0x11210000 0x1000>;
 		reg-names = "mac", "sif";
 		interrupts = <GIC_SPI 32 IRQ_TYPE_LEVEL_LOW>;
+		interrupt-names = "mc";	/* musb_core busca la IRQ por este nombre */
 		dr_mode = "peripheral";
 		status = "okay";
 	};
