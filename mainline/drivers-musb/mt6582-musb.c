@@ -122,17 +122,18 @@ static void mt6582_phy_slew_cal(struct mt6582_glue *g)
 static void mt6582_phy_poweron(struct mt6582_glue *g)
 {
 	dev_info(g->dev, "mt6582-musb: PHY poweron START\n");
-	/* USB 48M PHY clock (UNIVPLL_CON0 bit26) */
-	writel(readl(g->apmixed + UNIVPLL_CON0_OFF) | UNIVPLL_USB48M,
-	       g->apmixed + UNIVPLL_CON0_OFF);
-	/* USB MAC peripheral clock: clear power-down bit */
-	writel(PERI_PDN0_USB, g->pericfg + PERI_PDN0_CLR_OFF);
-
-	/* reset the whole USB IP (PHY+MAC): PERICFG[0] bit29 */
-	writel(readl(g->pericfg) | PERICFG_USB_RST, g->pericfg);
-	mdelay(10);
-	writel(readl(g->pericfg) & ~PERICFG_USB_RST, g->pericfg);
-
+	/*
+	 * v13: do NOT poke UNIVPLL_CON0 / PERI_PDN0 / PERICFG reset here.
+	 * The LK bootloader already leaves the USB MAC+PHY clocked (it uses USB
+	 * for fastboot) and clk_ignore_unused keeps them on -- same as the eMMC
+	 * pins/clocks. The earlier clock/reset pokes were disturbing the MSDC
+	 * (eMMC) clock, breaking root mount ("Can't find ext4 filesystem").
+	 * If USB regresses, re-add these surgically (likely PERI_PDN0_CLR only).
+	 *
+	 *   writel(readl(g->apmixed + UNIVPLL_CON0_OFF) | UNIVPLL_USB48M, ...);
+	 *   writel(PERI_PDN0_USB, g->pericfg + PERI_PDN0_CLR_OFF);
+	 *   PERICFG[0] bit29 reset pulse;
+	 */
 	udelay(50);
 	phy_clr8(g, 0x6b, 0x04);	/* force_uart_en = 0 -> USB function */
 	phy_clr8(g, 0x6e, 0x01);	/* RG_UART_EN = 0 */
@@ -180,7 +181,13 @@ static irqreturn_t mt6582_musb_interrupt(int irq, void *dev_id)
 	l1_ints = musb_readl(musb->mregs, USB_L1INTS) &
 		  musb_readl(musb->mregs, USB_L1INTM);
 
-	if (l1_ints & (TX_INT_STATUS | RX_INT_STATUS | USBCOM_INT_STATUS))
+	/*
+	 * The MT6582 L1-interrupt bit layout differs from the newer SoCs that
+	 * mediatek.c targets (downstream uses L1INTM=0x105, bits 0/2/8). Rather
+	 * than assume exact bit positions, dispatch to the standard musb ISR on
+	 * ANY pending L1 source so EP0/SETUP gets serviced.
+	 */
+	if (l1_ints)
 		retval = generic_interrupt(irq, musb);
 
 	return retval;
@@ -244,9 +251,12 @@ static int mt6582_musb_init(struct musb *musb)
 
 	mt6582_phy_poweron(glue);
 
-	/* unmask the L1 sources we use (TX/RX/USBCOM) */
-	musb_writel(musb->mregs, USB_L1INTM,
-		    TX_INT_STATUS | RX_INT_STATUS | USBCOM_INT_STATUS);
+	/*
+	 * Unmask the L1 interrupt broadly. The exact MT6582 L1 layout is not the
+	 * mediatek.c one (downstream uses 0x105); enable bits 0..8 so the GIC
+	 * line actually asserts for TX/RX/USBCOM regardless of bit position.
+	 */
+	musb_writel(musb->mregs, USB_L1INTM, 0x1ff);
 	return 0;
 }
 
@@ -255,9 +265,28 @@ static int mt6582_musb_exit(struct musb *musb)
 	return 0;
 }
 
+/*
+ * No real VBUS sensing (nop xceiv, no PMIC): the MAC never sees a B-session,
+ * so the gadget stack never asserts the D+ soft-connect and the host never
+ * enumerates us. We are a fixed peripheral (always cabled to a host), so force
+ * the soft-connect here. This runs from musb_start() -> musb_platform_enable(),
+ * AFTER musb_start has rewritten MUSB_POWER, so MUSB_POWER_SOFTCONN sticks.
+ * Same approach as sunxi/jz4740 musb glues on SoCs without VBUS sensing.
+ */
+static void mt6582_musb_enable(struct musb *musb)
+{
+	u8 power = musb_readb(musb->mregs, MUSB_POWER);
+
+	power |= MUSB_POWER_SOFTCONN;
+	musb_writeb(musb->mregs, MUSB_POWER, power);
+	musb->is_active = 1;
+	dev_info(musb->controller, "mt6582-musb: enable -> D+ SOFTCONN asserted\n");
+}
+
 static const struct musb_platform_ops mt6582_musb_ops = {
 	.init		= mt6582_musb_init,
 	.exit		= mt6582_musb_exit,
+	.enable		= mt6582_musb_enable,
 	.clearb		= mt6582_clearb,
 	.clearw		= mt6582_clearw,
 	.busctl_offset	= mt6582_busctl_offset,
