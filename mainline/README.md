@@ -110,7 +110,9 @@ scp el .bin y: strings -n 5 ramoops.bin | grep -E "^\[ *[0-9]" > dmesg-mainline.
 ## Estado / hitos
 
 - [x] **M1**: arranque + consola simplefb + userspace (4 CPUs SMP) — 2026-06-10
-- [ ] **M2**: eMMC con mtk-sd (`mt8135-mmc` + parche pinctrl) — v5 en pruebas
+- [x] **M2**: eMMC + particiones + ext4 — montada la root de pmOS y listada en
+      pantalla (v8) — 2026-06-10. Receta: parche pinctrl + mt8135-mmc + clocks
+      fijos 200MHz + reguladores fixed + blkdevparts= + devtmpfs en el init
 - [ ] M2b: USB gadget (MUSB mt6582 — sin driver mainline, habría que portarlo)
 - [ ] M3: driver display DSI/DRM → colores correctos, Lima/GPU → Phosh
 
@@ -160,9 +162,11 @@ fastboot directamente (verifica solo).
 - v6: + reguladores vmmc/vqmmc → **eMMC COMPLETA enumerada** (8GB, boot0/boot1/rpmb) ✅
   pero SIN particiones p1-p7: el parser MSDOS de 7.0.12 no traga el MBR de MTK
   (entrada extendida con tamaño 0xFFFFFFFF; el 6.12 de la Pi sí lo parsea con loop)
-- v7 (EN PRUEBAS): particiones declaradas a mano vía `blkdevparts=` en bootargs
-  del DT (CONFIG_CMDLINE_PARTITION) — mapa exacto del dumchar_info.
-  Si v7 monta mmcblk0p5 → **M2 conseguido** → siguiente: rootfs Alpine mínima
-  en usrdata (p7) y arrancar mainline con sistema completo en pantalla.
+- v7: `blkdevparts=` en bootargs del DT → particiones p1-p7 creadas con nombre ✅
+  (pero "Can't lookup blockdev": el init no montaba devtmpfs — el nodo /dev no existía)
+- v8: init monta devtmpfs + proc → **M2 CONSEGUIDO**: mmcblk0p5 montada ext4,
+  directorios de la root de pmOS listados en pantalla por Linux 7.0.12 🏆
+- Siguiente: rootfs Alpine mínima en usrdata (p7) para un sistema completo en
+  pantalla, y M2b (USB gadget musb — portar driver) para tener SSH en mainline.
 - Tinte amarillo en mainline: NO es el formato de píxel (probados ambos) — es
   config de gamma/CCORR del pipeline que deja el LK; se arreglará en M3 (driver display).
