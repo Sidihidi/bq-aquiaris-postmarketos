@@ -1,0 +1,34 @@
+# Reference: <https://postmarketos.org/devicepkg>
+maintainer="Juan Ferrari <jferrari98.ja@gmail.com>"
+pkgname=device-bq-krillin
+pkgdesc="BQ Aquaris E4.5"
+pkgver=1
+pkgrel=0
+url="https://postmarketos.org"
+license="MIT"
+arch="armv7"
+options="!check !archcheck"
+depends="
+	linux-bq-krillin
+	mkbootimg
+	mtk-mkimage
+	postmarketos-base
+"
+makedepends="
+	devicepkg-dev
+"
+source="
+	deviceinfo
+"
+
+build() {
+	devicepkg_build $startdir $pkgname
+}
+
+package() {
+	devicepkg_package $startdir $pkgname
+}
+
+sha512sums="
+3dd707bd29e4061281c28e0e45a5d64a7812b47875b7b296c38e0e6d843a0dda1e7deb99fea920247571cc2e1cc213066c57e68b930e5aad7c89b9b3ccedec57  deviceinfo
+"

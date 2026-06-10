@@ -1,0 +1,6 @@
+# imágenes grandes (los .img se regeneran con la doc; ver CONTINUAR_AQUI.md)
+artifacts/*.img
+*.img
+*.zip
+.claude/
+.DS_Store

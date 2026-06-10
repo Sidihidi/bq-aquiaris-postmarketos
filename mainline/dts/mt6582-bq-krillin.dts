@@ -1,0 +1,67 @@
+// SPDX-License-Identifier: GPL-2.0+
+/*
+ * BQ Aquaris E4.5 (krillin) — MT6582
+ * Primer intento mainline: simple-framebuffer sobre el FB que deja el LK
+ * (panel hx8389 qHD DSI modo video, se auto-refresca) + ramoops post-mortem.
+ * FB fisico 0xBF400000 (region 12 MB reservada, vista en /proc/iomem del
+ * kernel downstream 3.10). stride 2176 = 544*4.
+ */
+
+/dts-v1/;
+#include "mt6582.dtsi"
+
+/ {
+	model = "BQ Aquaris E4.5";
+	compatible = "bq,krillin", "mediatek,mt6582";
+
+	aliases {
+		serial0 = &uart0;
+	};
+
+	chosen {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		bootargs = "panic=15 clk_ignore_unused";
+
+		framebuffer0: framebuffer@bf400000 {
+			compatible = "simple-framebuffer";
+			reg = <0xbf400000 0x200000>;
+			width = <540>;
+			height = <960>;
+			stride = <2176>;
+			format = "a8b8g8r8";
+		};
+	};
+
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x80000000 0x40000000>;
+	};
+
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		/* region del framebuffer del LK (mtkfb.0 en downstream) */
+		fb_region: framebuffer-region@bf400000 {
+			reg = <0xbf400000 0xb00000>;
+			no-map;
+		};
+
+		/* ultimo MB de la region reservada: logs que sobreviven al reboot */
+		ramoops@bf300000 {
+			compatible = "ramoops";
+			reg = <0xbf300000 0x100000>;
+			record-size = <0x20000>;
+			console-size = <0x80000>;
+			pmsg-size = <0x20000>;
+		};
+	};
+};
+
+&uart0 {
+	status = "okay";
+};
