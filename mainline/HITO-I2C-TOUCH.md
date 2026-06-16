@@ -63,3 +63,27 @@ edt-ft5x06 a polling.
   llevar pwrap+mt6323 al kernel (DT) en vez del poke. Reset = GPIO115 (ya high).
 - Validado de punta a punta: I2C → GPIO → pwrap → PMIC → power → touch responde. El muro
   principal del touch (alimentación) está SUPERADO.
+
+## ★★ TOUCH LEE COORDENADAS — validación HW completa
+**Fix del write+read**: el `mt6577_compat` (auto_restart=0) daba timeout en write-then-read
+(el FT5x06 necesita repeated-START real). Solución: nuevo `mt6582_compat` en
+`drivers/i2c/busses/i2c-mt65xx.c` con **`auto_restart=1`** y SIN quirk COMB, + of_match:
+```c
+static const struct mtk_i2c_compatible mt6582_compat = {
+    .regs = mt_i2c_regs_v1, .pmic_i2c = 0, .dcm = 1, .auto_restart = 1,
+    .aux_len_reg = 0, .timing_adjust = 0, .max_dma_support = 32,
+};
+/* en mtk_i2c_of_match: */
+{ .compatible = "mediatek,mt6582-i2c", .data = &mt6582_compat },
+```
+y el nodo i2c0 del DT usa `compatible = "mediatek,mt6582-i2c"`.
+
+**Resultado** (i2ctransfer write+read tras VGP1 ON + reset GPIO115):
+vendor(0xA8)=**0x5a** (Truly), chipid(0xA3)=**0x14** (FT5x06), fwver(0xA6)=0x15.
+Tocando: TD_STATUS=1 dedo, **X=275, Y=759** (en 540×960). **¡El touch reporta coordenadas!**
+
+**Nota usb0+i2c**: el i2c retrasa el boot → g_ether enumera tarde → usb0 sube a ~40s (no
+es que el i2c rompa la red; es timing; esperar o hacer el up de usb0 robusto).
+
+**Siguiente (driver-level)**: nodo `edt-ft5x06` (DT) + IRQ EINT117 (portar EINT o polling)
++ pwrap/mt6323 al kernel (regulador VGP1 vin-supply) → eventos /dev/input → GUI.
