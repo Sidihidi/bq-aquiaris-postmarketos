@@ -130,11 +130,15 @@ int main(int argc, char **argv)
             if (once) return 1;
             usleep(POLL_US); continue;
         }
+        int st = buf[2];
         int xh = buf[3], xl = buf[4], yh = buf[5], yl = buf[6];
         int evt  = xh >> 6;                       /* 0=down 1=up 2=contact 3=none */
-        int down = (evt == 0 || evt == 2);
         int x = ((xh & 0x0f) << 8) | xl;
         int y = ((yh & 0x0f) << 8) | yl;
+        /* toque valido: chip vivo (no 0xff dormido ni 0x00/basura), evento de
+           contacto y coords plausibles -> filtra falsos (0,0) cuando el chip
+           devuelve todo-ceros en un estado de reset indefinido. */
+        int down = (st != 0xff) && (evt == 0 || evt == 2) && (x > 0 || y > 0);
 
         if (raw || once) {
             printf("#%d rc=%d st=0x%02x evt=%d down=%d x=%d y=%d\n",
