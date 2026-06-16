@@ -19,19 +19,20 @@
 	};
 
 	chosen {
+		stdout-path = "serial0:921600n8";
 		#address-cells = <1>;
 		#size-cells = <1>;
 		ranges;
 
-		bootargs = "panic=15 clk_ignore_unused";
+		bootargs = "earlycon=mtk8250,mmio32,0x11002000 console=ttyS0,921600n8 panic=15 clk_ignore_unused blkdevparts=mmcblk0:512K@512K(ebr1),10240K@9216K(protect_f),10240K@19456K(protect_s),6144K@71168K(sec_ro),1048576K@91136K(android),716800K@1140736K(cache),-@1856512K(usrdata) initcall_debug ignore_loglevel";
 
 		framebuffer0: framebuffer@bf400000 {
 			compatible = "simple-framebuffer";
 			reg = <0xbf400000 0x200000>;
 			width = <540>;
 			height = <960>;
-			stride = <2176>;
-			format = "a8r8g8b8";
+			stride = <1088>;
+			format = "r5g6b5";
 		};
 	};
 
@@ -108,10 +109,28 @@
 		vmmc-supply = <&reg_vmmc>;
 		vqmmc-supply = <&reg_vqmmc>;
 		bus-width = <8>;
-		max-frequency = <25000000>;
+		max-frequency = <12000000>;
 		non-removable;
+		cap-mmc-highspeed;
+		no-mmc-hs400;
+		no-mmc-hs200;
 		no-sd;
 		no-sdio;
+		status = "okay";
+	};
+};
+
+/* M2b: USB MUSB en modo gadget (peripheral). MAC 0x11200000 + SIF 0x11210000.
+ * IRQ GIC_SPI 32 (downstream: GIC_PRIVATE_SIGNALS+32 = hwirq 64). Polaridad
+ * LEVEL_LOW como el mmc que ya funciona. Clocks/PHY los gestiona el driver. */
+&{/soc} {
+	usb0: usb@11200000 {
+		compatible = "mediatek,mt6582-musb";
+		reg = <0x11200000 0x1000>, <0x11210000 0x1000>;
+		reg-names = "mac", "sif";
+		interrupts = <GIC_SPI 32 IRQ_TYPE_LEVEL_LOW>;
+		interrupt-names = "mc";
+		dr_mode = "peripheral";
 		status = "okay";
 	};
 };
