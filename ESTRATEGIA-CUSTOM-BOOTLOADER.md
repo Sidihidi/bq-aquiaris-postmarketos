@@ -108,12 +108,38 @@ Imagen: la oficial de twrp.me o construida desde `Pablito2020/android_recovery_b
 Dos caminos, ambos flasheables a la partición `uboot`/`lk` (0x1d20000) por
 mtkclient, con BROM como red de seguridad:
 
-**4a. Parchear el LK existente (esfuerzo medio, recomendado si quieres menú de boot)**
-- Volcar el LK actual (`mtk r lk lk.bin`), o sacarlo de la ROM stock / device tree.
-- Parchear: saltar verificación + añadir un **menú de arranque** (elegir pmOS /
-  mainline / Android sin reflashear). Mantiene display + fastboot + USB que ya
-  funcionan en el LK de MTK.
-- Reflashear `lk`. Si algo va mal → restaurar `lk.bin` golden por BROM.
+**4a. Parchear/recompilar el LK existente (esfuerzo medio, recomendado para menú de boot)**
+- Ya tenemos `~/firmware-stock/lk.bin` en la Pi (277 KB, mboot de MTK, cabecera
+  `0x58881688` label "LK"). Sus strings confirman la lógica de boot/recovery.
+- **Fuente del LK del MT6582 disponible**: vive en los árboles de vendor CM13
+  (`mediatek/platform/mt6582/lk/`), incluido `mt_disp_drv.c` (init de display —
+  útil también para el tinte amarillo de M3). Recompilar > parchear binario.
+- Parchear: saltar verificación + **menú de arranque** (pmOS / mainline / Android).
+  Mantiene display + fastboot + USB del LK de MTK.
+- Reflashear `lk` por mtkclient. Si algo va mal → restaurar `lk.bin` golden por BROM.
+
+### 🔀 Dual-boot pmOS + Android: lo que YA permite el LK (sin parchear)
+
+**Hallazgo clave (strings de nuestro lk.bin):** el LK del krillin **ya arranca
+dos targets de forma nativa** — `boot` (normal) y `recovery` (con la tecla de
+recovery, o un bit en la RTC). Código `mboot_android_load_recoveryimg_hdr`
+presente. Eso es un **dual-boot gratis, sin tocar el bootloader**:
+- `boot` (0x1d80000, 20 MB) → pmOS (o mainline)
+- `recovery` (0x3180000, 20 MB) → boot.img del segundo sistema (Android, u otro pmOS/mainline)
+- **Cambiar de sistema**: mantener la combinación de recovery al encender, **o**
+  desde el SO poner el bit de modo en la RTC (`reboot recovery`) → arranque por
+  software sin teclas (ideal para desarrollo headless).
+
+**El menú NO es el trabajo difícil — el reparto de almacenamiento sí.** Cada SO
+necesita su rootfs/system. Layout actual del krillin:
+`android/p5` (1 GB, root de pmOS ahora), `cache/p6` (700 MB), `usrdata/p7` (5.7 GB).
+Para convivir pmOS + Android hay que planear particiones (p.ej. recortar p7 para
+una segunda raíz, o Android en sus particiones nativas + raíz pmOS en una porción).
+mtkclient puede reparticionar (GPT/scatter). **Esto es el diseño real a pensar.**
+
+➡️ **Recomendación**: empezar por el dual-boot de dos slots nativo (riesgo CERO en
+el LK) + resolver el layout de almacenamiento; dejar el menú custom en LK (4a)
+para cuando los dos slots se queden cortos.
 
 **4b. U-Boot mt6582 (esfuerzo alto, elegante a largo plazo)**
 - `mediatek-mainline/u-boot`, defconfig `mt6582_prestigio_pmt5008_3g` (nuestro
@@ -132,6 +158,14 @@ mtkclient, con BROM como red de seguridad:
 > devuelven el desarrollo sin miedo YA), el bootloader como Capa 4 por diversión
 > / multiboot cuando el resto esté rodado. El 4a (menú en el LK) da el mejor
 > retorno: calidad de vida real con riesgo acotado por BROM.
+
+## ✅ Activos que YA tenemos en la Pi (cpcd@192.168.0.123)
+- **mtkclient instalado** (`~/mtkclient`, con `mt6582_payload.bin` y DA legacy).
+- **`~/firmware-stock/lk.bin`** (LK stock) + **`~/firmware-stock/boot.img`** (Android stock).
+- **`~/pmos-artifacts/`**: `boot-pstore.img` (pmOS 3.10 con DEVMEM), `boot-clean.img`,
+  `boot-debug.img`, `config-bq-krillin.armv7`, `zeros4m.img`.
+- Árbol mainline en `~/mainline/linux-7.0.12` (hasta v25) + driver USB M2b.
+- ⚠️ Falta el **backup golden completo** (preloader/seccfg/nvram/proinfo) — Capa 0.
 
 ## 🎯 Próximos pasos concretos (cuando tengas el teléfono + un Linux)
 1. mtkclient + reglas udev en la Pi (o cualquier Linux).
