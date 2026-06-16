@@ -23,12 +23,18 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 
 ## 2. Entrar en modo BROM/Preloader (MT6582)
-El SoC enumera como `0e8d:2000` (preloader) o `0e8d:0003` (brom). Para cazarlo:
-1. Teléfono **apagado** (o batería fuera).
-2. En la Pi, lanzar el comando mtkclient **primero** (queda esperando "Waiting for device").
-3. Conectar el USB **manteniendo Vol−** (algunos krillin: Vol+; probar ambos).
-   Con batería fuera, a veces basta enchufar. mtkclient imprime
-   `Device detected :)` / `Preloader - Detected regular mode!`.
+⚠️ **CLAVE en la Raspberry Pi 5 (todo xhci/RP1):** ejecutar mtkclient de forma
+**INTERACTIVA** en una terminal (NO en background/automático) y reconectar el
+móvil **justo cuando lo pida**. Si no, da `Couldn't get device configuration` en
+bucle (no es hardware: es que nadie reconecta en la señal).
+1. Teléfono **apagado** / batería fuera.
+2. Lanzar el comando mtkclient → imprime
+   `Waiting for PreLoader VCOM, please reconnect mobile/iot device to brom mode`.
+3. EN ESE MOMENTO: enchufar el USB **manteniendo Vol−** (probar Vol+ si no).
+   → `Device detected :)` / `Preloader - Detected regular mode!` / `BROM mode detected`.
+4. Comprobado: enumera `0e8d:0003` (brom) o `2000` (preloader); ambos valen si
+   reconectas en la señal. (cdc_acm/option/usbserial blacklisted + ModemManager
+   parado ayuda, pero lo decisivo es el reconnect-on-cue.)
 
 ## 3. Confirmar que el secure boot está APAGADO (efuse sin quemar)
 ```sh
@@ -37,28 +43,44 @@ $MTK gettargetconfig
 # (Si saliera SBC enabled, habría que usar exploits kamakiri — NO debería ser el caso.)
 ```
 
-## 4. ⭐ Backup golden (HACER ANTES DE TOCAR NADA)
-```sh
-mkdir -p ~/golden && cd ~/golden
-# críticos e irremplazables (por nombre):
-$MTK r preloader preloader.bin
-$MTK r seccfg    seccfg.bin
-$MTK r lk        lk.bin          # = uboot; ojo: a veces la partición se llama 'uboot'
-$MTK r nvram     nvram.bin
-$MTK r proinfo   proinfo.bin
-$MTK r protect1  protect1.bin ; $MTK r protect2 protect2.bin
-$MTK r boot      boot.bin ; $MTK r recovery recovery.bin
-# y/o el flash entero (lento pero total):  $MTK rf full_flash.bin
-$MTK printgpt    # ver nombres/offsets reales de las particiones
-```
-**Guardar `~/golden/` fuera del teléfono** (scp a Mac, y/o subir los pequeños al
-repo: preloader/seccfg/nvram/proinfo/lk son KB–MB).
+## 4. ⭐ Backup golden — PROCEDIMIENTO REAL (probado 2026-06-16)
+En el krillin, mtkclient **no puede leer la GPT/particiones** (bug del MBR
+MT6582 → "Couldn't get gpt"). Así que `rl`/`r <nombre>` no sirven; cae a volcar
+el **flash entero** (área de usuario, 7.5 GB). Pero **las particiones críticas
+están todas en los primeros ~90 MB**, así que:
 
-> ⚠️ **Gotcha MT6582**: la tabla MBR reporta tamaños imposibles (data ~2 PB,
-> entrada extendida 0xFFFFFFFF). `rl` (leer TODAS) puede fallar en `userdata`.
-> Workaround: leer por nombre las que importan, o por offset/longitud con `ro`/`rs`
-> usando el mapa del `/proc/dumchar_info` (abajo). Para escribir kernels nunca
-> tocamos userdata, así que no nos afecta.
+```sh
+# 1) lanzar el volcado (cae a flash completo) y CORTAR con Ctrl+C tras ~700 MB:
+$MTK rl ~/golden --skip usrdata,userdata,cache,android,system,data
+#    → "No partition table detected, reading flash instead to ~/golden/flash.bin"
+#    deja que pase de ~0x6000000 (96 MB) y pulsa Ctrl+C. (~700 MB sobra.)
+
+# 2) recortar las particiones del flash.bin con dd. ⚠️ CALIBRACIÓN DE OFFSETS:
+#    los offsets del /proc/dumchar_info NO coinciden con el volcado:
+#    real_offset = dumchar_offset + 0xB80000  (verificado por firmas)
+cd ~/golden
+c() { dd if=flash.bin of="$1.img" skip="$2" count="$3" iflag=skip_bytes,count_bytes bs=4M status=none; }
+c proinfo   13107200  3145728     # dumchar 0x100000  +0xB80000
+c nvram     16252928  5242880     # dumchar 0x400000
+c protect_f 21495808  10485760    # dumchar 0x900000
+c protect_s 31981568  10485760    # dumchar 0x1300000
+c seccfg    42467328  131072      # dumchar 0x1d00000  → AND_SECCFG
+c uboot     42598400  393216      # dumchar 0x1d20000  → 88168858 "LK"
+c boot      42991616  20971520    # dumchar 0x1d80000  → ANDROID!
+c recovery  63963136  20971520    # dumchar 0x3180000  → ANDROID!
+rm -f flash.bin   # recuperar los 700 MB
+```
+Verificar firmas: `head -c8 boot.img|od -c` → `ANDROID!`; seccfg → `AND_SECCFG`.
+**El `preloader` NO está en este volcado** (vive en eMMC boot0, no en el área de
+usuario) — pero es la partición que NUNCA se toca, y tenemos `lk.bin` stock.
+
+**Guardar `~/golden/` fuera de la Pi** (scp al Mac → `artifacts/golden/`).
+🔒 **NO subir `nvram`/`proinfo` a GitHub** (llevan MAC/IMEI únicos; el `.gitignore`
+ya excluye `*.img`).
+
+> Nota de scripting: la aritmética `$(())` y las llaves `{}` se rompen al pasar
+> por zsh(Mac)→ssh→bash. Usar heredoc `<<'EOF'` + offsets en **decimal** +
+> `iflag=skip_bytes,count_bytes` (nada de cálculo de bloques).
 
 ## 5. Desbloquear el bootloader (seccfg)
 ```sh
