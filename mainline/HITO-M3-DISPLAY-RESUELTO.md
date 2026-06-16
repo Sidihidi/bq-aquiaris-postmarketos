@@ -57,7 +57,16 @@ Tabla CLRFMT del OVL MT6582 (de rebuild310.log): **1=rgb565, 2=argb8888, 3=pargb
   `<0>`) tras `sleep(15)` (que el ruido de initcalls del kernel no lo pise) y luego
   `sleep` largo sin imprimir.
 
-## Pendiente
-Hacerlo permanente: mover la reprogramación del OVL a un quirk de plataforma en el
-kernel (o al init real del rootfs), para arrancar limpio sin el init de diagnóstico
-ni los ~15 s de amarillo inicial.
+## CONSOLIDADO EN EL KERNEL (2026-06-16)
+La reprogramación del OVL ya NO la hace el init de diagnóstico: vive en el kernel
+como `drivers/video/fbdev/mt6582-dispfix.c` (un `late_initcall` que comprueba
+`of_machine_is_compatible("bq,krillin")` y reprograma el OVL a RGB565 con los
+registros de arriba). Integrado en `drivers/video/fbdev/Makefile`
+(`obj-$(CONFIG_FB_SIMPLE) += mt6582-dispfix.o`).
+**Verificado**: mainline arranca con pantalla LEGIBLE usando un init que NO toca el
+display (tiny_init_m2c.c, solo levanta usb0). Sin `sleep(15)` ni amarillo prolongado.
+
+## Pendiente (futuro)
+Sustituir el `late_initcall` (que escribe registros con direcciones físicas
+hardcodeadas) por un driver de display real (DRM/fbdev) para el MT6582 cuando se
+aborde. Por ahora el fixup es la solución estable.
