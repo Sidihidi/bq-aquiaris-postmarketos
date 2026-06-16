@@ -118,35 +118,52 @@ static void mt6582_phy_slew_cal(struct mt6582_glue *g)
 	phy_clr8(g, 0x15, 0x80);
 }
 
-/* Power on the PHY in DEVICE mode (ported from usb_phy_poweron) */
+/* Power on the PHY in DEVICE mode (full port of downstream usb_phy_recover) */
 static void mt6582_phy_poweron(struct mt6582_glue *g)
 {
-	dev_info(g->dev, "mt6582-musb: PHY poweron START\n");
+	dev_info(g->dev, "mt6582-musb: PHY poweron START (v16)\n");
 	/*
 	 * v13: do NOT poke UNIVPLL_CON0 / PERI_PDN0 / PERICFG reset here.
 	 * The LK bootloader already leaves the USB MAC+PHY clocked (it uses USB
 	 * for fastboot) and clk_ignore_unused keeps them on -- same as the eMMC
 	 * pins/clocks. The earlier clock/reset pokes were disturbing the MSDC
 	 * (eMMC) clock, breaking root mount ("Can't find ext4 filesystem").
-	 * If USB regresses, re-add these surgically (likely PERI_PDN0_CLR only).
 	 *
-	 *   writel(readl(g->apmixed + UNIVPLL_CON0_OFF) | UNIVPLL_USB48M, ...);
-	 *   writel(PERI_PDN0_USB, g->pericfg + PERI_PDN0_CLR_OFF);
-	 *   PERICFG[0] bit29 reset pulse;
+	 * v16: the previous PHY init was the SHORT usb_phy_poweron() and left the
+	 * D+/D- pull-downs and the transceiver "force" overrides ASSERTED, so the
+	 * D+ pull-up from MUSB_POWER.SOFTCONN was fighting an active pull-down and
+	 * the host never saw a connect (no bus reset, no enumeration). This is now
+	 * a full port of the downstream usb_phy_recover() device-mode sequence
+	 * (clock handling intentionally omitted, per v13).
 	 */
 	udelay(50);
+	phy_clr8(g, 0x1d, 0x10);	/* PUPD_BIST_EN = 0 */
 	phy_clr8(g, 0x6b, 0x04);	/* force_uart_en = 0 -> USB function */
 	phy_clr8(g, 0x6e, 0x01);	/* RG_UART_EN = 0 */
-	phy_clr8(g, 0x1a, 0x80);	/* RG_USB20_BC11_SW_EN = 0 */
-	phy_clr8(g, 0x22, 0x03);	/* DP/DM 100K pull-down off */
 	phy_clr8(g, 0x6a, 0x04);	/* release force suspendm */
+
+	/* release D+/D- pull-downs and all transceiver force-overrides */
+	phy_clr8(g, 0x68, 0x40);	/* RG_DPPULLDOWN = 0  <- was holding D+ low */
+	phy_clr8(g, 0x68, 0x80);	/* RG_DMPULLDOWN = 0 */
+	phy_clr8(g, 0x68, 0x30);	/* RG_XCVRSEL = 0 */
+	phy_clr8(g, 0x68, 0x04);	/* RG_TERMSEL = 0 */
+	phy_clr8(g, 0x69, 0x3c);	/* RG_DATAIN[3:0] = 0 */
+	phy_clr8(g, 0x6a, 0x10);	/* force_dp_pulldown = 0 */
+	phy_clr8(g, 0x6a, 0x20);	/* force_dm_pulldown = 0 */
+	phy_clr8(g, 0x6a, 0x08);	/* force_xcvrsel = 0 */
+	phy_clr8(g, 0x6a, 0x02);	/* force_termsel = 0 */
+	phy_clr8(g, 0x6a, 0x80);	/* force_datain = 0 */
+
+	phy_clr8(g, 0x1a, 0x80);	/* RG_USB20_BC11_SW_EN = 0 */
+	phy_set8(g, 0x1a, 0x10);	/* RG_USB20_OTG_VBUSSCMP_EN = 1 (session detect) */
 	udelay(800);
+
 	phy_clr8(g, 0x6c, 0x10);	/* force enter DEVICE mode */
 	phy_set8(g, 0x6c, 0x2e);
 	phy_set8(g, 0x6d, 0x3e);
 
 	mt6582_phy_slew_cal(g);
-	dev_info(g->dev, "MT6582 USB PHY powered on (device mode)\n");
+	dev_info(g->dev, "MT6582 USB PHY powered on (device mode, v16)\n");
 }
 
 /* ---- musb core glue (copied from mediatek.c, PIO, peripheral) ---- */
@@ -174,23 +191,29 @@ static irqreturn_t generic_interrupt(int irq, void *__hci)
 
 static irqreturn_t mt6582_musb_interrupt(int irq, void *dev_id)
 {
-	irqreturn_t retval = IRQ_NONE;
 	struct musb *musb = (struct musb *)dev_id;
 	u32 l1_ints;
 
+	/*
+	 * v15: the MT6582 DOES have the MTK L1 interrupt aggregator -- USB_L1INTS/
+	 * L1INTM at 0x00a0/0x00a4, confirmed in downstream mach-mt6582 mt_musb_reg.h
+	 * (TX=bit0 RX=bit1 USBCOM=bit2 DMA=bit3 IDDIG=bit9). The real bug was in
+	 * init: it unmasked L1INTM=0x1ff, enabling L1 sources we never service
+	 * (DMA + the 0x1f0 group). One fired, INTRUSB/INTRTX/INTRRX were all 0, the
+	 * ISR returned IRQ_NONE, and the level GIC line stayed high ->
+	 * "irq 26: nobody cared" -> "Disabling IRQ #26", killing enumeration.
+	 *
+	 * Mirror the downstream peripheral ISR: only TX/RX/USBCOM reach the core
+	 * handler. generic_interrupt() reads and write-1-clears INTRUSB/INTRTX/
+	 * INTRRX, which is what de-asserts the line (PIO -> no DMA path; IDDIG is
+	 * host/OTG only and stays masked).
+	 */
 	l1_ints = musb_readl(musb->mregs, USB_L1INTS) &
 		  musb_readl(musb->mregs, USB_L1INTM);
+	if (l1_ints & (TX_INT_STATUS | RX_INT_STATUS | USBCOM_INT_STATUS))
+		return generic_interrupt(irq, musb);
 
-	/*
-	 * The MT6582 L1-interrupt bit layout differs from the newer SoCs that
-	 * mediatek.c targets (downstream uses L1INTM=0x105, bits 0/2/8). Rather
-	 * than assume exact bit positions, dispatch to the standard musb ISR on
-	 * ANY pending L1 source so EP0/SETUP gets serviced.
-	 */
-	if (l1_ints)
-		retval = generic_interrupt(irq, musb);
-
-	return retval;
+	return IRQ_NONE;
 }
 
 static u32 mt6582_busctl_offset(u8 epnum, u16 offset)
@@ -252,11 +275,14 @@ static int mt6582_musb_init(struct musb *musb)
 	mt6582_phy_poweron(glue);
 
 	/*
-	 * Unmask the L1 interrupt broadly. The exact MT6582 L1 layout is not the
-	 * mediatek.c one (downstream uses 0x105); enable bits 0..8 so the GIC
-	 * line actually asserts for TX/RX/USBCOM regardless of bit position.
+	 * v15: unmask ONLY the L1 sources we actually service. MT6582 L1 layout
+	 * (downstream mt_musb_reg.h): TX=bit0 RX=bit1 USBCOM=bit2 DMA=bit3
+	 * IDDIG=bit9. The old 0x1ff also enabled DMA + bits 4..8, which fired and
+	 * wedged the (level) GIC line because nothing cleared them -> "nobody
+	 * cared". PIO peripheral only needs TX/RX/USBCOM.
 	 */
-	musb_writel(musb->mregs, USB_L1INTM, 0x1ff);
+	musb_writel(musb->mregs, USB_L1INTM,
+		    TX_INT_STATUS | RX_INT_STATUS | USBCOM_INT_STATUS);
 	return 0;
 }
 
