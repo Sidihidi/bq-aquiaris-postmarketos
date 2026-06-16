@@ -134,3 +134,18 @@
 		status = "okay";
 	};
 };
+
+&{/soc} {
+	i2c0: i2c@11007000 {
+		compatible = "mediatek,mt6577-i2c";
+		reg = <0x11007000 0x70>, <0x11000200 0x80>;
+		interrupts = <GIC_SPI 44 IRQ_TYPE_LEVEL_LOW>;
+		clocks = <&system_clk>, <&system_clk>;
+		clock-names = "main", "dma";
+		clock-div = <1>;
+		clock-frequency = <100000>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		status = "okay";
+	};
+};
