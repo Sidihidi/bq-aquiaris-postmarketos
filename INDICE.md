@@ -12,6 +12,7 @@
 | **Bootloader** | 🔓 **DESBLOQUEADO** (`unlocked: yes`, `secure: no`). Kernels custom por fastboot sin TWRP/ROM. El seccfg NUNCA fue el bloqueo. |
 | **Red de seguridad (golden backup)** | ✅ HECHO — `artifacts/golden/` (Mac) y `~/golden/` (Pi): boot, recovery, seccfg, lk, nvram, proinfo, protect. Restaurar: `mtk w <part> <part>.img`. |
 | **pmOS (sistema estable)** | 🔄 Reinstalando — Android stock sobrescribió la raíz en p5. Plan: re-flashear boot + re-transferir `pmos-root.img` a p5 por nc. |
+| **TWRP recovery** | ✅ **INSTALADO Y PERMANENTE** — TWRP 3.0.2.0 en `recovery`. Android ya no lo restaura (`recovery-from-boot.p` desactivado). Primer peldaño del dual-boot: recovery=TWRP. |
 | **mainline (Linux 7.0.12)** | 🏆 M1 (arranca+consola) y 🏆 M2 (eMMC+ext4) conseguidos. 🔧 M2b (driver USB MUSB propio) escrito, compila, llegó a v25. Pendiente: probar USB + M3 display. |
 | **Herramienta de bajo nivel** | mtkclient funciona en la Pi 5 (interactivo, reconectar cuando lo pide). fastboot va fino. |
 
