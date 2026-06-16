@@ -4,3 +4,4 @@ artifacts/*.img
 *.zip
 .claude/
 .DS_Store
+*.bin
