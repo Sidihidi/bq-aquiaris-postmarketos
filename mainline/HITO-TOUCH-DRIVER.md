@@ -41,13 +41,47 @@ Tras power-cycle, `ft5336_touch --raw` capturó un arrastre continuo y limpio:
 ```
 Trayectoria coherente = lectura correcta del panel.
 
-## Pendiente
+## Infraestructura de input: COMPLETA (2026-06-17)
 
-- **Kernel:** `CONFIG_INPUT_EVDEV=y` + `CONFIG_INPUT_UINPUT=y` (ahora no existen
-  `/dev/input/` ni `/dev/uinput`) → recompilar zImage + reflashear.
-- Ejecutar `ft5336_touch` (modo uinput) y validar con `evtest`.
-- Servicio OpenRC para lanzarlo al arranque (tras `touch-power`).
-- Futuro: driver `edt-ft5x06` en DT (reg 0x38, `vin-supply=&vgp1`, `reset-gpios`,
-  IRQ EINT117) — requiere primero arreglar lecturas i2c >8 bytes (apdma).
+- `CONFIG_INPUT_EVDEV=y` ya estaba built-in; **`CONFIG_INPUT_UINPUT` faltaba**.
+- `CONFIG_TOUCHSCREEN_EDT_FT5X06=y` ya está compilado (driver nativo disponible).
+- El kernel tiene `CONFIG_MODULES=y`, así que en vez de reflashear (transferir el
+  boot.img de 13.7 MB por la red USB **reinicia el teléfono** — el musb no aguanta
+  esa carga) se compiló **`uinput.ko` como módulo** (=m) contra el MISMO `.config`
+  (el vermagic coincide) y se carga con `insmod` (74 KB, sin reflashear).
+- Con uinput cargado, `ft5336_touch` crea el dispositivo:
+  `/dev/input/event0`, `Name="ft5336"`, `PROP=INPUT_PROP_DIRECT`, EV=SYN|KEY|ABS.
+  `evtest` lo reconoce correctamente.
+
+## ⚠️ Bloqueante actual: arranque/wake FIABLE del chip
+
+El sensado del FT5336 **no arranca de forma determinista** con power/reset manual
+desde userspace. El chip queda en estados indefinidos:
+- `0xFF` en los regs de toque = dormido/monitor (no despierta al tocar si está
+  atascado, porque no atendemos la línea INT).
+- `0x00` en los regs = estado de reset indefinido (mi daemon lo malinterpretaba
+  como toque en (0,0); corregido con el filtro `st!=0xFF && evt∈{0,2} && (x|y)`).
+- datos reales = solo se logró tras ciertos power-cycles "con suerte" y tras un
+  **reboot** completo (el bootloader deja el GPIO de reset en buen estado).
+
+Causa raíz: el **reset por GPIO115 no es fiable** — los `devmem 0x10005474/78`
+dan readbacks raros (`0x5`/`0xd`), señal de que no controlan bien el pin (registros
+SET/CLR mal identificados o polaridad incorrecta). Los power-cycles manuales con ese
+reset dudoso DEGRADAN el chip; solo el reboot lo recupera.
+
+**Pendiente (siguiente fase) — la "forma correcta":**
+1. Identificar bien GPIO115 (registros/polaridad del GPIO MT6582) para un reset
+   fiable, o definirlo en el DT (`reset-gpios`).
+2. Atender la línea **INT (EINT117)** (o hacer polling del pin) para sincronizar.
+3. Idealmente: nodo DT **`edt-ft5x06`** (`reg=0x38`, `vin-supply=&vgp1`,
+   `reset-gpios`, `interrupts=EINT117`) → el driver del kernel hace reset+INT+lectura
+   bien. Requiere antes **arreglar el apdma del i2c-mt65xx** para lecturas >8 bytes
+   (el edt-ft5x06 lee 33 bytes de una vez).
+
+## Lo que SÍ está probado
+
+Cuando el chip está en buen estado (post-reboot), el daemon lee y decodifica un
+arrastre continuo correcto: `(85,575)→…→(235,320)`, ~50 Hz, 0 timeouts. El pipeline
+I2C→protocolo→uinput→evtest está completo y validado salvo el wake fiable.
 
 Ver: `HITO-TOUCH-POWER-SERVICE.md`, `HITO-I2C-TOUCH.md`.
