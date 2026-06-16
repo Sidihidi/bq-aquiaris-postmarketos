@@ -49,3 +49,17 @@ dejó el pwrap inicializado.
 
 Y para el IRQ del touch (EINT 117): portar un controlador EINT MT6582 mínimo, o parchear
 edt-ft5x06 a polling.
+
+## ★ ACTUALIZACIÓN: pwrap + VGP1 validados — EL TOUCH ESTÁ VIVO
+- **pwrap MT6582 funciona** (poke con `tools/pwrap_poke.c`): mmap `PWRAP_BASE=0x1000D000`,
+  secuencia wacs2 (CMD@+0x9C, RDATA@+0xA0, VLDCLR@+0xA4; `cmd=(w<<31)|((adr>>1)<<16)|wdata`;
+  FSM idle=0/wfvldclr=6 en bits16-18). El LK deja el pwrap listo. **CID MT6323 leído = 0x2023.**
+- **VGP1 = DIGLDO_CON7 (reg PMIC `0x050A`), bit 15** (de mainline mt6323-regulator.c).
+  `pwrap_poke w 0x050A 0x8000` → **el touch aparece en i2cdetect (0x38) y `i2cget -y 0 0x38`
+  devuelve `0x5a`** = panel-ID Truly (= firmware downstream "Truly0x5a"). ¡El FT5336 está
+  encendido y respondiendo!
+- **Pendiente fino:** la lectura write-then-read (poner reg + leer) da timeout = *repeated-start*
+  del i2c-mt65xx en MT6582. Afinar (quirk I2C / clock). Luego EINT117 + nodo edt-ft5x06, y
+  llevar pwrap+mt6323 al kernel (DT) en vez del poke. Reset = GPIO115 (ya high).
+- Validado de punta a punta: I2C → GPIO → pwrap → PMIC → power → touch responde. El muro
+  principal del touch (alimentación) está SUPERADO.
