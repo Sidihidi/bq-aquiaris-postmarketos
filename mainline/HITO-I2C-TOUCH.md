@@ -87,3 +87,15 @@ es que el i2c rompa la red; es timing; esperar o hacer el up de usb0 robusto).
 
 **Siguiente (driver-level)**: nodo `edt-ft5x06` (DT) + IRQ EINT117 (portar EINT o polling)
 + pwrap/mt6323 al kernel (regulador VGP1 vin-supply) → eventos /dev/input → GUI.
+
+## Power VGP1: NO por late_initcall a pelo (rompe el boot)
+Probado `tools/mt6582-pmic-fixup.c` (late_initcall que enciende VGP1 vía pwrap): Alpine
+arranca y usb0 sube, pero **sshd NO arranca** (OpenRC se atasca antes; revertido → sshd
+vuelve OK). El busy-wait del pwrap en un initcall síncrono interfiere con el boot.
+**Formas válidas de encender VGP1:**
+1. **poke userspace** (suficiente ahora): un servicio Alpine `local.d` que ejecute
+   `pwrap_poke w 0x050A 0x8000` tras la red. No toca el boot del kernel → seguro y persistente.
+2. **driver completo** (lo correcto/upstream): pwrap(mt6582)+mt6323+regulator en el DT;
+   el `edt-ft5x06` pide VGP1 con `vin-supply` → encendido ordenado por el regulator framework.
+`mt6582-pmic-fixup.c` queda como referencia de la secuencia wacs2 en C-kernel (base para
+el driver), pero NO debe usarse como late_initcall.
