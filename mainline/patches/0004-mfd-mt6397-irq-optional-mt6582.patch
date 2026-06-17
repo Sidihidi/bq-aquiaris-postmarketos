@@ -1,0 +1,24 @@
+--- /tmp/mt6397.c.bak	2026-06-17 13:01:11.052584049 +0100
++++ drivers/mfd/mt6397-core.c	2026-06-17 13:01:11.072149687 +0100
+@@ -378,13 +378,14 @@
+ 
+ 	platform_set_drvdata(pdev, pmic);
+ 
+-	pmic->irq = platform_get_irq(pdev, 0);
+-	if (pmic->irq <= 0)
+-		return pmic->irq;
+-
+-	ret = pmic_core->irq_init(pmic);
+-	if (ret)
+-		return ret;
++	/* krillin/MT6582: la IRQ del PMIC no esta cableada en el DT; no la
++	 * necesitamos para reguladores/AUXADC (polling) -> IRQ opcional. */
++	pmic->irq = platform_get_irq_optional(pdev, 0);
++	if (pmic->irq > 0) {
++		ret = pmic_core->irq_init(pmic);
++		if (ret)
++			return ret;
++	}
+ 
+ 	ret = devm_mfd_add_devices(&pdev->dev, PLATFORM_DEVID_NONE,
+ 				   pmic_core->cells, pmic_core->cell_size,

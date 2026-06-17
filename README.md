@@ -31,8 +31,9 @@ sesiones/máquinas, [TRASPASO-SESION.md](TRASPASO-SESION.md).
 | **Táctil** (FT5336) | ✅ | VGP1 (PMIC vía pwrap) + I2C0@0x38 + uinput → `/dev/input/event0`; reset GPIO115 fiable |
 | **GUI X11 táctil** | ✅ | Xorg fbdev + jwm + matchbox-keyboard — **fluido**, al dedo |
 | **Carga por USB** | ✅ | driver userspace del **FAN5405** (I2C0@0x6a): 4.20V/800mA + watchdog |
-| Batería % | ⬜ | falta el AUXADC para leer VBAT (siguiente) |
-| WiFi / Audio / GPU / Módem | ⬜ | ver [ROADMAP-DRIVERS.md](ROADMAP-DRIVERS.md) |
+| **PMIC MT6323** (hub) | ✅ | pwrap (`mediatek,mt6582-pwrap`) + MFD + **31 reguladores** (vgp1@2.8V). [HITO](mainline/HITO-PMIC-MT6323.md) |
+| Batería % | ⬜ | AUXADC (BATSNS ch7) — ya factible vía el hub PMIC |
+| WiFi / Audio / GPU / Módem | ⬜ | energía ya disponible (VCN33_WIFI, VA…); ver [ROADMAP-DRIVERS.md](ROADMAP-DRIVERS.md) |
 
 ### Vía postmarketOS (kernel 3.10)
 Arranca, consola + SSH por USB, **GUI Sxmo (X11)**, **táctil**, **WiFi**. Sin GPU
