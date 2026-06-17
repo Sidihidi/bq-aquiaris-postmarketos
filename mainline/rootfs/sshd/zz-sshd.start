@@ -1,0 +1,7 @@
+#!/bin/sh
+# -> /etc/local.d/zz-sshd.start  (chmod +x)
+# Red de seguridad: asegura sshd al final del boot, DESPUES de que usb0.start
+# levante la interfaz gadget (orden alfabetico: usb0.start corre antes que zz-*).
+# El arranque normal del servicio sshd puede no completarse al boot por la
+# dependencia "need net" frente a la interfaz USB-gadget asincrona.
+rc-service sshd status >/dev/null 2>&1 || rc-service sshd start
