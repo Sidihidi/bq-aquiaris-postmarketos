@@ -28,7 +28,8 @@
 4. **[README.md](README.md)** — documentación técnica completa del port pmOS (kernel 3.10).
 5. **[ESTRATEGIA-CUSTOM-BOOTLOADER.md](ESTRATEGIA-CUSTOM-BOOTLOADER.md)** — root/unlock/BROM, dual-boot LK, bootloader propio.
 6. **[GUIA-MTKCLIENT.md](GUIA-MTKCLIENT.md)** — BROM paso a paso, golden backup, seccfg, flasheo.
-7. **[mainline/README.md](mainline/README.md)** — compilar/flashear/depurar el kernel mainline.
+7. **[ROADMAP-DRIVERS.md](ROADMAP-DRIVERS.md)** — 🗺️ roadmap priorizado de drivers (PMIC/batería/carga, GUI X11, ruta a Phosh: simpledrm→lima→wlroots, WiFi, audio, EINT, sensores, módem) con dependencias, fases y quick-wins. Síntesis de 12 informes de investigación.
+8. **[mainline/README.md](mainline/README.md)** — compilar/flashear/depurar el kernel mainline.
 8. **[mainline/HITO-M2b-WIP.md](mainline/HITO-M2b-WIP.md)** — driver USB MUSB del MT6582 (WIP).
 
 ## 🗂️ CARPETAS
