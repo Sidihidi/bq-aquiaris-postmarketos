@@ -5,6 +5,15 @@
 > el reemplazo libre de SP Flash Tool: habla con el BootROM/Preloader del SoC, así
 > que funciona **pase lo que pase** con el sistema instalado.
 
+> ⚠️ **CORRECCIÓN 2026-06-17 (importante):** en este equipo (DA legacy) los comandos
+> `w <particion>` y `wf` **NO sirven**: `w` necesita la GPT (que no se lee) y **`wf`
+> IGNORA `--offset` y escribe en el SECTOR 0** (machaca MBR/proinfo). **Para escribir
+> una partición usar `wo <offset_hex> <length_hex> <fichero>`** (= `writeflash(addr)`).
+> Offsets HEX: boot=`0x2900000`, uboot(LK)=`0x28A0000`, seccfg=`0x2880000`. Ej.:
+> `sudo ~/mtkclient/venv/bin/python ~/mtkclient/mtk.py wo 0x2900000 0xD18800 boot.img`.
+> Antes: `sudo systemctl stop ModemManager` y `~/mtkclient/hwparam.json` de `cpcd` (no root).
+> Ver `mainline/HITO-PMIC-MT6323.md`. (Los ejemplos `w boot`/`w lk` de abajo quedan obsoletos.)
+
 ## 0. Atajos
 
 ```sh
