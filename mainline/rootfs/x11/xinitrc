@@ -1,0 +1,5 @@
+#!/bin/sh
+# ~/.xinitrc — escritorio minimo tactil (jwm + teclado en pantalla) para el BQ E4.5
+xsetroot -solid "#2a4d69" 2>/dev/null
+matchbox-keyboard &
+exec jwm
