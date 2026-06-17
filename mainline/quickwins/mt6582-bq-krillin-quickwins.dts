@@ -1,0 +1,278 @@
+// SPDX-License-Identifier: GPL-2.0+
+/*
+ * BQ Aquaris E4.5 (krillin) — MT6582
+ * Primer intento mainline: simple-framebuffer sobre el FB que deja el LK
+ * (panel hx8389 qHD DSI modo video, se auto-refresca) + ramoops post-mortem.
+ * FB fisico 0xBF400000 (region 12 MB reservada, vista en /proc/iomem del
+ * kernel downstream 3.10). stride 2176 = 544*4.
+ */
+
+/dts-v1/;
+#include "mt6582.dtsi"
+
+/ {
+	model = "BQ Aquaris E4.5";
+	compatible = "bq,krillin", "mediatek,mt6582";
+
+	aliases {
+		serial0 = &uart0;
+	};
+
+	chosen {
+		stdout-path = "serial0:921600n8";
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		bootargs = "earlycon=mtk8250,mmio32,0x11002000 console=ttyS0,921600n8 panic=15 clk_ignore_unused blkdevparts=mmcblk0:512K@512K(ebr1),10240K@9216K(protect_f),10240K@19456K(protect_s),6144K@71168K(sec_ro),1048576K@91136K(android),716800K@1140736K(cache),-@1856512K(usrdata) initcall_debug ignore_loglevel";
+
+		framebuffer0: framebuffer@bf400000 {
+			compatible = "simple-framebuffer";
+			reg = <0xbf400000 0x200000>;
+			width = <540>;
+			height = <960>;
+			stride = <1088>;
+			format = "r5g6b5";
+		};
+	};
+
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x80000000 0x40000000>;
+	};
+
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		/* region del framebuffer del LK (mtkfb.0 en downstream) */
+		fb_region: framebuffer-region@bf400000 {
+			reg = <0xbf400000 0xb00000>;
+			no-map;
+		};
+
+		/* ultimo MB de la region reservada: logs que sobreviven al reboot */
+		ramoops@bf300000 {
+			compatible = "ramoops";
+			reg = <0xbf300000 0x100000>;
+			record-size = <0x20000>;
+			console-size = <0x80000>;
+			pmsg-size = <0x20000>;
+		};
+	};
+};
+
+&uart0 {
+	status = "okay";
+};
+
+/ {
+	/* relojes fijos para el MSDC: el LK los deja encendidos
+	 * (clk_ignore_unused evita que se apaguen) */
+
+	reg_vmmc: regulator-vmmc {
+		compatible = "regulator-fixed";
+		regulator-name = "vmmc";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-always-on;
+	};
+
+	reg_vqmmc: regulator-vqmmc {
+		compatible = "regulator-fixed";
+		regulator-name = "vqmmc";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		regulator-always-on;
+	};
+
+	msdc_src: msdc-src-clk {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <200000000>;
+	};
+	msdc_hclk: msdc-hclk-clk {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <200000000>;
+	};
+};
+
+&{/soc} {
+	mmc0: mmc@11230000 {
+		compatible = "mediatek,mt8135-mmc";
+		reg = <0x11230000 0x1000>;
+		interrupts = <GIC_SPI 39 IRQ_TYPE_LEVEL_LOW>;
+		clocks = <&msdc_src>, <&msdc_hclk>;
+		clock-names = "source", "hclk";
+		vmmc-supply = <&reg_vmmc>;
+		vqmmc-supply = <&reg_vqmmc>;
+		bus-width = <8>;
+		max-frequency = <12000000>;
+		non-removable;
+		cap-mmc-highspeed;
+		no-mmc-hs400;
+		no-mmc-hs200;
+		no-sd;
+		no-sdio;
+		status = "okay";
+	};
+};
+
+/* M2b: USB MUSB en modo gadget (peripheral). MAC 0x11200000 + SIF 0x11210000.
+ * IRQ GIC_SPI 32 (downstream: GIC_PRIVATE_SIGNALS+32 = hwirq 64). Polaridad
+ * LEVEL_LOW como el mmc que ya funciona. Clocks/PHY los gestiona el driver. */
+&{/soc} {
+	usb0: usb@11200000 {
+		compatible = "mediatek,mt6582-musb";
+		reg = <0x11200000 0x1000>, <0x11210000 0x1000>;
+		reg-names = "mac", "sif";
+		interrupts = <GIC_SPI 32 IRQ_TYPE_LEVEL_LOW>;
+		interrupt-names = "mc";
+		dr_mode = "peripheral";
+		status = "okay";
+	};
+};
+
+&{/soc} {
+	i2c0: i2c@11007000 {
+		compatible = "mediatek,mt6582-i2c";
+		reg = <0x11007000 0x70>, <0x11000200 0x80>;
+		interrupts = <GIC_SPI 44 IRQ_TYPE_LEVEL_LOW>;
+		clocks = <&system_clk>, <&system_clk>;
+		clock-names = "main", "dma";
+		clock-div = <1>;
+		clock-frequency = <100000>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		status = "okay";
+	};
+};
+
+/ {
+	pwrap_clk_spi: pwrap-clk-spi { compatible = "fixed-clock"; #clock-cells = <0>; clock-frequency = <26000000>; };
+	pwrap_clk_wrap: pwrap-clk-wrap { compatible = "fixed-clock"; #clock-cells = <0>; clock-frequency = <26000000>; };
+};
+
+&{/soc} {
+	pwrap: pwrap@1000d000 {
+		compatible = "mediatek,mt6582-pwrap";   /* offsets WACS2 0x9c/a0/a4 coinciden; el LK ya inicializo -> driver salta init */
+		reg = <0x1000d000 0x1000>;
+		reg-names = "pwrap";
+		interrupts = <GIC_SPI 115 IRQ_TYPE_LEVEL_HIGH>;   /* downstream MT6582_PMIC_WRAP_IRQ_ID = GIC_PRIVATE_SIGNALS+115 */
+		clocks = <&pwrap_clk_spi>, <&pwrap_clk_wrap>;
+		clock-names = "spi", "wrap";
+		status = "okay";
+
+		pmic: mt6323 {
+			compatible = "mediatek,mt6323";
+			mt6323regulator: mt6323regulator {
+				compatible = "mediatek,mt6323-regulator";
+				mt6323_vgp1_reg: ldo_vgp1 {
+					regulator-name = "vgp1";
+					regulator-min-microvolt = <1200000>;
+					regulator-max-microvolt = <3300000>;
+					regulator-always-on;   /* alimenta el tactil; always-on para no perderlo */
+				};
+			};
+		};
+	};
+};
+
+/* ---- EINT (interrupciones externas) MT6582 — driver gpio-mt6582-eint ---- */
+&{/soc} {
+	eint: interrupt-controller@1000b000 {
+		compatible = "mediatek,mt6582-eint";
+		reg = <0x1000b000 0x1000>,	/* [0] EINT */
+		      <0x10005000 0x1000>;	/* [1] GPIO */
+		interrupt-controller;
+		#interrupt-cells = <2>;
+		gpio-controller;
+		#gpio-cells = <2>;
+		interrupts = <GIC_SPI 113 IRQ_TYPE_LEVEL_HIGH>;
+	};
+};
+
+/* ---- Keypad MT6582 (matriz): VOLUMEN up/down ----
+ * KPD @0x10011000 (0xF0011000 virt - 0xE0000000), IRQ GIC_SPI 116 EDGE
+ * (downstream MT_KP_IRQ_ID = 32+116). Offsets == mt6779-keypad. */
+/ {
+	kpd_clk: kpd-clk {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <32768>;
+	};
+};
+
+&{/soc} {
+	keypad: keypad@10011000 {
+		compatible = "mediatek,mt6779-keypad";
+		reg = <0x10011000 0x1000>;
+		interrupts = <GIC_SPI 116 IRQ_TYPE_EDGE_FALLING>;
+		clocks = <&kpd_clk>;
+		clock-names = "kpd";
+		keypad,num-rows = <1>;
+		keypad,num-columns = <2>;
+		/* vol up = indice 0, vol down = indice 1 (downstream cust_kpd.h) */
+		linux,keymap = <0x00000073   /* MATRIX_KEY(0,0,KEY_VOLUMEUP=115) */
+				0x00010072>; /* MATRIX_KEY(0,1,KEY_VOLUMEDOWN=114) */
+		wakeup-source;
+		status = "okay";
+	};
+};
+
+/* ============ QUICK WIN #1: BACKLIGHT (DISP_PWM / BLS) ============
+ * DISP_PWM @0x1400A000. PWM_DUTY @+0xA0 controla el brillo (validado en HW).
+ * El BLS ya lo enciende mt6582-dispfix (BLS_EN=0x10001, bit16 PWM_EN).
+ * Driver: pwm-mtk-disp variante mt2701 (regs calzan: enable BIT(16)@0x00,
+ * con0=0xa8, con1=0xac, bls_debug=0xb0). Sin CCF -> fixed-clock stubs. */
+/ {
+	disp_pwm_clk: disp-pwm-clk {
+		compatible = "fixed-clock"; #clock-cells = <0>;
+		clock-frequency = <26000000>;
+	};
+	disp_pwm_mm_clk: disp-pwm-mm-clk {
+		compatible = "fixed-clock"; #clock-cells = <0>;
+		clock-frequency = <26000000>;
+	};
+
+	backlight: backlight {
+		compatible = "pwm-backlight";
+		pwms = <&disp_pwm 0 50000>;	/* periodo 50us ~ 20kHz */
+		brightness-levels = <0 32 64 96 128 160 192 224 255>;
+		default-brightness-level = <6>;
+		power-supply = <&reg_vmmc>;	/* fixed always-on */
+	};
+};
+
+&{/soc} {
+	disp_pwm: pwm@1400a000 {
+		compatible = "mediatek,mt2701-disp-pwm";
+		reg = <0x1400a000 0x1000>;
+		#pwm-cells = <2>;
+		clocks = <&disp_pwm_clk>, <&disp_pwm_mm_clk>;
+		clock-names = "main", "mm";
+		status = "okay";
+	};
+};
+
+/* ============ QUICK WIN #3: SENSORES IIO (accel + ALS) ============
+ * Chips reales (downstream): accel ST LSM330 @0x1D, ALS AMS TMD2772 @0x39.
+ * Drivers mainline st_accel / tsl2772. SIN interrupts (IRQ opcional ->
+ * polling). Lecturas 6B <= 8B = seguras para el i2c DMA-only actual.
+ * mount-matrix dir7 (downstream): 0,-1,0 / -1,0,0 / 0,0,-1. */
+&i2c0 {
+	accel@1d {
+		compatible = "st,lsm330-accel";
+		reg = <0x1d>;
+		mount-matrix = "0", "-1", "0",
+			       "-1", "0", "0",
+			       "0", "0", "-1";
+	};
+
+	light@39 {
+		compatible = "amstaos,tmd2772";
+		reg = <0x39>;
+	};
+};
