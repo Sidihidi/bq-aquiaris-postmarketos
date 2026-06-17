@@ -157,7 +157,7 @@
 
 &{/soc} {
 	pwrap: pwrap@1000d000 {
-		compatible = "mediatek,mt2701-pwrap";   /* offsets WACS2 0x9c/a0/a4 coinciden; el LK ya inicializo -> driver salta init */
+		compatible = "mediatek,mt6582-pwrap";   /* offsets WACS2 0x9c/a0/a4 coinciden; el LK ya inicializo -> driver salta init */
 		reg = <0x1000d000 0x1000>;
 		reg-names = "pwrap";
 		interrupts = <GIC_SPI 115 IRQ_TYPE_LEVEL_HIGH>;   /* downstream MT6582_PMIC_WRAP_IRQ_ID = GIC_PRIVATE_SIGNALS+115 */
