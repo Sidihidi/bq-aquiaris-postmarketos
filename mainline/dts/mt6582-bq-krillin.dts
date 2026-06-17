@@ -149,3 +149,33 @@
 		status = "okay";
 	};
 };
+
+/ {
+	pwrap_clk_spi: pwrap-clk-spi { compatible = "fixed-clock"; #clock-cells = <0>; clock-frequency = <26000000>; };
+	pwrap_clk_wrap: pwrap-clk-wrap { compatible = "fixed-clock"; #clock-cells = <0>; clock-frequency = <26000000>; };
+};
+
+&{/soc} {
+	pwrap: pwrap@1000d000 {
+		compatible = "mediatek,mt2701-pwrap";   /* offsets WACS2 0x9c/a0/a4 coinciden; el LK ya inicializo -> driver salta init */
+		reg = <0x1000d000 0x1000>;
+		reg-names = "pwrap";
+		interrupts = <GIC_SPI 115 IRQ_TYPE_LEVEL_HIGH>;   /* downstream MT6582_PMIC_WRAP_IRQ_ID = GIC_PRIVATE_SIGNALS+115 */
+		clocks = <&pwrap_clk_spi>, <&pwrap_clk_wrap>;
+		clock-names = "spi", "wrap";
+		status = "okay";
+
+		pmic: mt6323 {
+			compatible = "mediatek,mt6323";
+			mt6323regulator: mt6323regulator {
+				compatible = "mediatek,mt6323-regulator";
+				mt6323_vgp1_reg: ldo_vgp1 {
+					regulator-name = "vgp1";
+					regulator-min-microvolt = <1200000>;
+					regulator-max-microvolt = <3300000>;
+					regulator-always-on;   /* alimenta el tactil; always-on para no perderlo */
+				};
+			};
+		};
+	};
+};
