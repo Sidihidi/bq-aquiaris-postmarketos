@@ -6,8 +6,18 @@
 > con coordenadas coherentes (625 muestras con dedo en --raw; eventos reales en
 > evtest). El pipeline FT5336→I2C→uinput→/dev/input es FUNCIONAL y usable por una GUI.
 > **Persistencia añadida**: `/etc/local.d/zzz-touch-input.start` (repo:
-> `mainline/rootfs/touch-input.start`) carga uinput + arranca el daemon en cada boot,
-> tras `touch-power.start`. Falta solo el **wake fiable sin reboot** (GPIO115, opción A).
+> `mainline/rootfs/touch-input.start`) carga uinput + reset + arranca el daemon en cada
+> boot, tras `touch-power.start`.
+>
+> ✅✅ **OPCIÓN A RESUELTA 2026-06-17 — RESET GPIO115 FIABLE.** El "fallo" era
+> interpretación, no los registros. GPIO115 = banco7 bit3: DIR `0x10005070` bit3=1
+> (salida), DOUT val `0x10005470` / SET `0x10005474` / RST `0x10005478`, MODE
+> `0x10005770`=0 (GPIO). Escribir `0x08` (bit3) a RST→LOW (reset asertado, el `0x05`
+> que parecía "raro" era esto, correcto), a SET→HIGH (liberado). Reset = low→10ms→
+> high→300ms. Helper `/usr/local/bin/touch-reset` (repo `mainline/rootfs/touch-reset`),
+> integrado al boot. Verificado: tras reset el chip responde 0x5a y el daemon lee.
+> **Mejora futura opcional**: que el daemon `ft5336_touch.c` llame al reset al ver
+> 0xff prolongado (auto-wake), y/o EINT117 (opción B) para IRQ en vez de polling.
 
 Estado a 2026-06-17. Todo el trabajo se hace **en la Raspberry Pi** (tiene el
 toolchain, el árbol del kernel y el puente USB al teléfono). Desde tu Mac solo
