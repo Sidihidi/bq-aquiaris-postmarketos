@@ -1,0 +1,6 @@
+#!/bin/sh
+# /etc/local.d/zzz-touch-input.start — carga uinput y arranca el daemon del touch
+# FT5336. Corre DESPUES de touch-power.start (que enciende VGP1). En boot el chip
+# esta en buen estado -> el daemon lee coordenadas y emite a /dev/input/event0.
+[ -e /dev/uinput ] || insmod /root/uinput.ko 2>/dev/null
+pgrep ft5336_touch >/dev/null 2>&1 || ( /usr/local/bin/ft5336_touch >/tmp/ft.log 2>&1 & )

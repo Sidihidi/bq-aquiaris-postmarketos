@@ -1,5 +1,14 @@
 # Cómo continuar el TOUCHSCREEN (handoff para retomar desde otra máquina)
 
+> ✅ **VERIFICADO END-TO-END 2026-06-17 (boot limpio):** el táctil LEE y EMITE.
+> Con el chip en buen estado (post-reboot) + VGP1 ON + uinput cargado + daemon:
+> `evtest /dev/input/event0` capturó **BTN_TOUCH + ABS_X/Y + ABS_MT_POSITION_X/Y**
+> con coordenadas coherentes (625 muestras con dedo en --raw; eventos reales en
+> evtest). El pipeline FT5336→I2C→uinput→/dev/input es FUNCIONAL y usable por una GUI.
+> **Persistencia añadida**: `/etc/local.d/zzz-touch-input.start` (repo:
+> `mainline/rootfs/touch-input.start`) carga uinput + arranca el daemon en cada boot,
+> tras `touch-power.start`. Falta solo el **wake fiable sin reboot** (GPIO115, opción A).
+
 Estado a 2026-06-17. Todo el trabajo se hace **en la Raspberry Pi** (tiene el
 toolchain, el árbol del kernel y el puente USB al teléfono). Desde tu Mac solo
 necesitas **SSH a la Pi**; no hace falta nada instalado en la Mac.
