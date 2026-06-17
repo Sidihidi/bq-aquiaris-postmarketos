@@ -1,96 +1,74 @@
 # 🔄 TRASPASO DE SESIÓN — continuar en casa
 
 > Lee esto primero, luego **[INDICE.md](INDICE.md)** (mapa + accesos).
-> Última sesión: **2026-06-16**. Antes: 2026-06-10 (ver git history).
+> Última sesión: **2026-06-17 (tarde)**. Antes: 2026-06-17 (mañana), 2026-06-16, 2026-06-10.
 
 ---
 
-## 🟢 ESTADO AL CIERRE (2026-06-16)
+## 🟢 ESTADO AL CIERRE (2026-06-17 tarde)
 
-El teléfono está **sano y arranca Android stock**. Posición inmejorable:
+El teléfono corre **Linux MAINLINE 7.0.12 + Alpine 3.24** como sistema principal, kernel **#22**.
+Sesión muy productiva. **Funciona TODO esto** (verificado en hardware):
 
-- 🔓 **Bootloader DESBLOQUEADO** (`unlocked: yes`, `secure: no`). Kernels custom
-  por fastboot **sin TWRP/ROM/seccfg-unlock**. (El miedo del seccfg era infundado.)
-- 🛟 **Golden backup COMPLETO** (incluye preloader): se restaura cualquier brick.
-- 💿 **Firmware stock 2.1.0 + scatter** (mapa exacto de particiones).
-- 🔧 **TWRP 3.0.2.0 instalado y PERMANENTE** en `recovery` (Android ya no lo borra).
-- 📱 **Android stock arranca** (sistema en p5).
-- 🐧 **mainline Linux 7.0.12**: M1 (arranca+consola) y M2 (eMMC+ext4) ✅; M2b
-  (driver USB MUSB propio) escrito y compila, llegó a v25. Pendiente probar USB + M3.
-- ⏸️ **pmOS**: la raíz en p5 fue sobrescrita por Android → reinstalar (ver abajo).
-
-**Nada urgente ni roto.** Todo lo de abajo es opcional y con red de seguridad.
-
----
-
-## 📍 DÓNDE ESTÁ CADA ARTEFACTO
-
-**Pi de construcción** — `ssh cpcd@192.168.0.123` (Raspberry Pi 5; clave del Mac; sudo sin pass):
-| Ruta | Qué |
+| Subsistema | Estado |
 |---|---|
-| `~/golden/` | Backup de particiones: preloader, boot, recovery, seccfg, uboot(lk), nvram, proinfo, protect_f/s (+ printgpt.txt, gettargetconfig.txt). Restaurar: ver guía. |
-| `~/pmos-artifacts/` | `boot-pstore.img` (pmOS), `boot-debug.img` (debug-shell), `boot-stock-android.img`, `pmos-root.img` (raíz pmOS lista), `twrp-recovery.img`, `boot-clean.img`, `zeros4m.img`, `config-bq-krillin.armv7` |
-| `~/mainline/linux-7.0.12/` | Árbol mainline compilado (build-krillin), dts, driver M2b parcheado |
-| `~/mainline/pkg/` | Herramientas MTK (mtk_hdr.py, assemble.sh, flash_boot_dd.sh, memdump/etc) + `boot-mainline-v24/v25.img` |
-| `~/mtkclient/` | mtkclient (funciona interactivo, ver guía) |
+| Arranque SMP 4×A7, display color OK (simplefb+dispfix), eMMC, USB-gadget+**SSH** | ✅ |
+| I2C + GPIO (poke), **táctil FT5336** (userspace→event0), **GUI X11** (jwm) | ✅ |
+| **Carga** (daemon FAN5405) | ✅ |
+| 🆕 **PMIC MT6323** (pwrap + MFD + **31 reguladores**, vgp1@2.8V, Chip ID 0x2023) | ✅ |
+| 🆕 **Batería %** (`battery`: VBAT por AUXADC, 3719mV ~33%) | ✅ |
+| 🆕 **sshd al boot** (levanta solo, sin restart manual) | ✅ |
+| fastboot (recuperado) + BROM/mtkclient (recuperación) | ✅ |
 
-**Mac (este equipo)** — `/Users/cpcd/Desktop/pmos-krillin/`:
-| Ruta | Qué |
-|---|---|
-| `artifacts/golden/` | Copia del golden backup (incl. `preloader.bin`) — **fuera de la Pi** |
-| `artifacts/stock-firmware/` | scatter + lk + boot + recovery stock + `twrp-3.0.2.0-recovery.img` |
-| `artifacts/` | `pmos-root.img`, `boot-*.img` |
-| `~/Downloads/BQ Aquaris E4.5 ... Lollipop/` | **Firmware stock COMPLETO** (system.img 924MB, userdata, preloader, scatter, todo para SP Flash Tool) |
-| `~/Downloads/TWRPv3.0.2.0/` | TWRP recovery + su scatter |
+🔓 Bootloader desbloqueado, golden backup completo, TWRP. **Nada roto ni urgente.**
 
-**GitHub**: https://github.com/Sidihidi/bq-aquiaris-postmarketos (docs + scatter + parches;
-los `*.img`/`*.bin` NO se suben — `nvram` lleva IDs únicos. Los artefactos viven en Pi+Mac.)
+### Qué hicimos hoy (tarde)
+1. **PMIC MT6323 al DeviceTree** (3 arreglos de driver) → [HITO-PMIC-MT6323.md](mainline/HITO-PMIC-MT6323.md).
+2. **Recuperación de "fastboot roto"** por BROM **sin reinstalar Android** — y descubrimos que **`wf` está roto** (escribe en sector 0); el comando bueno es **`wo`** → [reference en el HITO].
+3. **sshd robusto al boot** → `mainline/rootfs/sshd/`.
+4. **Batería %** (reverse del AUXADC MT6323) → [HITO-BATERIA-WIP.md](mainline/HITO-BATERIA-WIP.md).
 
 ---
 
-## ⚡ HECHOS CLAVE / TRAMPAS (aprendidos a base de golpes)
+## ▶️ SIGUIENTE PASO: EINT (interrupciones) — **plan completo listo**
 
-1. **mtkclient SÍ funciona en la Pi 5** — pero INTERACTIVO: lanzar el comando y
-   **reconectar el móvil cuando diga "please reconnect to brom mode"**. En
-   background/automático da "Couldn't get device configuration" (no es hardware).
-2. **Batería FUERA = el móvil cicla en preloader** (0e8d:2000), no engancha.
-   Para fastboot/recovery: **batería DENTRO** + combo.
-3. **mtkclient no lee la GPT** (bug MBR MT6582) → para volcar/recortar particiones,
-   **offset real = offset_scatter/dumchar + 0xB80000** (verificado por firmas).
-4. **TWRP "se lo traga"** = Android restaura el stock vía `/system/recovery-from-boot.p`.
-   NO es el método de flasheo. Arreglo: arrancar TWRP sin pasar por Android
-   (`fastboot reboot recovery`, que SÍ funciona aquí) y renombrar ese archivo a `.bak`.
-5. **El LK ignora el cmdline del boot.img** → params por bootargs del DT (mainline: `CMDLINE_EXTEND`).
-6. **fastboot funciona perfecto en la Pi 5** (a diferencia de BROM). Recuperación
-   rápida: `fastboot flash boot ~/pmos-artifacts/boot-stock-android.img` → Android.
-7. **Kernel 3.10**: NUNCA escribir a `/sys/class/graphics/fb0/blank` (pánico).
-8. **Scripting**: `$(())` y `{}` se rompen en zsh(Mac)→ssh→bash; usar heredoc `<<'EOF'`
-   + `iflag=skip_bytes,count_bytes` con decimales.
+📋 **[mainline/HITO-EINT-PLAN.md](mainline/HITO-EINT-PLAN.md)** — toda la investigación hecha.
+Resumen: hay que escribir un **driver gpio+eint del MT6582** (~250-300 líneas; la librería
+`mtk-eint` exige un `gpio_chip` detrás, no vale un stub). Datos ya resueltos: registros ==
+`mtk_generic_eint_regs`, base `0x1000B000`, 169 EINTs, IRQ `GIC_SPI 113`, táctil `EINT117` falling,
+layout GPIO base `0x10005000`. Desbloquea: táctil-por-IRQ, **botones** (gpio-keys), y el driver
+de kernel `edt-ft5x06` (que retiraría el daemon userspace del táctil).
+
+Después de EINT, el roadmap (ver [ROADMAP-DRIVERS.md](ROADMAP-DRIVERS.md)): **WiFi** (VCN33_WIFI
+ya disponible), **Audio** (VA/VRF18), y la **ruta a Phosh** (simpledrm→/dev/dri/card0→lima Mali-400).
 
 ---
 
-## ▶️ OPCIONES PARA CONTINUAR (sin prisa, con red de seguridad)
+## 🔧 CÓMO FLASHEAR EL KERNEL (dos vías)
 
-**A) Verificar TWRP permanente** (rápido): arrancar Android → apagar → Power+Vol+ →
-debe salir TWRP (no el stock). Confirma que la desactivación funcionó.
+El boot actual (#22) está en la Pi: `~/mainline/pkg/boot-pmic.img` (ANDROID!, 0xD18800 B).
+Para reconstruir tras compilar: `cat zImage dts/mediatek/mt6582-bq-krillin.dtb > zimage-dtb;
+python3 mtk_hdr.py KERNEL zimage-dtb zimage-dtb-mtk; abootimg --create boot-pmic.img -f
+/tmp/asm/cfg2 -k zimage-dtb-mtk -r /tmp/asm/initrd.img` (cfg2 = bootimg.cfg SIN la línea bootsize).
 
-**B) Reinstalar pmOS** (raíz lista en la Pi):
-```sh
-# móvil en fastboot:
-sudo fastboot flash boot ~/pmos-artifacts/boot-debug.img && sudo fastboot reboot recovery
-# si levanta debug-shell con red: transferir raíz a p5 por nc (ver mainline/README §)
-{ echo 'nc -l -p 9999 | dd of=/dev/mmcblk0p5 bs=1M'; sleep 3; } | telnet 172.16.42.1 &
-nc -N 172.16.42.1 9999 < ~/pmos-artifacts/pmos-root.img
-sudo fastboot flash boot ~/pmos-artifacts/boot-pstore.img && sudo fastboot reboot
-# luego re-aplicar Sxmo/táctil/refresco (scripts/ del repo)
-```
+- **Fastboot** (funciona ahora): batería fuera/dentro → Vol+ + USB → `sudo fastboot flash boot ~/mainline/pkg/boot-pmic.img && sudo fastboot reboot`.
+- **BROM** (si fastboot falla): `sudo ~/mtkclient/venv/bin/python ~/mtkclient/mtk.py wo 0x2900000 0xD18800 ~/mainline/pkg/boot-pmic.img` (reconnect-on-cue). **OJO: `wo`, NO `wf`.**
 
-**C) Dual-boot Android + pmOS** (el proyecto grande): ya tenemos recovery=TWRP.
-Falta diseñar el **reparto de almacenamiento** (Android en p5/system, pmOS en una
-porción de usrdata/p7 5.7 GB) usando el scatter de mapa. Es el trabajo de diseño.
+---
 
-**D) Seguir mainline** (M2b USB / M3 display): flashear `~/mainline/pkg/boot-mainline-v25.img`
-(autocontenido, no necesita raíz). Ver `mainline/README.md` y `mainline/HITO-M2b-WIP.md`.
+## ⚡ HECHOS CLAVE / TRAMPAS
+
+1. **mtkclient: usar `wo <offset> <length> <img>`, NUNCA `wf`** — `wf` ignora el offset y
+   escribe en **sector 0** (machaca MBR/proinfo). Offsets HEX: boot=`0x2900000`, uboot=`0x28A0000`,
+   seccfg=`0x2880000`. Detalle en [[reference-mtkclient-krillin]] (memoria) y el HITO-PMIC.
+2. **mtkclient en Pi5 = interactivo + reconnect-on-cue**: lanzar, y al "please reconnect"
+   batería fuera→dentro + Vol− + USB. `sudo systemctl stop ModemManager` antes; `~/mtkclient/hwparam.json` debe ser de `cpcd`.
+3. **NO restaurar el LK golden** — es de **Lollipop** (verifica firma → bootloop). El del equipo
+   es KitKat 1.5.2 permisivo (`~/stock-1.5.2/lk.bin`). fastboot se recupera solo al arrancar un kernel limpio.
+4. **PMIC pwrap**: la IRQ tormenteaba → driver sin `request_irq` (polling). MFD mt6397 con IRQ opcional.
+5. **El LK ignora el cmdline del boot.img** → bootargs por el DT (`CMDLINE_EXTEND`).
+6. **No martillear SSH anidado Pi→teléfono** (satura el sshd del móvil). Una sesión, comandos agrupados.
+7. **Scripting**: `$(())`/`{}` se rompen en zsh(Mac)→ssh→bash; usar heredoc `<<'EOF'`.
 
 ---
 
@@ -98,11 +76,15 @@ porción de usrdata/p7 5.7 GB) usando el scatter de mapa. Es el trabajo de dise�
 
 | Qué | Valor |
 |---|---|
-| Pi | `ssh cpcd@192.168.0.123` (Raspberry Pi 5, sudo sin pass) |
-| Teléfono USB (pmOS) | `ssh user@172.16.42.1` / pass `147147` ; IP Pi en usb0: `172.16.42.2/24` |
-| Teléfono | unlocked, secure off; serial JB053237 ; ME_ID 4040D87ADB20ECB4CCF07147B1F82E46 |
-| mtkclient (Pi) | `~/mtkclient/venv/bin/python ~/mtkclient/mtk.py ...` (interactivo, reconnect-on-cue) |
+| Pi de construcción | `ssh cpcd@192.168.0.123` (Raspberry Pi 5, clave del Mac, sudo sin pass) |
+| Teléfono mainline (desde la Pi) | `ssh root@172.16.42.1` (IP Pi en usb0: `172.16.42.2/24`) |
+| Comandos útiles en el teléfono | `battery` (% batería), `charge-status`, `/usr/local/bin/pwrap_poke r/w` |
+| mtkclient | `~/mtkclient/venv/bin/python ~/mtkclient/mtk.py ...` (sudo, interactivo) |
+| Teléfono | unlocked, secure off; serial JB053237; CID 303847391101003022b9315f32009a1e |
 | GitHub | https://github.com/Sidihidi/bq-aquiaris-postmarketos |
 
-> ⚠️ Si "casa" es otra máquina: clona el repo (docs) y entra por ssh a la Pi
-> (artefactos). Las imágenes no están en GitHub a propósito.
+**Artefactos** (NO en GitHub): en la Pi `~/mainline/` (kernel, pkg, boot-pmic.img #22),
+`~/golden/`, `~/stock-1.5.2/`; en el Mac `artifacts/` y `~/Downloads/1.5.2_krillin/`.
+Rootfs Alpine del teléfono en p7 (cambios en `/etc/local.d/`, `/usr/local/bin/`; espejo en `mainline/rootfs/`).
+
+> ⚠️ "Casa" = otra máquina: clona el repo (docs) + ssh a la Pi (artefactos). Las imágenes no van a GitHub.

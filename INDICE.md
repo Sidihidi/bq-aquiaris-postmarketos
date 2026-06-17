@@ -1,23 +1,28 @@
 # 📍 ÍNDICE MAESTRO — postmarketOS + mainline en BQ Aquaris E4.5 (krillin)
 
-> Punto de entrada único. Última actualización: **2026-06-16**.
+> Punto de entrada único. Última actualización: **2026-06-17 (tarde)**.
 > Proyecto: revivir el BQ Aquaris E4.5 (MediaTek MT6582, 2014) con Linux moderno.
 
 ---
 
-## 🎯 ESTADO ACTUAL (2026-06-16)
+## 🎯 ESTADO ACTUAL (2026-06-17 tarde)
+
+**Sistema principal = Linux MAINLINE 7.0.12 + Alpine 3.24, kernel #22.** Funciona en hardware:
 
 | Tema | Estado |
 |---|---|
-| **Bootloader** | 🔓 **DESBLOQUEADO** (`unlocked: yes`, `secure: no`). Kernels custom por fastboot sin TWRP/ROM. El seccfg NUNCA fue el bloqueo. |
-| **Red de seguridad (golden backup)** | ✅ HECHO — `artifacts/golden/` (Mac) y `~/golden/` (Pi): boot, recovery, seccfg, lk, nvram, proinfo, protect. Restaurar: `mtk w <part> <part>.img`. |
-| **pmOS (sistema estable)** | 🔄 Reinstalando — Android stock sobrescribió la raíz en p5. Plan: re-flashear boot + re-transferir `pmos-root.img` a p5 por nc. |
-| **TWRP recovery** | ✅ **INSTALADO Y PERMANENTE** — TWRP 3.0.2.0 en `recovery`. Android ya no lo restaura (`recovery-from-boot.p` desactivado). Primer peldaño del dual-boot: recovery=TWRP. |
-| **GUI X11 táctil (mainline)** | ✅ **FUNCIONA Y FLUIDO** (2026-06-17) — Xorg fbdev 540×960 + jwm + matchbox-keyboard + táctil evdev (FT5336). Verificado al dedo. Ver `mainline/HITO-GUI-X11.md`. ⚠️ Pendiente: persistir al boot + **driver de carga** (la batería muere a mitad de sesión). |
-| **mainline (Linux 7.0.12)** | 🏆 M1 (arranca+consola) y 🏆 M2 (eMMC+ext4) conseguidos. 🔧 M2b (driver USB MUSB propio) escrito, compila, llegó a v25. Pendiente: probar USB + M3 display. |
-| **Herramienta de bajo nivel** | mtkclient funciona en la Pi 5 (interactivo, reconectar cuando lo pide). fastboot va fino. |
+| Arranque SMP, display color, eMMC, USB-gadget+**SSH**, I2C/GPIO | ✅ |
+| **Táctil** FT5336 (userspace→event0) + **GUI X11** (jwm) | ✅ |
+| **Carga** (daemon FAN5405) | ✅ |
+| 🆕 **PMIC MT6323** al DT (pwrap + MFD + **31 reguladores**, vgp1@2.8V) | ✅ `mainline/HITO-PMIC-MT6323.md` |
+| 🆕 **Batería %** (`battery`: VBAT por AUXADC, ~3.7V) | ✅ `mainline/HITO-BATERIA-WIP.md` |
+| 🆕 **sshd al boot** (levanta solo) | ✅ `mainline/rootfs/sshd/` |
+| **Bootloader** | 🔓 DESBLOQUEADO; golden backup completo; TWRP 3.0.2.0 |
+| **Recuperación** | fastboot (va) + BROM/mtkclient (`wo`, NO `wf`) |
 
-**Próximo paso inmediato:** reinstalar pmOS (ver `CONTINUAR_AQUI.md` §6 / abajo).
+**Próximo paso inmediato: EINT** (driver gpio+eint MT6582) — investigación completa y plan en
+**`mainline/HITO-EINT-PLAN.md`**. Desbloquea táctil-por-IRQ + botones + driver de kernel del táctil.
+Luego: WiFi, Audio, ruta a Phosh (simpledrm→lima).
 
 ---
 
