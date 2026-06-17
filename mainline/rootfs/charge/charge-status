@@ -1,0 +1,5 @@
+#!/bin/sh
+# estado del cargador FAN5405
+c0=$(i2cget -y 0 0x6a 0x00 2>/dev/null); c1=$(i2cget -y 0 0x6a 0x01 2>/dev/null); c2=$(i2cget -y 0 0x6a 0x02 2>/dev/null)
+s=$(( ($c0>>4)&3 )); case $s in 0)st=ready;;1)st=CARGANDO;;2)st=COMPLETA;;3)st=FALLO;;esac
+printf "FAN5405  CON0=%s CON1=%s CON2=%s\n  STAT=%s  OREG=%d(35=4.20V)  IINLIM=%d(0=100 2=800mA)\n" "$c0" "$c1" "$c2" "$st" $(( ($c2>>2)&0x3f )) $(( ($c1>>6)&3 ))
