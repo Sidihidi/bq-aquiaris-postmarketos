@@ -1,274 +1,105 @@
-# postmarketOS en el BQ Aquaris E4.5 ("krillin")
+# BQ Aquaris E4.5 (`krillin`) — Linux en un MediaTek MT6582 de 2014
 
-Port **funcional** de postmarketOS para el BQ Aquaris E4.5 (MediaTek MT6582,
-codename `krillin`, el primer Ubuntu Phone, 2014). Construido desde cero — no
-existía port previo en pmaports.
+Reviviendo el **BQ Aquaris E4.5** (MediaTek MT6582, Cortex-A7 ×4 armv7, Mali-400 MP2,
+1 GB RAM, 540×960; *el primer Ubuntu Phone, 2014*) con Linux libre. El proyecto tiene
+**dos vías**, ambas funcionando en hardware real:
 
-> **Estado:** arranca, da consola en pantalla + SSH por USB, interfaz gráfica
-> Sxmo (X11), pantalla táctil y WiFi funcionando. Sin aceleración GPU
-> (limitación del kernel 3.10, ver §8). Probado en hardware real.
+1. 🟢 **postmarketOS sobre el kernel 3.10 downstream** — estable, con GUI Sxmo y táctil.
+   Port construido desde cero (no existía). Detalle: [README-PMOS-3.10.md](README-PMOS-3.10.md).
+2. 🚀 **Linux MAINLINE 7.0.12 + Alpine 3.24** — la frontera: levantar un SoC casi sin
+   soporte upstream, escribiendo/portando drivers. **Es donde está la acción ahora.**
+
+> **Hito mayor (2026-06-17):** un teléfono de 2014 corriendo **Linux mainline 7.0.12**
+> con **escritorio gráfico X11 táctil fluido** y **carga de batería por USB** funcionando.
+
+📍 **Empieza por [INDICE.md](INDICE.md)** (mapa + estado + accesos) y, para retomar entre
+sesiones/máquinas, [TRASPASO-SESION.md](TRASPASO-SESION.md).
 
 ---
 
-## 1. Hardware y punto de partida
+## Estado — qué FUNCIONA
 
+### Vía MAINLINE (Linux 7.0.12 + Alpine 3.24.1)
+| Subsistema | Estado | Cómo |
+|---|---|---|
+| Arranque kernel (SMP 4 CPUs) | ✅ | boot.img formato MTK; el LK carga el zImage+dtb |
+| Display (color correcto) | ✅ | `simplefb` RGB565 + `mt6582-dispfix.c` (reprograma el OVL) |
+| eMMC | ✅ | `mtk-sd` + `blkdevparts=` (el parser MBR no traga el de MTK) |
+| USB gadget (red) + **SSH** | ✅ | `mt6582-musb.c` (g_ether) + dropbear/openssh por USB |
+| Rootfs | ✅ | **Alpine 3.24.1** en p7 (OpenRC, apk) |
+| I2C / GPIO | ✅ | `i2c-mt65xx` (compat mt6582) / poke por `/dev/mem` |
+| **Táctil** (FT5336) | ✅ | VGP1 (PMIC vía pwrap) + I2C0@0x38 + uinput → `/dev/input/event0`; reset GPIO115 fiable |
+| **GUI X11 táctil** | ✅ | Xorg fbdev + jwm + matchbox-keyboard — **fluido**, al dedo |
+| **Carga por USB** | ✅ | driver userspace del **FAN5405** (I2C0@0x6a): 4.20V/800mA + watchdog |
+| Batería % | ⬜ | falta el AUXADC para leer VBAT (siguiente) |
+| WiFi / Audio / GPU / Módem | ⬜ | ver [ROADMAP-DRIVERS.md](ROADMAP-DRIVERS.md) |
+
+### Vía postmarketOS (kernel 3.10)
+Arranca, consola + SSH por USB, **GUI Sxmo (X11)**, **táctil**, **WiFi**. Sin GPU
+(el 3.10 no da Lima). Detalle técnico completo en [README-PMOS-3.10.md](README-PMOS-3.10.md).
+
+---
+
+## Hitos del bring-up mainline (en hardware real)
+- **M1** — arranque + consola (`simplefb`) + userspace, 4 CPUs SMP.
+- **M2** — eMMC + particiones + ext4 (montó la raíz y la listó en pantalla).
+- **M2b** — USB gadget (driver MUSB propio `mt6582-musb.c`).
+- **M2d** — **SSH por USB** (busybox+dropbear / openssh). → [HITO](mainline/HITO-M2d-SSH-RESUELTO.md)
+- **M3** — display con color correcto (`mt6582-dispfix.c`). → [HITO](mainline/HITO-M3-DISPLAY-RESUELTO.md)
+- **Rootfs** — Alpine 3.24 en p7. → [HITO](mainline/HITO-ROOTFS-ALPINE.md)
+- **I2C/GPIO + Táctil** — FT5336 lee y emite eventos. → [HITO](mainline/HITO-TOUCH-DRIVER.md) · [CONTINUAR-TOUCH](mainline/CONTINUAR-TOUCH.md)
+- **GUI X11** — escritorio táctil fluido. → [HITO](mainline/HITO-GUI-X11.md)
+- **Carga FAN5405** — el teléfono carga en mainline. → [HITO](mainline/HITO-CARGA-FAN5405.md)
+
+Guía técnica de compilar/flashear/depurar el kernel mainline: [mainline/README.md](mainline/README.md).
+
+---
+
+## Hardware
 | Dato | Valor |
 |---|---|
-| Dispositivo | BQ Aquaris E4.5 (`krillin`) |
-| SoC | MediaTek MT6582 (Cortex-A7 ×4, **armv7**) |
-| GPU | ARM Mali-400 MP2 |
-| RAM | 1 GB |
-| Pantalla | 540×960 (qHD), panel táctil multitouch **tipo A** |
-| eMMC | 8 GB |
-| Estado de fábrica del equipo | LineageOS 14.1 (Android 7.1.2), bootloader **desbloqueado**, fastboot disponible |
+| SoC | MediaTek **MT6582** (4× Cortex-A7, armv7) |
+| GPU | ARM **Mali-400 MP2** (Lima viable en kernel ≥5.2 → tenemos 7.0.12) |
+| RAM / eMMC | 1 GB / 8 GB |
+| Pantalla | 540×960 qHD, panel DSI hx8389 (Truly), táctil **FT5336** (I2C0@0x38) |
+| PMIC | **MT6323** (vía pwrap @0x1000D000); reguladores incl. VGP1 |
+| Cargador | **Fairchild FAN5405** (I2C0@0x6a) |
+| Bootloader | LK MediaTek; **desbloqueado** (`unlocked: yes`, secure boot off) |
 
-**Entorno de construcción:** una Raspberry Pi (Debian 13 `trixie`, aarch64, 8 GB
-RAM). Vale cualquier Linux; la clave es que `pmbootstrap` necesita un host Linux.
-El teléfono se conecta por USB a la máquina de construcción.
+Direcciones clave: GPIO `0x10005000`, I2C0 `0x11007000`, MUSB `0x11200000`, fb `0xBF400000`.
 
 ---
 
-## 2. Resumen de la arquitectura del port
+## Recuperación — el teléfono es difícil de brickear
+- **Regla de oro MTK:** no flashear NUNCA `preloader`. Lo demás es recuperable.
+- **fastboot** (funciona en la Pi): `fastboot flash boot <img>` (estamos unlocked).
+- **mtkclient / BROM** (red de seguridad): backup golden completo en `artifacts/golden/`
+  (incl. preloader). Restaurar: `mtk w <part> <part>.img`. Guía: [GUIA-MTKCLIENT.md](GUIA-MTKCLIENT.md).
+- **Softbrick** → reflashear KitKat stock con SP Flash Tool "Download Only" (NUNCA "Format All").
+- **TWRP 3.0.2.0** instalado y permanente en `recovery`.
 
-```
-   [Máquina de construcción: Raspberry Pi / Linux]
-       pmbootstrap  ──compila──►  kernel + rootfs (armv7)
-            │
-            │ USB
-            ▼
-   [BQ Aquaris E4.5]
-       partición boot   ← boot.img (kernel 3.10 + initramfs, formato MTK)
-       partición system ← rootfs ext4 "pmOS_root" (OpenRC + Sxmo)
-```
-
-- **Kernel:** LineageOS 3.10.107 (rama `lineage-15.0` de
-  `Pablito2020/android_kernel_bq_krillin`), compilado con **gcc6**.
-- **Init:** **OpenRC** (NO systemd — ver §7, fue una de las decisiones clave).
-- **Rootfs:** ext4 con features modernas **deshabilitadas** (el kernel 3.10 no
-  las monta — ver §7).
+Estrategia de unlock / dual-boot / bootloader propio: [ESTRATEGIA-CUSTOM-BOOTLOADER.md](ESTRATEGIA-CUSTOM-BOOTLOADER.md).
 
 ---
 
-## 3. Requisitos en la máquina de construcción
+## Cómo se trabaja
+Una **Raspberry Pi** (`cpcd@192.168.0.123`) compila (cross armhf) y habla con el teléfono
+por USB (fastboot + red usb0 `172.16.42.x`). El teléfono mainline se accede desde la Pi:
+`ssh root@172.16.42.1`. El pmOS: `ssh user@172.16.42.1` (pass `147147`).
 
-```sh
-# pmbootstrap desde git (el de los repos de distro suele ir desfasado para 'edge')
-git clone https://gitlab.postmarketos.org/postmarketOS/pmbootstrap.git ~/pmbootstrap
-mkdir -p ~/.local/bin
-ln -sf ~/pmbootstrap/pmbootstrap.py ~/.local/bin/pmbootstrap
-export PATH=~/.local/bin:$PATH
-
-# herramientas auxiliares usadas en esta guía
-sudo apt-get install -y fastboot abootimg e2fsprogs telnet netcat-openbsd
-
-pmbootstrap --version   # debe ser >= 3.x
-pmbootstrap init        # arch: armv7 ya viene del deviceinfo; UI: console; systemd: never
-```
+> ⚠️ No martillear SSH anidado Pi→teléfono: satura el sshd / el musb no sostiene tanto TCP.
 
 ---
 
-## 4. Los archivos del port (aports)
-
-Se crean en el árbol de pmaports que clona `pmbootstrap`
-(`~/.local/var/pmbootstrap/cache_git/pmaports/`), bajo
-`device/testing/device-bq-krillin/` y `device/testing/linux-bq-krillin/`.
-Copias maestras de todos ellos están en este directorio (`aports/`).
-
-### 4.1 `device-bq-krillin/deviceinfo`
-Parámetros del equipo + cabecera del boot.img. **Los offsets MTK son críticos**
-(salieron de los `BoardConfig.mk` de los device trees de CyanogenMod del krillin,
-verificados contra el boot.img que el propio equipo ya arrancaba):
-
-```
-deviceinfo_flash_offset_base="0x10000000"
-deviceinfo_flash_offset_kernel="0x00008000"
-deviceinfo_flash_offset_ramdisk="0x01000000"
-deviceinfo_flash_offset_second="0x00f00000"
-deviceinfo_flash_offset_tags="0x00000100"
-deviceinfo_flash_pagesize="2048"
-deviceinfo_bootimg_mtk_label_kernel="KERNEL"   # cabeceras MTK obligatorias
-deviceinfo_bootimg_mtk_label_ramdisk="ROOTFS"  # o el bootloader rechaza la imagen
-```
-
-### 4.2 `linux-bq-krillin/` (el kernel)
-- `APKBUILD`: descarga el kernel de LineageOS, fuerza **gcc6** (el GCC moderno no
-  compila kernels de 2017), y aplica el parche compartido
-  `linux3.4-ARM-8933-1-replace-Sun-Solaris-style-flag-on-section.patch`
-  (symlink a `device/.shared-patches/linux/`).
-- `config-bq-krillin.armv7`: la `lineage_krillin_defconfig` del árbol del kernel,
-  ajustada para postmarketOS (ver `pmbootstrap kconfig check`):
-  `DEVTMPFS`, `DEVTMPFS_MOUNT`, `VT`, `VT_CONSOLE`, `DEVPTS_MULTIPLE_INSTANCES`,
-  `CRYPTO_XTS`, `FRAMEBUFFER_CONSOLE` activados; `ANDROID_PARANOID_NETWORK`
-  desactivado.
-
-### 4.3 `device-bq-krillin/APKBUILD`
-Metapaquete del dispositivo. Depende de `linux-bq-krillin`, `mkbootimg`,
-`mtk-mkimage`, `postmarketos-base`.
+## Próximos pasos (ver [ROADMAP-DRIVERS.md](ROADMAP-DRIVERS.md))
+1. **Batería %** (AUXADC) — ver el nivel en la UI.
+2. **PMIC MT6323 al DeviceTree** — el hub que ordena power/carga/audio.
+3. **WiFi**, **Audio**, **EINT** (IRQ táctil + botones).
+4. **Ruta a Phosh:** `simpledrm` → `/dev/dri/card0` → Phosh-Pixman → **lima (Mali-400)** → Phosh acelerado.
+5. **Módem 3G** — el más difícil (camino realista: Halium sobre el 3.10).
 
 ---
 
-## 5. Construcción
-
-```sh
-pmbootstrap checksum linux-bq-krillin
-pmbootstrap checksum device-bq-krillin
-pmbootstrap kconfig check bq-krillin       # debe pasar
-pmbootstrap build linux-bq-krillin         # ~5 min (gcc6, chroot armv7 nativo)
-
-# rootfs OpenRC + openssh + (opcional) GUI:
-pmbootstrap config device bq-krillin
-pmbootstrap config systemd never           # IMPRESCINDIBLE (ver §7)
-pmbootstrap install --no-fde --add openssh-server --password TUCLAVE
-```
-
-Esto genera `~/.local/var/pmbootstrap/chroot_native/home/pmos/rootfs/bq-krillin.img`
-(imagen GPT con partición EFI + raíz ext4) y, dentro del chroot del rootfs, el
-`boot.img` ya en formato MTK.
-
----
-
-## 6. Instalación en el teléfono
-
-El bootloader (LK) de este MTK es **quisquilloso**: acepta imágenes pequeñas
-(≤~14 MB) por fastboot, pero **falla** al transferir la rootfs grande
-(`Protocol error` / `Unknown chunk type` — el LK no soporta sparse, y satura su
-búfer). La solución es un canal propio vía el debug-shell del initramfs.
-
-### 6.1 Preparar la imagen de raíz (en la máquina de construcción)
-
-```sh
-IMG=~/.local/var/pmbootstrap/chroot_native/home/pmos/rootfs/bq-krillin.img
-# extraer SOLO la partición raíz (mira los sectores con: fdisk -l "$IMG")
-dd if="$IMG" of=/tmp/pmos-root.img bs=512 skip=<START> count=<COUNT>
-
-# ¡CRÍTICO! quitar features ext4 que el kernel 3.10 no monta:
-sudo tune2fs -O ^metadata_csum,^metadata_csum_seed,^orphan_file /tmp/pmos-root.img
-sudo tune2fs -O ^has_journal /tmp/pmos-root.img
-sudo e2fsck -fy /tmp/pmos-root.img
-sudo tune2fs -j /tmp/pmos-root.img        # journal nuevo, sin checksums v3
-```
-
-### 6.2 Flashear el kernel (sí cabe por fastboot)
-
-```sh
-# teléfono en fastboot: apagar, y conectar USB manteniendo Vol+
-sudo fastboot flash boot ~/.local/var/pmbootstrap/chroot_rootfs_bq-krillin/boot/boot.img
-```
-
-### 6.3 Meter la rootfs vía debug-shell (el truco)
-
-```sh
-# forzar fallo de montaje para caer al debug-shell:
-sudo fastboot flash system /tmp/zeros4m.img   # 4 MB de ceros (dd if=/dev/zero ...)
-sudo fastboot reboot
-# NOTA: 'fastboot erase system' se CUELGA en este LK — usar los ceros, no erase.
-
-# el equipo arranca, no puede montar root, y levanta un debug-shell por
-# red-USB (RNDIS). En la máquina de construcción:
-sudo ip addr add 172.16.42.2/24 dev usb0
-# receptor en el teléfono + envío desde el host (nc), escribe directo a la partición:
-{ echo 'nc -l -p 9999 | dd of=/dev/mmcblk0p5 bs=1M'; sleep 3; } | telnet 172.16.42.1 &
-nc -N 172.16.42.1 9999 < /tmp/pmos-root.img      # ~70 s para 600 MB
-# luego, en el debug-shell:
-#   reboot -f
-```
-
-`/dev/mmcblk0p5` = partición `system` (`android`) del krillin. La etiqueta
-`pmOS_root` hace que el initramfs la encuentre por UUID/label.
-
----
-
-## 7. Problemas resueltos (lecciones del port)
-
-1. **El kernel no compilaba** (`proc-v7.S: junk at end of line #`): el ensamblador
-   GNU moderno no acepta las flags de sección estilo Solaris de 2014. → parche
-   compartido `linux3.4-ARM-8933-1`.
-2. **systemd no arranca sobre kernel 3.10**: se queda colgado. → reconstruir el
-   rootfs con **OpenRC** (`pmbootstrap config systemd never`).
-3. **`mount: Invalid argument` al montar la raíz**: el `mkfs.ext4` moderno crea
-   features (`metadata_csum`, `orphan_file`, journal checksum v3) que el kernel
-   3.10 desconoce. → cirugía con `tune2fs` (§6.1).
-4. **fastboot no puede con la rootfs grande**: LK sin soporte sparse. → canal
-   `nc`/`dd` por el debug-shell (§6.3).
-5. **Arranca pero sin SSH**: faltaba `openssh-server`. → `--add openssh-server`
-   en `pmbootstrap install`.
-
----
-
-## 8. Estado de los subsistemas
-
-| Subsistema | Estado | Notas |
-|---|---|---|
-| Arranque + initramfs | ✅ | al primer intento en hardware real |
-| Consola en pantalla | ✅⚠️ | funciona con *workaround* de refresco (ver §9) |
-| SSH por USB | ✅ | `ssh user@172.16.42.1` |
-| Pantalla táctil | ✅ | requiere driver `evdev`, no libinput (panel tipo-A; ver §9) |
-| WiFi | ✅ | (firmware MTK; ver sesión de WiFi) |
-| GUI (Sxmo / dwm / X11) | ✅⚠️ | usable; lenta (render por software) |
-| Aceleración GPU | ❌ | Mali-400 + Lima exige kernel ≥5.2; inviable en 3.10 |
-| Módem (llamadas/datos) | ⬜ | no abordado; vía CCCI userspace (investigado, ver notas) |
-
----
-
-## 9. Workarounds activos en el rootfs
-
-Estos ajustes se aplican *dentro* del sistema instalado (no en la construcción):
-
-- **Refresco de pantalla** (`/usr/local/bin/fb-refresh` + `/etc/local.d/`): el
-  driver `mtkfb` arranca en modo "decouple" y no presenta el framebuffer sin un
-  disparo. Un bucle que hace `echo 0,0 > /sys/class/graphics/fb0/pan` cada 100 ms
-  mantiene la pantalla viva. *Mejora pendiente: parchear `mtkfb` en el kernel para
-  presentación directa — eliminaría este hack.*
-- **Táctil con evdev** (`/etc/X11/xorg.conf.d/99-touchscreen.conf`): el panel usa
-  multitouch **tipo A** (`SYN_MT_REPORT`), que **libinput no soporta** (da
-  `double tracking ID` y descarta los eventos). Se fuerza el driver `evdev`.
-  El nombre `99-` es importante: debe ganar al `40-libinput.conf` de pmOS.
-- **Autologin en tty1** (`/etc/inittab`): `login -f user` para usar la consola sin
-  teclado físico.
-- **Estabilidad del SSH por USB** (⚠️ *pendiente de solución correcta*): la
-  conexión RNDIS se cae periódicamente porque NetworkManager recicla `usb0`.
-  **NO** marcar `usb0` como `unmanaged-devices` en NM: en este port es **NM quien
-  asigna la IP `172.16.42.1`** a la interfaz USB, así que marcarla "no gestionada"
-  deja al teléfono sin IP y **corta todo el acceso por USB** (lección aprendida a
-  base de cerrarnos la puerta). La solución correcta es definir un *perfil de
-  conexión estático* de NM para `usb0` (IP fija, sin DHCP ni reconexiones), no
-  excluirla.
-
----
-
-## 10. Acceso al sistema
-
-```sh
-# SSH por USB (red RNDIS):
-sudo ip addr add 172.16.42.2/24 dev usb0       # en la máquina host
-ssh user@172.16.42.1                            # usuario: user
-
-# dar internet al teléfono (NAT desde el host; Debian usa nftables):
-sudo sysctl -w net.ipv4.ip_forward=1
-sudo nft add table ip pmosnat
-sudo nft 'add chain ip pmosnat post { type nat hook postrouting priority 100 ; }'
-sudo nft add rule ip pmosnat post ip saddr 172.16.42.0/24 oifname "wlan0" masquerade
-# en el teléfono: ip route add default via 172.16.42.2 ; echo nameserver 1.1.1.1 > /etc/resolv.conf
-```
-
----
-
-## 11. Recuperar el teléfono / volver a LineageOS
-
-Nunca se tocaron `preloader`, `nvram`, `protect_*` ni `recovery` — el equipo es
-recuperable. Para volver a LineageOS: entrar en recovery (Power+Vol+) y reinstalar
-el zip de Lineage, que reescribe `boot` y `system`.
-
-> ⚠️ **Regla de oro MTK:** no flashear NUNCA la partición `preloader`. Es lo único
-> que convierte el equipo en un pisapapeles irrecuperable sin herramientas de bajo
-> nivel.
-
----
-
-## 12. Pendiente / hoja de ruta
-
-- [ ] Parchear `mtkfb` en el kernel para salir del modo decouple (matar el hack de refresco).
-- [ ] Empaquetar el port como aport limpio y enviarlo a pmaports (`device/testing`).
-- [ ] Expandir la raíz a la partición grande (5,7 GB) para tener espacio holgado.
-- [ ] Módem: daemon AT en userspace sobre los canales CCCI del kernel (datos/SMS).
-- [ ] (largo plazo) Bringup a kernel mainline (mt6582 tiene soporte inicial) → Lima → GPU real.
+*Proyecto de aficionado, bring-up en hardware real. Repo:
+[github.com/Sidihidi/bq-aquiaris-postmarketos](https://github.com/Sidihidi/bq-aquiaris-postmarketos).
+Todo el historial y los detalles en los `HITO-*.md` y en `INDICE.md`.*
