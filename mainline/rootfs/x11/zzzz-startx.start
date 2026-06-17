@@ -1,0 +1,3 @@
+#!/bin/sh
+# /etc/local.d/zzzz-startx.start — autoarranque de la GUI X11 al encender (tras tactil)
+( /root/start-x.sh ) >/tmp/startx-boot.log 2>&1 &
