@@ -13,6 +13,7 @@
 | **Red de seguridad (golden backup)** | ✅ HECHO — `artifacts/golden/` (Mac) y `~/golden/` (Pi): boot, recovery, seccfg, lk, nvram, proinfo, protect. Restaurar: `mtk w <part> <part>.img`. |
 | **pmOS (sistema estable)** | 🔄 Reinstalando — Android stock sobrescribió la raíz en p5. Plan: re-flashear boot + re-transferir `pmos-root.img` a p5 por nc. |
 | **TWRP recovery** | ✅ **INSTALADO Y PERMANENTE** — TWRP 3.0.2.0 en `recovery`. Android ya no lo restaura (`recovery-from-boot.p` desactivado). Primer peldaño del dual-boot: recovery=TWRP. |
+| **GUI X11 táctil (mainline)** | ✅ **FUNCIONA Y FLUIDO** (2026-06-17) — Xorg fbdev 540×960 + jwm + matchbox-keyboard + táctil evdev (FT5336). Verificado al dedo. Ver `mainline/HITO-GUI-X11.md`. ⚠️ Pendiente: persistir al boot + **driver de carga** (la batería muere a mitad de sesión). |
 | **mainline (Linux 7.0.12)** | 🏆 M1 (arranca+consola) y 🏆 M2 (eMMC+ext4) conseguidos. 🔧 M2b (driver USB MUSB propio) escrito, compila, llegó a v25. Pendiente: probar USB + M3 display. |
 | **Herramienta de bajo nivel** | mtkclient funciona en la Pi 5 (interactivo, reconectar cuando lo pide). fastboot va fino. |
 
