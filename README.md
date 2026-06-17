@@ -32,7 +32,7 @@ sesiones/máquinas, [TRASPASO-SESION.md](TRASPASO-SESION.md).
 | **GUI X11 táctil** | ✅ | Xorg fbdev + jwm + matchbox-keyboard — **fluido**, al dedo |
 | **Carga por USB** | ✅ | driver userspace del **FAN5405** (I2C0@0x6a): 4.20V/800mA + watchdog |
 | **PMIC MT6323** (hub) | ✅ | pwrap (`mediatek,mt6582-pwrap`) + MFD + **31 reguladores** (vgp1@2.8V). [HITO](mainline/HITO-PMIC-MT6323.md) |
-| Batería % | ⬜ | AUXADC (BATSNS ch7) — ya factible vía el hub PMIC |
+| **Batería %** | ✅ | VBAT por AUXADC MT6323 (`AUXADC_ADC0`) vía `pwrap_poke` — `/usr/local/bin/battery`. [HITO](mainline/HITO-BATERIA-WIP.md) |
 | WiFi / Audio / GPU / Módem | ⬜ | energía ya disponible (VCN33_WIFI, VA…); ver [ROADMAP-DRIVERS.md](ROADMAP-DRIVERS.md) |
 
 ### Vía postmarketOS (kernel 3.10)

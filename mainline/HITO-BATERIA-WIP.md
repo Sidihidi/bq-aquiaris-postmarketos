@@ -1,7 +1,17 @@
-# WIP — Batería % (lectura de VBAT) en mainline — INVESTIGACIÓN COMPLETA, pendiente init
+# 🏆 Batería % (lectura de VBAT) en mainline — RESUELTO (2026-06-17)
 
-**Estado 2026-06-17:** mapeado el cómo leer VBAT, pero requiere inicializar el AUXADC
-del PMIC (que mainline no hace). NO es quick-win como el cargador. Bien acotado para retomar.
+**RESUELTO:** lector userspace `/usr/local/bin/battery` (repo `mainline/rootfs/battery`)
+por `pwrap_poke`, SIN recompilar kernel. Verificado: **VBAT 3719 mV (~33%)**, estable.
+Las direcciones que faltaban (de `upmu_common.c` downstream):
+- **OUT+RDY de BATSNS = `AUXADC_ADC0` = `0x0714`** (bits0-14 valor, bit15 ready). ← el HITO escaneó la zona CON (0x742+) y por eso no lo encontró; está en la zona ADC (0x0714-0x073A).
+- **VBUF_EN = `AUXADC_CON11` = `0x0758` bit4**.
+- request canal 7 = **CON22 `0x076E` bit7** (ya venía set en vivo, 0x00a0).
+- El `PMIC_IMM_PollingAuxadcChannel()` solo limpia ADC_DECI_GDLY (CON19 0x0768) — no hacía falta.
+
+Pendiente (no bloqueante): curva OCV→% real (hoy piecewise interina). El **voltaje es exacto**.
+
+---
+(Notas de investigación originales abajo.)
 
 ## De dónde sale VBAT
 `battery_meter_hal.c`: `PMIC_IMM_GetOneChannelValue(VBAT_CHANNEL_NUMBER=7)` → **AUXADC del

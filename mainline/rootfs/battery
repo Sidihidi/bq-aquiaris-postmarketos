@@ -1,0 +1,37 @@
+#!/bin/sh
+# -> /usr/local/bin/battery
+# Lee VBAT del MT6323 (AUXADC canal 7 = BATSNS = AUXADC_ADC0) por pwrap_poke.
+# Mapeo (de upmu_common.c downstream):
+#   OUT+RDY BATSNS = AUXADC_ADC0 = 0x0714 (bits0-14 valor, bit15 ready)
+#   VBUF_EN        = AUXADC_CON11 = 0x0758 bit4
+#   request canal7 = AUXADC_CON22 = 0x076E bit7
+#   VBAT_mV = raw * 4 * 1800 / 32768  (r_val=4, FULL_RANGE=1800, PRECISE=32768)
+# % por curva OCV INTERINA (piecewise); falta la ZCV real de cust_battery_meter_table.h.
+P=/usr/local/bin/pwrap_poke
+rd() { $P r "$1" | sed 's/.*= //'; }
+wr() { $P w "$1" "$(printf 0x%x $2)" >/dev/null; }
+
+v=$(rd 0x076E); wr 0x076E $(( v | (1<<7) ))   # pedir canal 7 (BATSNS)
+v=$(rd 0x0758); wr 0x0758 $(( v | (1<<4) ))   # VBUF_EN
+sleep 1
+
+sum=0; n=0; i=0
+while [ $i -lt 8 ]; do
+  val=$(rd 0x0714)
+  if [ $(( (val >> 15) & 1 )) -eq 1 ]; then
+    raw=$(( val & 0x7FFF )); sum=$(( sum + raw )); n=$(( n + 1 ))
+  fi
+  i=$(( i + 1 ))
+done
+[ $n -eq 0 ] && { echo "battery: sin lecturas validas"; exit 1; }
+raw=$(( sum / n ))
+mv=$(( raw * 4 * 1800 / 32768 ))
+
+if   [ $mv -ge 4200 ]; then pct=100
+elif [ $mv -ge 4000 ]; then pct=$(( 80 + (mv-4000)*20/200 ))
+elif [ $mv -ge 3850 ]; then pct=$(( 60 + (mv-3850)*20/150 ))
+elif [ $mv -ge 3700 ]; then pct=$(( 30 + (mv-3700)*30/150 ))
+elif [ $mv -ge 3400 ]; then pct=$(( (mv-3400)*30/300 ))
+else pct=0; fi
+
+echo "VBAT: ${mv} mV  (~${pct}%)   [raw=${raw} avg de ${n}]"
