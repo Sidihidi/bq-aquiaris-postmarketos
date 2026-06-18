@@ -27,14 +27,7 @@
 
 		bootargs = "earlycon=mtk8250,mmio32,0x11002000 console=ttyS0,921600n8 panic=15 clk_ignore_unused blkdevparts=mmcblk0:512K@512K(ebr1),10240K@9216K(protect_f),10240K@19456K(protect_s),6144K@71168K(sec_ro),1048576K@91136K(android),716800K@1140736K(cache),-@1856512K(usrdata) initcall_debug ignore_loglevel";
 
-		framebuffer0: framebuffer@bf400000 {
-			compatible = "simple-framebuffer";
-			reg = <0xbf400000 0x200000>;
-			width = <540>;
-			height = <960>;
-			stride = <1088>;
-			format = "r5g6b5";
-		};
+		/* FASE 6: simplefb retirado -> mtk_drm es el unico display */
 	};
 
 	memory@80000000 {

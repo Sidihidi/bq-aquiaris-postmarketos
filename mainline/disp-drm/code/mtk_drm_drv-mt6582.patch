@@ -29,3 +29,10 @@ static const struct mtk_mmsys_driver_data mt6582_mmsys_driver_data = {
 # RESULTADO (kernel #31, boot-disp6): bound ovl+rdma+color+dsi; "Initialized mediatek 1.0.0
 # on minor 1"; "fb1: mediatekdrmfb"; panel hx8389 dsi.0 returned 0. ¡EL PANEL PINTA POR DRM!
 # (pantalla amarilla = R/B/formato a afinar + conflicto con dispfix/simplefb aun activos).
+
+## FASE 6 (2026-06-18, kernel #33) — RETIRAR el hack viejo (arregla el color):
+# - DT: quitado el nodo framebuffer@bf400000 (simple-framebuffer) del chosen.
+# - drivers/video/fbdev/Makefile: comentado "obj-y += mt6582-dispfix.o".
+# RESULTADO: card0 = mediatek-drm (minor 0), fb0 mediatekdrmfb, PHOSH (phoc) arranca
+# autostart sobre el DRM real. Texto legible + fluido. (Antes el dispfix reprogramaba
+# el OVL y competia con mtk_drm -> amarillo.) Queda solo un tinte rojizo leve (opcional).
