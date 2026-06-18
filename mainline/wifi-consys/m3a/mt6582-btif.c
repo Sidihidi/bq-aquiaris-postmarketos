@@ -170,16 +170,19 @@ static int mt6582_btif_stp_send(struct mt6582_btif *b, u8 type,
 
 	if (len > 64)
 		return -EINVAL;
-	pkt[0] = 0x80 | (0 << 3) | 7;			/* seq=0, ack=7 */
+	/* BTIF_MAND_MODE: el ROM del CONSYS (antes del patch/firmware) usa el framing
+	 * SIMPLE -> header[0]=0x80 FIJO (sin seq/ack), header[3]=0x00 (sin checksum),
+	 * CRC=0x0000 (NO calculado). El modo FULLSET (seq/ack/CRC real) es DESPUÉS del patch. */
+	pkt[0] = 0x80;
 	pkt[1] = (type << 4) | ((len >> 8) & 0x0f);
 	pkt[2] = len & 0xff;
-	pkt[3] = (pkt[0] + pkt[1] + pkt[2]) & 0xff;
+	pkt[3] = 0x00;
 	n = 4;
 	memcpy(pkt + n, payload, len);
 	n += len;
-	crc = stp_crc16(payload, len);
-	pkt[n++] = crc & 0xff;
-	pkt[n++] = (crc >> 8) & 0xff;
+	pkt[n++] = 0x00;
+	pkt[n++] = 0x00;
+	crc = 0;	/* (solo para el log) */
 	dev_info(b->dev, "STP TX %u bytes (hdr %02x %02x %02x %02x, crc %04x): %*ph\n",
 		 n, pkt[0], pkt[1], pkt[2], pkt[3], crc, min_t(unsigned int, n, 16), pkt);
 	return mt6582_btif_tx(b, pkt, n);
@@ -190,8 +193,10 @@ static void mt6582_btif_hw_init(struct mt6582_btif *b)
 	u32 v;
 
 	btif_wr(b, BTIF_FAKELCR, 0);
-	/* HANDSHAKE ON: ahora que el MCU del CONSYS corre (mt6582-consys.c lo activó), el
-	 * "new handshake" se completa y habilita el flujo BIDIRECCIONAL (necesario p/ el RX). */
+	/* HANDSHAKE ON: NECESARIO para que el CONSYS reciba (sin él el PC del MCU no sale
+	 * de 0xe38). Con él, el MCU RECIBE y PROCESA el comando WMT (PC salta a 0x13e8c).
+	 * Pendiente: el RX CONSYS->AP en este modo (el AP no captura la respuesta -> el MCU
+	 * excepciona al responder). El RX downstream usa handshake activo (IRQ+VFF). */
 	v = btif_rd(b, BTIF_HANDSHAKE);
 	btif_wr(b, BTIF_HANDSHAKE, v | HANDSHAKE_EN);
 	btif_wr(b, BTIF_TRI_LVL, TRI_LVL_VAL);
@@ -202,10 +207,8 @@ static void mt6582_btif_hw_init(struct mt6582_btif *b)
 	btif_wr(b, BTIF_IER, 0);			/* sin IRQ */
 	/* despertar el MCU del CONSYS via WAK (ap_wakeup_consys): pulso clr->set. El MCU
 	 * parece dormido (CPUPCR fijo 0x23d8); ahora que el enlace clockea el WAK no bloquea. */
-	btif_wr(b, BTIF_WAK, 0);
-	udelay(80);
-	btif_wr(b, BTIF_WAK, WAK_BIT);
-	udelay(80);
+	/* WAK DESACTIVADO: asertar ap_wakeup_consys provoca el "jump from RST"; el MCU ya
+	 * corre en su loop (CPUPCR=0x0e38) esperando comandos por el BTIF. */
 	/* (obsoleto) NOTA: el WAK (despertar ap_wakeup_consys) se probó y dejaba LSR=0x0 en el
 	 * 2º TX -> fuera por ahora; el CONSYS ya está on (M1). */
 }
@@ -215,8 +218,10 @@ static int mt6582_btif_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct mt6582_btif *b;
 	static const u8 stp_resync[4] = { 0x7f, 0x7f, 0x7f, 0x7f };
-	/* WMT QUERY_BAUD: type=CMD(01) op=04 len=0001 payload=02 */
-	static const u8 wmt_query_baud[5] = { 0x01, 0x04, 0x01, 0x00, 0x02 };
+	/* WMT_QUERY_STP: el PRIMER comando real para BTIF (init_table_1_2). El QUERY_BAUD
+	 * {..0x02} es SOLO UART (#if CFG_WMT_UART_HIF_USE) y hacía excepcionar al MCU.
+	 * EVT esperado: {02 04 06 00 00 04 11 00 00 00}. */
+	static const u8 wmt_query_baud[5] = { 0x01, 0x04, 0x01, 0x00, 0x04 };
 	int ret;
 
 	/* esperar a que el CONSYS active su MCU (mt6582-consys.c); sin eso el enlace
@@ -258,28 +263,29 @@ static int mt6582_btif_probe(struct platform_device *pdev)
 	 * (LSR=0x60). Reintentamos resync + QUERY_BAUD varias veces por si el ROM
 	 * tarda en estar listo para procesar STP. */
 	{
-		int attempt;
+		void __iomem *mcu = ioremap(0x18070000, 0x200);
+		u32 pc0 = mcu ? readl(mcu + 0x160) : 0;
 
-		for (attempt = 0; attempt < 6; attempt++) {
-			b->rxcnt = 0;
-			mt6582_btif_tx(b, stp_resync, sizeof(stp_resync));
-			usleep_range(2000, 4000);
-			ret = mt6582_btif_stp_send(b, STP_TYPE_WMT, wmt_query_baud,
-						   sizeof(wmt_query_baud));
-			if (ret) {
-				dev_err(dev, "STP: WMT TX timeout intento %d (LSR=0x%x)\n",
-					attempt, btif_rd(b, BTIF_LSR));
-				msleep(20);
-				continue;
+		mt6582_btif_tx(b, stp_resync, sizeof(stp_resync));
+		usleep_range(2000, 4000);
+		dev_info(dev, "DIAG PC: tras_hwinit+lpbk=0x%x  tras_resync=0x%x\n",
+			 pc0, mcu ? readl(mcu + 0x160) : 0);
+		ret = mt6582_btif_stp_send(b, STP_TYPE_WMT, wmt_query_baud,
+					   sizeof(wmt_query_baud));
+		{
+			int k;
+
+			for (k = 0; k < 20; k++) {
+				mt6582_btif_rx_poll(b, 100);
+				dev_info(dev, "DIAG k=%2d PC=0x%-7x RX=%u: %*ph\n",
+					 k, mcu ? readl(mcu + 0x160) : 0, b->rxcnt,
+					 min_t(unsigned int, b->rxcnt, 16), b->rxlog);
+				if (b->rxcnt)
+					break;
 			}
-			mt6582_btif_rx_poll(b, 200);
-			dev_info(dev, "STP+WMT intento %d: LSR=0x%x RX=%u: %*ph\n",
-				 attempt, btif_rd(b, BTIF_LSR), b->rxcnt,
-				 min_t(unsigned int, b->rxcnt, 32), b->rxlog);
-			if (b->rxcnt)
-				break;
-			msleep(50);
 		}
+		if (mcu)
+			iounmap(mcu);
 	}
 	if (b->rxcnt)
 		dev_info(dev, "STP+WMT: *** EL CONSYS CONTESTA (%u bytes) — M3a CONSEGUIDO ***\n",
