@@ -8,6 +8,7 @@
  */
 
 /dts-v1/;
+#include <dt-bindings/gpio/gpio.h>
 #include "mt6582.dtsi"
 
 / {
@@ -282,5 +283,52 @@
 		reg = <0x1400b000 0x1000>;
 		interrupts = <GIC_SPI 156 IRQ_TYPE_LEVEL_LOW>;
 		clocks = <&mm_dummy_clk>;
+	};
+};
+
+/* ============ DISP DRM — FASE 3: DSI + PHY mipi-tx + panel HX8389 ============ */
+/ {
+	clk26m: clk26m {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <26000000>;
+	};
+};
+
+&{/soc} {
+	mipi_tx0: dsi-phy@10010000 {
+		compatible = "mediatek,mt2701-mipi-tx";
+		reg = <0x10010000 0x90>;
+		clocks = <&clk26m>;
+		clock-output-names = "mipi_tx0_pll";
+		#clock-cells = <0>;
+		#phy-cells = <0>;
+	};
+
+	dsi0: dsi@1400c000 {
+		compatible = "mediatek,mt2701-dsi";
+		reg = <0x1400c000 0x1000>;
+		interrupts = <GIC_SPI 157 IRQ_TYPE_LEVEL_LOW>;
+		clocks = <&mm_dummy_clk>, <&mm_dummy_clk>, <&mipi_tx0>;
+		clock-names = "engine", "digital", "hs";
+		phys = <&mipi_tx0>;
+		phy-names = "dphy";
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		panel@0 {
+			compatible = "truly,hx8389-qhd";
+			reg = <0>;
+			reset-gpios = <&eint 112 GPIO_ACTIVE_LOW>;
+			power-supply = <&mt6323_vgp2_reg>;
+		};
+	};
+};
+
+&mt6323regulator {
+	mt6323_vgp2_reg: ldo_vgp2 {
+		regulator-name = "vgp2";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
 	};
 };
