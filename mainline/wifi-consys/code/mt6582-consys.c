@@ -53,6 +53,20 @@
 #define CONSYS_CHIP_ID_6582	0x6582
 #define CONSYS_CHIP_ID_6572	0x6572
 
+/* --- activación del subsistema interno del CONSYS ---
+ * El M1 sólo hacía power SPM (basta p/chip-id). Para que el MCU corra el ROM y el
+ * enlace BTIF clockee (el shift TEMT se quedaba a 0), faltan estos 3 pasos que el
+ * downstream difería al "FW patch" (mtk_wcn_consys_hw_reg_ctrl). */
+#define TOPCKGEN_PHYS		0x10000000
+#define AP_RGU_PHYS		0x10007000
+#define TOP_CLKCG_CLR		0x084		/* CONSYS_TOP_CLKCG_CLR */
+#define TOP_CLKCG_CONSYS	(1U << 26)
+#define INFRA_PDN_CLR		0x044		/* ungate (CONNMCU = bit 12) */
+#define INFRA_CG_CONNMCU	(1U << 12)
+#define CONSYS_CPU_SW_RST	0x018		/* AP_RGU + 0x18 */
+#define CPU_SW_RST_BIT		(1U << 12)
+#define CPU_SW_RST_KEY		(0x88U << 24)
+
 struct mt6582_consys {
 	struct device *dev;
 	void __iomem *spm;
@@ -106,6 +120,33 @@ static int consys_spm_power_on(struct mt6582_consys *cs)
 	return 0;
 }
 
+/* El BTIF (mt6582-btif.c) espera a esto: hasta que el MCU del CONSYS no corre el
+ * ROM, su lado del enlace no clockea y el STP no llega. */
+bool mt6582_consys_ready;
+EXPORT_SYMBOL_GPL(mt6582_consys_ready);
+
+/* Activa el subsistema interno: clock de TOP + clock del MCU (INFRA) + suelta el
+ * reset del MCU -> el ROM corre y escucha STP por BTIF. */
+static void consys_activate_mcu(struct mt6582_consys *cs)
+{
+	void __iomem *topck = ioremap(TOPCKGEN_PHYS, 0x100);
+	void __iomem *rgu = ioremap(AP_RGU_PHYS, 0x100);
+	u32 v;
+
+	if (topck) {
+		writel(TOP_CLKCG_CONSYS, topck + TOP_CLKCG_CLR);	/* quitar clock-gating CONSYS */
+		iounmap(topck);
+	}
+	writel(INFRA_CG_CONNMCU, cs->infra + INFRA_PDN_CLR);		/* ungate clock del MCU */
+	if (rgu) {
+		v = readl(rgu + CONSYS_CPU_SW_RST);			/* deassert MCU reset (key 0x88) */
+		writel((v & ~CPU_SW_RST_BIT) | CPU_SW_RST_KEY, rgu + CONSYS_CPU_SW_RST);
+		iounmap(rgu);
+	}
+	msleep(30);	/* el MCU arranca el ROM y queda listo para escuchar STP */
+	dev_info(cs->dev, "CONSYS MCU activado (TOP_CLKCG bit26 + CONNMCU + deassert reset)\n");
+}
+
 static int mt6582_consys_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -146,6 +187,10 @@ static int mt6582_consys_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_v33;
 
+	/* activar el subsistema interno (clock TOP + clock MCU + soltar reset) para
+	 * que el ROM corra y el enlace BTIF clockee */
+	consys_activate_mcu(cs);
+
 	/* poll del chip-id: el CONSYS debe devolver 0x6582 */
 	for (t = 0; t < 10; t++) {
 		id = readl(cs->mcu_cfg + CONSYS_CHIP_ID);
@@ -157,6 +202,7 @@ static int mt6582_consys_probe(struct platform_device *pdev)
 	if (id == CONSYS_CHIP_ID_6582 || id == CONSYS_CHIP_ID_6572) {
 		dev_info(dev, "CONSYS VIVO: chip-id=0x%04x (PWR_CON=0x%x)\n",
 			 id, readl(cs->spm + SPM_CONN_PWR_CON));
+		mt6582_consys_ready = true;	/* desbloquea el probe del BTIF */
 		platform_set_drvdata(pdev, cs);
 		return 0;
 	}
