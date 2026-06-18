@@ -43,20 +43,36 @@ y el `crc=(crc>>8)^tbl[(crc^b)&0xff]` están **validados** contra `stp_core.c`.
   `mtk_wcn_consys_hw_reg_ctrl` (estaban en `#if 0`, "los hace el FW patch" — pero sin patch hay que
   hacerlos a mano):
 
-### ▶ SIGUIENTE = ACTIVAR EL SUBSISTEMA CONSYS (receta lista), luego el TX llegará
-Orden (todo con ioremap directo; bases físicas MT6582 = virtual 0xF0.. → 0x10..):
-1. **Quitar clock-gating del CONSYS**: `writel(1<<26, TOPCKGEN 0x10000000 + 0x84)` (CONSYS_TOP_CLKCG_CLR,
-   bit26). [+ opc. CONSYS_PWRON_CONFG_EN].
-2. **Ungate clock del MCU**: `MT_CG_INFRA_CONNMCU` (=44 → INFRA_PDN**1** bit (44-32)=12) en INFRACFG
-   0x10001000 (confirmar offset PDN1_CLR; PDN0 era SET 0x08/CLR 0x10/STA 0x18 → PDN1 suele +0x10).
-3. (opc.) `CONSYS_MCU_CFG_ACR` (0x18070000+0x110) bit18 MBIST + AFE regs.
-4. **Deassert MCU**: `CONSYS_CPU_SW_RST` (AP_RGU 0x10007000 + 0x18): clear bit12 con key 0x88<<24 →
-   `writel((readl(r) & ~(1<<12)) | (0x88<<24), r)`. → el MCU corre el ROM y **escucha STP por BTIF**.
-5. delay ~5ms, luego el TX del BTIF (ya funciona a nivel FIFO) clockeará → TEMT se vacía → el resync+
-   QUERY_BAUD LLEGAN → RX>0 con `WMT_QUERY_BAUD_EVT` (`02 04 06 00 00 02 ..`) = **M3a CONSEGUIDO**.
-   - El EVT esperado (de wmt_ic_soc.c): `WMT_QUERY_BAUD_EVT_115200 = {02 04 06 00 00 02 00 C2 01 00}`.
-6. Esta activación debería ir en `mt6582-consys.c` (M1), no en el btif. Luego: WMT_RESET → GET chipid/ver
-   → patch_dwn + WIFI_RAM_CODE = M3. IRQ (Fase E) al final con `IRQ_NONE` si `!(LSR&DR)`.
+### ✅✅ ACTIVACIÓN DEL CONSYS FUNCIONA — EL ENLACE FÍSICO AP↔CONSYS TRANSMITE (`boot-btifACT.img`)
+Implementado en `mt6582-consys.c` (`consys_activate_mcu`, tras el SPM power): **(1)** TOP_CLKCG_CLR
+`writel(1<<26, ioremap(0x10000000)+0x84)`; **(2)** ungate CONNMCU `writel(1<<12, cs->infra+0x44)`
+(INFRA_PDN_CLR, INFRACFG 0x10001000); **(3)** deassert MCU `writel((readl(0x10007018)&~(1<<12))|(0x88<<24),
+…)`; msleep(30). Y `bool mt6582_consys_ready`(EXPORT) → el **btif hace EPROBE_DEFER** hasta que el
+CONSYS está listo (resuelve el orden: btif 1.9s vs consys 3.5s). dmesg:
+```
+CONSYS MCU activado (TOP_CLKCG bit26 + CONNMCU + deassert reset)
+CONSYS VIVO: chip-id=0x6582                  (la activación NO rompió nada)
+probe of btif returned 517                   (DEFER, espera al consys) -> luego returned 0
+STP: tras resync LSR=0x60                    ← ¡0x60! (antes 0x20) TEMT SE VACÍA = el shift clockea
+STP TX 11 bytes (87 00 05 8c 01 04 01 00 02 ec f1)   x6 intentos, todos LSR=0x60
+STP+WMT intento N: LSR=0x60 RX=0             (el paquete LLEGA al CONSYS pero NO contesta)
+```
+**→ MURO FÍSICO ROTO**: la activación del MCU hizo que el shift clockee (LSR 0x20→0x60); el
+QUERY_BAUD se transmite entero y repetido al CONSYS. **Falta sólo que el CONSYS CONTESTE** (RX=0
+tras 6 intentos + 30ms + reintentos). Es protocolo fino, no físico.
+
+### ▶ SIGUIENTE = que el CONSYS CONTESTE (RX=0) — hipótesis ordenadas (investigar, no disparar)
+1. **Habilitación/ruta del RX del BTIF**: confirmar que el RX del AP recibe (¿necesita el FIFO RX o
+   un enable que el hw_init no pone?). Quizá falta `RX IER`/trigger aunque leamos por polling.
+2. **WAK / handshake HW**: el CONSYS quizá no "ve" el frame hasta que el AP asierta `ap_wakeup_consys`
+   (BTIF_WAK 0x64, pulso clr→delay→set) o se reactiva el **HANDSHAKE** (0x6C bit0) — ahora que el MCU
+   corre, el handshake podría completarse (antes bloqueaba el TX porque el MCU estaba en reset).
+3. **Delimiter STP**: `stp_core.c` envía un `stp_delimiter` (STP_DEL) antes del frame si
+   `fgEnableDelimiter`. Revisar STP_DEL_SIZE/contenido y mandarlo.
+4. **type/seq/ack o el ROM**: confirmar STP type=WMT(0); ¿el ROM del CONSYS escucha BTIF directo o
+   necesita un trigger previo? Revisar `wmt_ic_soc.c mtk_wcn_soc_sw_init` (qué hace ANTES de QUERY_BAUD).
+EVT esperado: `WMT_QUERY_BAUD_EVT_115200 = {02 04 06 00 00 02 00 C2 01 00}`. Cuando RX>0 coherente =
+**M3a**. Luego WMT_RESET → GET chipid/ver → patch_dwn + WIFI_RAM_CODE = M3; IRQ (Fase E) al final.
 
 ---
 
