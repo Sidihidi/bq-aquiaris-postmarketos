@@ -74,6 +74,21 @@ tras 6 intentos + 30ms + reintentos). Es protocolo fino, no físico.
 EVT esperado: `WMT_QUERY_BAUD_EVT_115200 = {02 04 06 00 00 02 00 C2 01 00}`. Cuando RX>0 coherente =
 **M3a**. Luego WMT_RESET → GET chipid/ver → patch_dwn + WIFI_RAM_CODE = M3; IRQ (Fase E) al final.
 
+### ✅✅✅✅ EL MCU RECIBE Y PROCESA NUESTROS COMANDOS WMT (2026-06-19 madrugada)
+Instrumentando el PC del MCU (CONN_MCU_CONFIG 0x18070160) tras cada paso del btif:
+- Con EMI+OSC el MCU corre en su **loop idle CPUPCR=0x0e38** esperando comandos (4s+ sin excepcionar).
+- hw_init + loopback + resync: PC sigue en 0x0e38 (no le afectan).
+- **al enviar el comando WMT el PC SALTA a 0x13e8c → 0x2eac → 0x13e7a** = el MCU EJECUTA el handler
+  ~700ms. **RECIBE Y PROCESA lo que le mandamos.** Luego (k≈9) entra en exp_main (0x23d8)+coredump. RX=0.
+- **Claves descubiertas**: (1) comando correcto p/BTIF = **WMT_QUERY_STP** `{01 04 01 00 04}` (el
+  QUERY_BAUD `{..02}` es SOLO UART, `#if CFG_WMT_UART_HIF_USE`); (2) framing **BTIF_MAND_MODE** (header
+  `80 00 LL 00`, sin seq/ack, **CRC=0000**), no FULLSET; (3) **HANDSHAKE (0x6C bit0) NECESARIO** para
+  que el CONSYS reciba (sin él el PC no sale de 0x0e38 y no excepciona).
+- **PENDIENTE (último tramo) = RX CONSYS→AP en handshake mode**: el MCU procesa y responde, pero el AP
+  no captura la respuesta (RX=0) → el MCU excepciona. El RX downstream NO es PIO simple: handshake
+  activo (IRQ BTIF + DMA/VFF + rx_irq_handler/rx_thread). Implementarlo = **M3a COMPLETO**. A UN paso:
+  el canal AP→CONSYS funciona; falta CONSYS→AP.
+
 ### ✅✅✅ EL MCU DEL CONSYS EJECUTA — faltaban EMI + OSC 26M (2026-06-18 noche)
 El M1 no hacía dos pasos que el downstream sí (`mtk_wcn_consys_hw_init`):
 1. **EMI compartida**: reservar 1MB de RAM (`dma_alloc_coherent`) + decirle al CONSYS dónde está vía
