@@ -59,8 +59,15 @@ Reguladores PMIC (MT6323, ya en el driver mainline — faltan nodos DT):
 ## ROADMAP (milestones)
 - **M1 — Bring-up + chip-id [✅ LOGRADO 2026-06-18]**: `code/mt6582-consys.c` (platform_driver) +
   DT integrado. Enciende CONSYS (reguladores+MTCMOS) y lee `chip-id=0x6582`. HW probado.
-- **M2 — Firmware**: extraer `WIFI_RAM_CODE*`, `mt66xx_patch_hdr.bin`, `WMT*.cfg` del stock
-  system.img → `/lib/firmware/`. Entender el formato de cabecera del patch.
+- **M2 — Firmware [✅ LOGRADO 2026-06-18]**: extraídos del stock `system.img` (sparse →
+  `simg2img` → mount ro → `/etc/firmware/`) y copiados al **`/lib/firmware/` del teléfono**:
+  `WIFI_RAM_CODE_MT6582` (160KB, el de nuestro chip), `WIFI_RAM_CODE`/`_E6`/`_MT6628` (variantes),
+  `mt6572_82_patch_e1_0_hdr.bin` + `e1_1` (patch WMT/conn MT6572/82 rev E1), `WMT_SOC.cfg`.
+  **`WMT_SOC.cfg`**: `coex_wmt_ant_mode=1`, `co_clock_flag=0` (← param `co_clock_en` del power-on:
+  0 = CONSYS usa su propio clock, VCN28 en modo HW), gps_lna off. build.prop confirma
+  `mediatek.wlan.chip=CONSYS_MT6582`, `wifi.interface=wlan0`. Blobs propietarios MTK → NO se
+  commitean al repo público; copia en Pi `~/wifi-fw/extracted/` + `system.img` guardado para
+  re-extraer. (El formato del patch `_hdr.bin`: cabecera + payload, a parsear en M3.)
 - **M3 — WMT + descarga FW**: portar el handshake WMT (BTIF/serial interno o EMI), reservar EMI,
   soltar reset del MCU, descargar firmware, esperar el "ready". El más incierto.
 - **M4 — 802.11 / cfg80211**: el camino largo — o forward-port de `mt_wifi/wlan` (3.10→7.0.12,
