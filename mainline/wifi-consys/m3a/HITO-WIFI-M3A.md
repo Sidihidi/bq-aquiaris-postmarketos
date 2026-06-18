@@ -74,6 +74,30 @@ tras 6 intentos + 30ms + reintentos). Es protocolo fino, no físico.
 EVT esperado: `WMT_QUERY_BAUD_EVT_115200 = {02 04 06 00 00 02 00 C2 01 00}`. Cuando RX>0 coherente =
 **M3a**. Luego WMT_RESET → GET chipid/ver → patch_dwn + WIFI_RAM_CODE = M3; IRQ (Fase E) al final.
 
+### ⛔ DIAGNÓSTICO (2026-06-18): el MCU del CONSYS NO EJECUTA — el muro real
+Probado en HW (`boot-btifACT`): reintentos(6) + HANDSHAKE on + **loopback** (`RX del AP FUNCIONA`:
+envié `aa bb cc dd`, recibí `aa bb cc dd` → el RX del AP es perfecto) + **WAK** (pulso clr→set). Todo RX=0.
+Leído por `devmem` en el teléfono vivo:
+- `CONSYS_CPUPCR (0x18070160) = 0x23d8` **FIJO** (5+ lecturas, 1s entre ellas) → **el MCU NO avanza**.
+- `CONSYS_CPU_SW_RST (0x10007018) = 0x0` → reset bit12 **deasserted** ✓.
+- `INFRA_PDN_STA (0x10001048) = 0x0` → clock CONNMCU (bit12) **ON** ✓.
+- chip-id `0x6582` legible; cfg `0x18070000=0x8a01`, `0x18070004=0x8a00`.
+
+→ El MCU tiene **clock + reset OK pero está clavado en 0x23d8**. El enlace BTIF funciona en AMBOS
+sentidos (TX llega, RX del AP recibe en loopback); el problema NO es el BTIF sino que **el ROM del MCU
+no arranca a ejecutar**. El WAK no lo despierta.
+
+### ▶▶ SIGUIENTE = arrancar el MCU del CONSYS (bring-up, investigar — NO disparar):
+1. **Pasos `#if 0` del downstream que faltan** (añadir a `consys_activate_mcu` en orden): `ROM_RAM_DELSEL`
+   (0x18070114), `MCU_CFG_ACR` (0x18070110) bit18 MBIST, **AFE regs** (CONSYS_AFE_*), `PWRON_CONFG_EN`.
+   Alguno puede ser prerequisito de que el ROM ejecute.
+2. **Orden/secuencia de reset**: el downstream hace assert reset → clocks/power → ... → deassert. Probar
+   un pulso de reset limpio: assert CPU_SW_RST (bit12=1 + key 0x88) ANTES de los clocks, luego deassert.
+3. **Entender 0x23d8**: ¿vector de reset (MCU nunca arrancó) o bucle de espera del ROM? Buscar en
+   downstream/firmware el dump del ROM o el CPUPCR esperado tras un power-on correcto.
+4. Si el ROM espera el patch en SRAM antes de ejecutar: cargar `mt6572_82_patch` en la SRAM del CONSYS
+   antes del deassert (camino más complejo, ya es parte de M3).
+
 ---
 
 ## ⛔ (HISTÓRICO) RESULTADO INICIAL: `boot-m3a.img` HACÍA BOOTLOOP en el logo BQ
