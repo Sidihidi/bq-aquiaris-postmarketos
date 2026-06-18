@@ -336,6 +336,25 @@
 		regulator-min-microvolt = <2800000>;
 		regulator-max-microvolt = <2800000>;
 	};
+
+	/* WiFi CONSYS: digital 1.8V + analog 2.8V + RF WiFi 3.3V */
+	mt6323_vcn18_reg: ldo_vcn18 {
+		regulator-name = "vcn18";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+	};
+
+	mt6323_vcn28_reg: ldo_vcn28 {
+		regulator-name = "vcn28";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+	};
+
+	mt6323_vcn33_wifi_reg: ldo_vcn33_wifi {
+		regulator-name = "vcn33_wifi";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+	};
 };
 
 /* ============ lima / Mali-400 MP2 (GPU) ============ */
@@ -357,5 +376,22 @@
 		interrupt-names = "gp", "gpmmu", "pp0", "ppmmu0", "pp1", "ppmmu1";
 		clocks = <&gpu_bus_clk>, <&gpu_core_clk>;
 		clock-names = "bus", "core";
+	};
+};
+
+/* ============ WiFi CONSYS MT6582 — M1 bring-up (lee chip-id) ============
+ * driver mt6582-consys.c: enciende el CONSYS (reguladores VCN + MTCMOS SPM,
+ * mismo patron que el MFG) y lee CONSYS_CHIP_ID (0x18070008) -> debe dar 0x6582.
+ * SPM/INFRACFG los mapea el driver por constante; reg aqui = CONN_MCU_CONFIG.
+ * IRQ WF_HIF = SPI 164 (downstream WF_HIF_IRQ_ID). */
+&{/soc} {
+	consys: consys@18070000 {
+		compatible = "mediatek,mt6582-consys";
+		reg = <0x18070000 0x1000>;
+		interrupts = <GIC_SPI 164 IRQ_TYPE_LEVEL_LOW>;
+		vcn18-supply = <&mt6323_vcn18_reg>;
+		vcn28-supply = <&mt6323_vcn28_reg>;
+		vcn33-supply = <&mt6323_vcn33_wifi_reg>;
+		status = "okay";
 	};
 };
