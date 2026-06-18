@@ -1,8 +1,35 @@
 # M3a — "el CONSYS habla": BTIF + STP + WMT (guía de implementación para casa)
 
-## ⛔ RESULTADO 2026-06-18: `boot-m3a.img` HACE BOOTLOOP en el logo BQ
-`boot-m3a.img` (USER_NS + WiFi M1 + **BTIF M3a**) **no pasa del logo** (bootloop, cuelga MUY
-temprano, antes de consola/switch_root). NO llegamos a leer ningún log.
+## ✅ FASE A RESUELVE EL BOOTLOOP (2026-06-18, `boot-btifA.img`) — EL BUS BTIF VIVE
+Reescrito `mt6582-btif.c` a **Fase A pasiva**: ungate del clock PERI_BTIF + leer LSR/IIR,
+**SIN `request_irq`, SIN `IER`, SIN TX**. Resultado en HW: **ARRANCA a Alpine/Phosh**, el BTIF
+`probe returned 0`, sin abort/panic. dmesg:
+```
+faseA clock BTIF: PDN0_STA 0x00000000 -> 0x00000000 (bit20 gated: 0 -> 0)
+faseA BTIF pasivo: irq=195 LSR=0x00000060 IIR=0x00000001 (bus vivo)
+probe of 1100c000.btif returned 0 after 2869 usecs
+```
+- `bit20 gated: 0 -> 0` → **el clock PERI_BTIF YA estaba ON** (clk_ignore_unused/LK). El clock
+  NO era la causa del bootloop.
+- `LSR=0x60` = THRE|TEMT (TX holding+shift vacíos, valor SANO) → **el bus BTIF está listo.**
+- → **CAUSA REAL DEL BOOTLOOP = la tormenta de IRQ**: la v1 hacía `request_irq` + `IER_RXFEN`
+  con la ISR sin filtrar (lee RBR solo si LSR.DR, pero devuelve IRQ_HANDLED siempre); con la
+  línea SPI en LEVEL_LOW asertada → re-dispara en bucle infinito. Sin registrar el IRQ, arranca.
+- Clock BTIF (por si hiciera falta forzarlo): `MT_CG_PERI_BTIF`=bit20, ungate=`writel(1<<20,
+  PERICFG 0x10003000 + PDN0_CLR 0x10)`, estado en PDN0_STA 0x18 (bit=1 → gated). Reset MCU
+  CONSYS: en downstream está en `#if 0` (lo difiere al FW patch) → NO hace falta tocarlo.
+
+### ▶ SIGUIENTE = Fase C+D (TX + RX por POLLING, sin IRQ)
+TX del resync (4×0x7F) por `poll LSR.THRE → write THR`; RX por `poll LSR.DR → read RBR` acotado
+(~200 ms) + log de bytes. Si **RX>0**, el CONSYS responde algo (buena señal). Luego STP
+(header 4B + CRC16 del `stp_core.c`) + WMT `QUERY_BAUD` = M3a completo. El IRQ (Fase E) al final,
+con la ISR devolviendo `IRQ_NONE` si `!(LSR&DR)` para no colgar el GIC.
+
+---
+
+## ⛔ (HISTÓRICO) RESULTADO INICIAL: `boot-m3a.img` HACÍA BOOTLOOP en el logo BQ
+`boot-m3a.img` (USER_NS + WiFi M1 + **BTIF v1**) **no pasaba del logo** (bootloop, cuelga MUY
+temprano, antes de consola/switch_root). NO llegamos a leer ningún log. → resuelto arriba (Fase A).
 
 ### 🔧 RECUPERAR EL TELÉFONO (hacer ESTO primero)
 Fastboot (Power 10s → Power+Vol↑, pantalla negra normal) y desde la Pi (`~/mainline/pkg`):
