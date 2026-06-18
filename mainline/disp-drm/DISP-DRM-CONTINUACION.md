@@ -5,7 +5,38 @@
 > (`mtk_drm`) → flujo de frames por DSI → MUTEX latchea con SOF → **backlight
 > controlable** + vsync + base GPU.
 
-## ⚠️⚠️ HALLAZGO CLAVE FASE 3 (2026-06-18 tarde, kernels #29/#30) — CAMBIA EL ENFOQUE
+## 🏆🏆🏆 HITO (2026-06-18, kernel #31, boot-disp6) — EL DRM PINTA EL PANEL
+**El driver `mtk_drm` mainline inicializa y escanea el panel HX8389 del MT6582.** Ramoops del boot:
+```
+probe of 10010000.dsi-phy returned 0                     # PHY mipi-tx OK
+component match: ovl, rdma, color, dsi (los 4)
+bound 14007000.ovl / 14008000.rdma / 1400b000.color / 1400c000.dsi
+[drm] Initialized mediatek 1.0.0 ... on minor 1          # DRM device creado (card1)
+[drm] fb1: mediatekdrmfb frame buffer device
+probe of 1400c000.dsi.0 returned 0                        # panel hx8389 enganchado
+```
+Pantalla **AMARILLA** = el OVL→RDMA→COLOR→DSI escaneando de verdad. El boot **siguió** (montó p7,
+switch_root a Alpine) — NO cuelga; fue lento (`crng init` 61s, sin entropía → sshd/red tardan).
+
+**Los 4 fixes que lo lograron** (ver `code/mtk_drm_drv-mt6582.patch` + el OF graph en el DT):
+1. **OF graph DSI↔panel** (ports/endpoints) → el panel engancha (`mipi_dsi_attach`).
+2. **Quitar BLS** del path mt2701 (`mt2701_mtk_ddp_main`).
+3. **mt6582-mmsys en `mtk_drm_of_ids`** (+ data) → el master mediatek-drm enlaza (era el -ENODEV).
+4. **mt6582-disp-rdma en la tabla de tipos del DRM** → el RDMA entra al path (era "Failed to find comp in ddp table").
+
+**PENDIENTE — afinado (NO muro):**
+- **Color (amarillo = R/B/formato):** probar formato del OVL/RDMA o `bus_format` del panel; y sobre
+  todo **RETIRAR `mt6582-dispfix.c` + simplefb** (FASE 6) — siguen activos y compiten por el OVL
+  (probable causa del amarillo). Con el DRM funcionando ya no hacen falta.
+- **Boot lento:** `crng init` 61s → añadir entropía (haveged / `random.trust_cpu` / rng) para que
+  sshd y la red suban rápido. (El boot llega a Alpine, solo tarda.)
+- **Phosh autostart** ya configurado (`rootfs/zzzz-phosh.start`, jwm/startx deshabilitado).
+
+Recuperación de pantalla mientras se afina: `boot-simpledrm.img`.
+
+---
+
+## ⚠️⚠️ HALLAZGO CLAVE FASE 3 (2026-06-18 tarde, kernels #29/#30) — (resuelto arriba)
 Tras escribir el panel + DSI + mipi-tx + DT (boot-disp3/disp4) y flashear:
 - ✅ **El panel YA ENGANCHA**: `probe of 1400c000.dsi.0 returned 0`. El `mipi_dsi_attach -ENODEV`
   se arregló añadiendo el **OF graph DSI↔panel** (ports/endpoints; el panel como hijo simple NO basta
