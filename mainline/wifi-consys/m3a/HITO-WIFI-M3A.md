@@ -74,7 +74,34 @@ tras 6 intentos + 30ms + reintentos). Es protocolo fino, no físico.
 EVT esperado: `WMT_QUERY_BAUD_EVT_115200 = {02 04 06 00 00 02 00 C2 01 00}`. Cuando RX>0 coherente =
 **M3a**. Luego WMT_RESET → GET chipid/ver → patch_dwn + WIFI_RAM_CODE = M3; IRQ (Fase E) al final.
 
-### ⛔ DIAGNÓSTICO (2026-06-18): el MCU del CONSYS NO EJECUTA — el muro real
+### ✅✅✅ EL MCU DEL CONSYS EJECUTA — faltaban EMI + OSC 26M (2026-06-18 noche)
+El M1 no hacía dos pasos que el downstream sí (`mtk_wcn_consys_hw_init`):
+1. **EMI compartida**: reservar 1MB de RAM (`dma_alloc_coherent`) + decirle al CONSYS dónde está vía
+   `CONSYS_EMI_MAPPING` (0x10001310 = `cs->infra+0x310`) = `(emi_phys>>20)|0x1000`. Sin su RAM el MCU
+   no puede arrancar/trazar.
+2. **Oscilador 26M**: `AP2CONN_OSC_EN` (0x10001f00 = `cs->infra+0xf00`) **bit10** estaba a **0** (26M del
+   CONSYS apagado). Ponerlo a 1 tras el power.
+Implementado en `mt6582-consys.c` (`consys_setup_emi` + OSC en `consys_activate_mcu`). **RESULTADO: el
+MCU EJECUTA** — escribe un trace/coredump en la EMI que **REAPARECE tras `memset`** cada boot. En
+`0xbb180400` (=gConEmiPhyBase+0x80400, PAGED_TRACE):
+```
+{asser_type=4}<2>exp_main: maybe jump from RST  EXP_MAIN_ENTRY_CNT=1
+[DLMfull] dump_base=0xF0090400 ... PagedDumpSz=0xA5269 ... TotalTimeForDump
+```
+→ El MCU arranca, ejecuta y entra en su exception handler (`exp_main`, `asser_type=4 / jump from RST`),
+hace un coredump y se queda ahí (CPUPCR=0x23d8 = exp_main). **De "el MCU no hace nada" a "ejecuta y deja
+un coredump". La idea del system.img (→EMI) fue la clave.** Sigue RX=0 (en exp_main no atiende el BTIF).
+
+### ▶▶▶ SIGUIENTE = evitar/entender el assert `jump from RST` (debugging del firmware CONSYS):
+- Es del **firmware** del CONSYS (no del kernel-source). Hipótesis: (a) **watchdog del CONN_MCU** que
+  resetea el MCU si el AP no completa un handshake/kick → localizar y deshabilitar/patear; (b) el ROM
+  **espera el patch** y al no recibirlo excepciona (pero el patch va por BTIF y en exp_main no responde
+  al QUERY_BAUD); (c) faltan pasos de init del MCU (`#if 0`: ROM_RAM_DELSEL 0x18070114, MCU_CFG_ACR
+  0x18070110 bit18 MBIST, AFE). ACR leído=0x00300002 (MBIST off), DELSEL=0xaaa0aaab.
+- **Recurso**: kernel Huawei `h30t00` (MT6582) en GitHub tiene `mtk_wcn_consys_hw.c` completo (con #if
+  resueltos) — comparar el flujo. Leer el coredump completo (regiones DLM/B2/B3 en la EMI) para el PC/LR.
+
+### ⛔ (SUPERADO la misma noche) Diagnóstico inicial: parecía que el MCU NO ejecutaba
 Probado en HW (`boot-btifACT`): reintentos(6) + HANDSHAKE on + **loopback** (`RX del AP FUNCIONA`:
 envié `aa bb cc dd`, recibí `aa bb cc dd` → el RX del AP es perfecto) + **WAK** (pulso clr→set). Todo RX=0.
 Leído por `devmem` en el teléfono vivo:
