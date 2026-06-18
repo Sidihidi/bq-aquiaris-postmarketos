@@ -321,6 +321,18 @@
 			reg = <0>;
 			reset-gpios = <&eint 112 GPIO_ACTIVE_LOW>;
 			power-supply = <&mt6323_vgp2_reg>;
+			port {
+				panel_in: endpoint { remote-endpoint = <&dsi0_out>; };
+			};
+		};
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			port@1 {
+				reg = <1>;
+				dsi0_out: endpoint { remote-endpoint = <&panel_in>; };
+			};
 		};
 	};
 };
