@@ -2,33 +2,30 @@
 /*
  * mt6582-btif.c — transporte BTIF del MT6582 (canal serie AP<->CONSYS), modo PIO.
  *
- * ⛔ ESTA v1 HACE BOOTLOOP (boot-m3a.img, 2026-06-18): cuelga en el logo, muy temprano.
- *    Sospecha: tormenta de IRQ SPI50 (request_irq+IER_RXFEN con la ISR sin limpiar la
- *    fuente real) o BTIF sin clock (readl -> external abort). Ver HITO-WIFI-M3A.md:
- *    reescribir POR FASES (A pasivo solo-ioremap+log, B clock+reset MCU, C TX polled,
- *    D RX polled, E IRQ al final). NO flashear tal cual sin el arreglo por fases.
+ * ===== FASE A: DIAGNÓSTICO PASIVO (2026-06-18) =====
+ * La v1 hacía BOOTLOOP (boot-m3a.img: cuelga en el logo, antes de consola). Dos
+ * sospechas (HITO-WIFI-M3A.md): (1) tormenta de IRQ en SPI50 (request_irq+IER con
+ * la ISR sin limpiar la fuente real), (2) BTIF SIN CLOCK -> el primer readl/writel
+ * da *external abort* y cuelga. Confirmado en el downstream: el clock del BTIF es
+ * MT_CG_PERI_BTIF (=bit 20 de PERI_PDN0), y el M1 encendió el CONSYS pero NADIE
+ * ungateó el clock del BTIF (periférico del lado AP) -> casi seguro la causa (2).
  *
- * M3a "el CONSYS habla": el BTIF es el bus serie interno por el que corre STP/WMT
- * para hablar con el CONSYS (WiFi/BT/GPS/FM). Este driver levanta el BTIF en modo
- * PIO (sin DMA VFF, mucho más simple) y expone TX/RX por bytes + logging de RX.
+ * Esta Fase A ataca AMBAS y es 100% pasiva:
+ *   - UNGATEA el clock del BTIF (PERI_PDN0_CLR bit20 @ 0x10003010) ANTES de tocar
+ *     el BTIF  ->  mata la causa (2).
+ *   - NO request_irq, NO escribe IER, NO hace TX  ->  mata la causa (1).
+ *   - Solo LEE LSR/IIR y los loguea. Si el boot llega a Phosh/SSH y LSR es un valor
+ *     sano (no 0xffffffff), el bus BTIF vive con el clock -> seguimos con TX/RX
+ *     (Fase C/D) y luego IRQ (Fase E).
  *
- * Encima de esto va la capa STP (trama 4B + CRC16 + resync) y WMT (handshake +
- * descarga de firmware) — ver HITO-WIFI-M3A.md. Este fichero es SOLO el transporte.
- *
- * Registros del core BTIF (de downstream hal_btif.h, base física 0x1100C000):
- *   RBR/THR 0x00 (RX ro / TX wo), IER 0x04, IIR 0x08 (ro) / FIFOCTRL 0x08 (wo),
- *   FAKELCR 0x0C, LSR 0x14, SLEEP_EN 0x48, DMA_EN 0x4C, RTOCNT 0x54,
- *   TRI_LVL 0x60, WAK 0x64, HANDSHAKE 0x6C.   IRQ = GIC_SPI 50.
- *
- * Es un 16550 extendido -> en PIO: TX = poll LSR.THRE + write THR; RX = IRQ + read RBR.
+ * Registros del core BTIF (base física 0x1100C000): RBR/THR 0x00, IER 0x04,
+ * IIR 0x08 (ro) / FIFOCTRL 0x08 (wo), FAKELCR 0x0c, LSR 0x14.  IRQ = GIC_SPI 50.
  */
 #include <linux/io.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
-#include <linux/interrupt.h>
 #include <linux/delay.h>
-#include <linux/spinlock.h>
 
 #define BTIF_RBR		0x00	/* RX buffer (ro) */
 #define BTIF_THR		0x00	/* TX holding (wo) */
@@ -37,131 +34,80 @@
 #define BTIF_FIFOCTRL		0x08	/* wo */
 #define BTIF_FAKELCR		0x0c
 #define BTIF_LSR		0x14
-#define BTIF_SLEEP_EN		0x48
-#define BTIF_DMA_EN		0x4c
-#define BTIF_RTOCNT		0x54
-#define BTIF_TRI_LVL		0x60
-#define BTIF_WAK		0x64
-
-#define IER_RXFEN		(1u << 0)	/* RX buffer tiene datos */
-#define IER_TXEEN		(1u << 1)	/* TX holding vacío */
-#define IIR_RX			(1u << 2)
-#define FIFOCTRL_CLR_RX		(1u << 1)
-#define FIFOCTRL_CLR_TX		(1u << 2)
-#define FAKELCR_NORMAL		0x00
 #define LSR_DR			(1u << 0)	/* dato recibido listo */
 #define LSR_THRE		(1u << 5)	/* TX holding vacío */
 #define LSR_TEMT		(1u << 6)	/* TX shift vacío */
-#define DMA_EN_OFF		0x00		/* PIO: ni RX ni TX DMA */
-#define WAK_BIT			(1u << 0)
 
-#define BTIF_RX_LOG		64
+/* PERICFG: clock-gate del BTIF. MT_CG_PERI_BTIF = 20 (downstream mt_clkmgr.h).
+ * Ungate (power up) = escribir el bit a PERI_PDN0_CLR; estado en PERI_PDN0_STA
+ * (bit=1 => clock GATED). Base física 0x10003000 (el 0xF0003000 era el virtual). */
+#define PERICFG_PHYS		0x10003000
+#define PERICFG_SIZE		0x100
+#define PERI_PDN0_SET		0x08
+#define PERI_PDN0_CLR		0x10
+#define PERI_PDN0_STA		0x18
+#define PERI_CG_BTIF		(1u << 20)
 
 struct mt6582_btif {
 	struct device *dev;
 	void __iomem *base;
 	int irq;
-	spinlock_t lock;
-	/* log de los primeros bytes RX para ver si el CONSYS contesta */
-	u8 rxlog[BTIF_RX_LOG];
-	unsigned int rxcnt;
 };
 
-static inline u32 btif_rd(struct mt6582_btif *b, u32 off) { return readl(b->base + off); }
-static inline void btif_wr(struct mt6582_btif *b, u32 off, u32 v) { writel(v, b->base + off); }
-
-/* --- API de transporte (la usará la capa STP) --- */
-int mt6582_btif_tx(struct mt6582_btif *b, const u8 *buf, size_t len)
+/* Ungatea el clock del BTIF en PERICFG. Devuelve PERI_PDN0_STA tras el ungate
+ * (bit20 debería quedar a 0). Pasivo y seguro: PERICFG siempre está accesible. */
+static u32 mt6582_btif_clk_ungate(struct device *dev)
 {
-	size_t i;
-	int t;
+	void __iomem *peri;
+	u32 before = 0, after = 0;
 
-	for (i = 0; i < len; i++) {
-		for (t = 0; t < 100000; t++) {
-			if (btif_rd(b, BTIF_LSR) & LSR_THRE)
-				break;
-			udelay(1);
-		}
-		if (t == 100000)
-			return -ETIMEDOUT;
-		btif_wr(b, BTIF_THR, buf[i]);
+	peri = ioremap(PERICFG_PHYS, PERICFG_SIZE);
+	if (!peri) {
+		dev_warn(dev, "faseA: no pude mapear PERICFG @0x%08x\n", PERICFG_PHYS);
+		return 0xdeadbeef;
 	}
-	/* esperar a que vacíe el shift register */
-	for (t = 0; t < 100000; t++) {
-		if (btif_rd(b, BTIF_LSR) & LSR_TEMT)
-			break;
-		udelay(1);
-	}
-	return 0;
-}
-EXPORT_SYMBOL_GPL(mt6582_btif_tx);
-
-static irqreturn_t mt6582_btif_isr(int irq, void *data)
-{
-	struct mt6582_btif *b = data;
-	unsigned long flags;
-	u8 c;
-
-	spin_lock_irqsave(&b->lock, flags);
-	while (btif_rd(b, BTIF_LSR) & LSR_DR) {
-		c = btif_rd(b, BTIF_RBR) & 0xff;
-		if (b->rxcnt < BTIF_RX_LOG)
-			b->rxlog[b->rxcnt] = c;
-		b->rxcnt++;
-	}
-	spin_unlock_irqrestore(&b->lock, flags);
-	return IRQ_HANDLED;
-}
-
-static void mt6582_btif_hw_init(struct mt6582_btif *b)
-{
-	btif_wr(b, BTIF_FAKELCR, FAKELCR_NORMAL);		/* modo normal */
-	btif_wr(b, BTIF_DMA_EN, DMA_EN_OFF);			/* PIO, sin DMA */
-	btif_wr(b, BTIF_FIFOCTRL, FIFOCTRL_CLR_RX | FIFOCTRL_CLR_TX);
-	btif_wr(b, BTIF_TRI_LVL, 0);				/* trigger mínimo */
-	btif_wr(b, BTIF_WAK, WAK_BIT);				/* despertar módulo */
-	btif_wr(b, BTIF_IER, IER_RXFEN);			/* IRQ al recibir */
+	before = readl(peri + PERI_PDN0_STA);
+	writel(PERI_CG_BTIF, peri + PERI_PDN0_CLR);	/* ungate */
+	after = readl(peri + PERI_PDN0_STA);
+	dev_info(dev, "faseA clock BTIF: PDN0_STA 0x%08x -> 0x%08x (bit20 gated: %u -> %u)\n",
+		 before, after,
+		 !!(before & PERI_CG_BTIF), !!(after & PERI_CG_BTIF));
+	iounmap(peri);
+	return after;
 }
 
 static int mt6582_btif_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct mt6582_btif *b;
-	int ret;
-	/* resync STP = 4x 0x7F: sincroniza/despierta la máquina STP del CONSYS */
-	static const u8 stp_resync[4] = { 0x7f, 0x7f, 0x7f, 0x7f };
+	u32 lsr, iir;
 
 	b = devm_kzalloc(dev, sizeof(*b), GFP_KERNEL);
 	if (!b)
 		return -ENOMEM;
 	b->dev = dev;
-	spin_lock_init(&b->lock);
 
 	b->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(b->base))
 		return PTR_ERR(b->base);
 
+	/* el IRQ se resuelve pero NO se solicita (Fase A: sin ISR, sin tormenta) */
 	b->irq = platform_get_irq(pdev, 0);
-	if (b->irq < 0)
-		return b->irq;
 
-	ret = devm_request_irq(dev, b->irq, mt6582_btif_isr, 0, "mt6582-btif", b);
-	if (ret)
-		return ret;
+	/* PASO 1: ungatear el clock ANTES de tocar el BTIF (causa más probable) */
+	mt6582_btif_clk_ungate(dev);
 
-	mt6582_btif_hw_init(b);
+	/* PASO 2: lectura PASIVA del BTIF — sin escribir nada, sin IRQ, sin TX.
+	 * Si esto cuelga el boot -> el clock no bastó (revisar MTCMOS/reset).
+	 * Si arranca y LSR != 0xffffffff -> bus vivo, seguimos con Fase C (TX). */
+	lsr = readl(b->base + BTIF_LSR);
+	iir = readl(b->base + BTIF_IIR);
+	dev_info(dev, "faseA BTIF pasivo: irq=%d LSR=0x%08x IIR=0x%08x %s\n",
+		 b->irq, lsr, iir,
+		 (lsr == 0xffffffff) ? "(0xffffffff => bus MUERTO, clock/base?)"
+				     : "(bus vivo)");
+
 	platform_set_drvdata(pdev, b);
-
-	/* M3a v1: el CONSYS ya está encendido (mt6582-consys/M1) y su MCU debería
-	 * estar fuera de reset (ver HITO-WIFI-M3A.md: TOPRGU 0x10007000+0x18 bit12
-	 * key 0x88<<24). Mandamos un resync STP y miramos si el CONSYS responde algo. */
-	if (mt6582_btif_tx(b, stp_resync, sizeof(stp_resync)) == 0) {
-		msleep(50);
-		dev_info(dev, "BTIF init OK, resync enviado; RX=%u bytes: %*ph\n",
-			 b->rxcnt, min_t(unsigned int, b->rxcnt, BTIF_RX_LOG), b->rxlog);
-	} else {
-		dev_err(dev, "BTIF TX timeout (LSR=0x%x)\n", btif_rd(b, BTIF_LSR));
-	}
 	return 0;
 }
 
@@ -180,5 +126,5 @@ static struct platform_driver mt6582_btif_driver = {
 };
 module_platform_driver(mt6582_btif_driver);
 
-MODULE_DESCRIPTION("MediaTek MT6582 BTIF transport (PIO) for CONSYS STP/WMT");
+MODULE_DESCRIPTION("MediaTek MT6582 BTIF transport (PIO) for CONSYS STP/WMT — Fase A");
 MODULE_LICENSE("GPL");
