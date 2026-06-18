@@ -21,6 +21,8 @@
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/regulator/consumer.h>
+#include <linux/dma-mapping.h>
+#include <linux/sizes.h>
 
 /* --- bases fisicas MT6582 (downstream 0xF0xxxxxx/0xF8xxxxxx -> fisico) --- */
 #define SPM_PHYS		0x10006000
@@ -67,6 +69,18 @@
 #define CPU_SW_RST_BIT		(1U << 12)
 #define CPU_SW_RST_KEY		(0x88U << 24)
 
+/* EMI compartida AP<->CONSYS: el MCU necesita 1MB de RAM y saber dónde está, o se
+ * cuelga al arrancar el ROM (CPUPCR clavado en 0x23d8). El registro de remapeo está
+ * en INFRACFG/TOPCKGEN @ 0x10001310 (= cs->infra + 0x310). */
+#define CONSYS_EMI_MAPPING	0x310
+#define EMI_REMAP_EN		0x1000		/* bit12: enable consys->ap emi remap */
+
+/* oscilador 26M del CONSYS (AP2CONN_OSC_EN, reg 0x10001f00 = cs->infra + 0xf00).
+ * Si bit10=0 el MCU arranca SIN 26M estable y hace una excepción "jump from RST"
+ * (lo vimos en el coredump de la EMI). Hay que ponerlo a 1 antes de arrancar el MCU. */
+#define AP2CONN_OSC_EN		0xf00
+#define OSC_EN_BIT		(1U << 10)
+
 struct mt6582_consys {
 	struct device *dev;
 	void __iomem *spm;
@@ -75,6 +89,8 @@ struct mt6582_consys {
 	struct regulator *vcn18;	/* VCN_1V8: digital CONSYS */
 	struct regulator *vcn28;	/* VCN28: analog */
 	struct regulator *vcn33;	/* VCN33_WIFI: RF WiFi */
+	void *emi_virt;			/* EMI compartida AP<->CONSYS (1MB) */
+	dma_addr_t emi_phys;
 };
 
 static int consys_spm_power_on(struct mt6582_consys *cs)
@@ -125,26 +141,50 @@ static int consys_spm_power_on(struct mt6582_consys *cs)
 bool mt6582_consys_ready;
 EXPORT_SYMBOL_GPL(mt6582_consys_ready);
 
-/* Activa el subsistema interno: clock de TOP + clock del MCU (INFRA) + suelta el
- * reset del MCU -> el ROM corre y escucha STP por BTIF. */
+/* Reserva 1MB de EMI compartida y le dice al CONSYS dónde está (CONSYS_EMI_MAPPING).
+ * Sin esto el MCU se cuelga al arrancar el ROM (CPUPCR clavado en 0x23d8). */
+static int consys_setup_emi(struct mt6582_consys *cs)
+{
+	u32 addrPhy;
+
+	cs->emi_virt = dma_alloc_coherent(cs->dev, SZ_1M, &cs->emi_phys, GFP_KERNEL);
+	if (!cs->emi_virt) {
+		dev_err(cs->dev, "no pude reservar 1MB de EMI\n");
+		return -ENOMEM;
+	}
+	memset(cs->emi_virt, 0, SZ_1M);	/* limpiar (distinguir trace nuevo del residual) */
+	/* nº de MB de la EMI (bits [31:20]) | enable remap (bit12) */
+	addrPhy = ((u32)cs->emi_phys >> 20) | EMI_REMAP_EN;
+	writel(readl(cs->infra + CONSYS_EMI_MAPPING) | addrPhy,
+	       cs->infra + CONSYS_EMI_MAPPING);
+	dev_info(cs->dev, "EMI: phys=%pad align1M=%s EMI_MAPPING=0x%08x (addrPhy=0x%x)\n",
+		 &cs->emi_phys, ((u32)cs->emi_phys & (SZ_1M - 1)) ? "NO" : "si",
+		 readl(cs->infra + CONSYS_EMI_MAPPING), addrPhy);
+	return 0;
+}
+
+/* Activa el subsistema interno: clock de TOP + clock del MCU (INFRA). */
 static void consys_activate_mcu(struct mt6582_consys *cs)
 {
 	void __iomem *topck = ioremap(TOPCKGEN_PHYS, 0x100);
-	void __iomem *rgu = ioremap(AP_RGU_PHYS, 0x100);
-	u32 v;
+
+	/* encender el 26M del CONSYS (AP2CONN_OSC_EN bit10) DESPUÉS del power; sin él el
+	 * MCU arranca con clock inestable y excepciona (jump from RST, visto en el coredump). */
+	writel(readl(cs->infra + AP2CONN_OSC_EN) | OSC_EN_BIT, cs->infra + AP2CONN_OSC_EN);
+	dev_info(cs->dev, "AP2CONN_OSC_EN -> 0x%08x (26M on)\n",
+		 readl(cs->infra + AP2CONN_OSC_EN));
+	usleep_range(1000, 2000);	/* asentar el oscilador antes de soltar el MCU */
 
 	if (topck) {
 		writel(TOP_CLKCG_CONSYS, topck + TOP_CLKCG_CLR);	/* quitar clock-gating CONSYS */
 		iounmap(topck);
 	}
 	writel(INFRA_CG_CONNMCU, cs->infra + INFRA_PDN_CLR);		/* ungate clock del MCU */
-	if (rgu) {
-		v = readl(rgu + CONSYS_CPU_SW_RST);			/* deassert MCU reset (key 0x88) */
-		writel((v & ~CPU_SW_RST_BIT) | CPU_SW_RST_KEY, rgu + CONSYS_CPU_SW_RST);
-		iounmap(rgu);
-	}
-	msleep(30);	/* el MCU arranca el ROM y queda listo para escuchar STP */
-	dev_info(cs->dev, "CONSYS MCU activado (TOP_CLKCG bit26 + CONNMCU + deassert reset)\n");
+	/* NO tocamos CONSYS_CPU_SW_RST: el downstream ACTIVO de Android lo deja en #if 0
+	 * (sólo hace power spm_mtcmos + enable_clock(CONNMCU)). Tocarlo (deassert con key)
+	 * parece RESETEAR el MCU -> CPUPCR clavado en 0x23d8. El MCU debe arrancar solo. */
+	msleep(30);	/* el MCU arranca el ROM */
+	dev_info(cs->dev, "CONSYS MCU activado (power + CONNMCU clock, SIN tocar reset)\n");
 }
 
 static int mt6582_consys_probe(struct platform_device *pdev)
@@ -182,6 +222,11 @@ static int mt6582_consys_probe(struct platform_device *pdev)
 	ret = regulator_enable(cs->vcn33);
 	if (ret)
 		goto err_v28;
+
+	/* la EMI compartida debe estar reservada y mapeada ANTES de arrancar el MCU */
+	ret = consys_setup_emi(cs);
+	if (ret)
+		goto err_v33;
 
 	ret = consys_spm_power_on(cs);
 	if (ret)
