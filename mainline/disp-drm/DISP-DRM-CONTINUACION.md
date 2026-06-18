@@ -6,6 +6,17 @@
 > controlable** + vsync + base GPU.
 
 ## ESTADO ACTUAL
+- ✅✅ **FASE 2 VERIFICADA EN HW (2026-06-18, kernel #28, `boot-disp2.img` flasheada):**
+  `probe of 14007000.ovl/14008000.rdma/1400b000.color returned 0` los tres. `mediatek-drm`
+  sigue en 19 (ENODEV, esperado sin DSI). card0+fb0 intactos, no rompió nada.
+- ✅ **Driver del panel mainline ESCRITO y COMPILA** — `drivers/gpu/drm/panel/panel-himax-hx8389.c`
+  (repo `mainline/disp-drm/code/panel-himax-hx8389.c`, ~260 líneas; traduce las 16 cmds init del
+  LCM downstream, modo 540x960, 2 lanes RGB888 video-sync-pulse, reset GPIO112, power VGP2).
+  `CONFIG_DRM_PANEL_HIMAX_HX8389=y` + `CONFIG_PHY_MTK_MIPI_DSI=y` ya en el .config. Kconfig+Makefile hechos.
+  Compatible DT: **`truly,hx8389-qhd`**. **FALTA: nodos DT (VGP2 + mipi-tx + DSI + panel) → build → flash.**
+- (histórico) FASE 1 (kernel #27): mmsys+mutex bindean, mediatek-drm sondea.
+
+---
 - ✅✅ **FASE 1 COMPLETADA y VERIFICADA EN HW** (kernel #27, `boot-disp1.img`):
   `mmsys` (mt6582-mmsys) + `mutex` bindean, `mediatek-drm` sondea. dmesg:
   `probe of 14000000.syscon returned 0`, `1400e000.mutex returned 0`,
