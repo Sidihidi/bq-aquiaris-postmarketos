@@ -5,6 +5,20 @@
 > (`mtk_drm`) → flujo de frames por DSI → MUTEX latchea con SOF → **backlight
 > controlable** + vsync + base GPU.
 
+## ✅✅✅ ESTADO FINAL (2026-06-18) — DISPLAY + COLOR + PHOSH ACELERADO, TODO OK
+**Cadena de display COMPLETA y verificada en caliente.** Tras FASE 6 (quitar dispfix+simplefb):
+- **Color correcto**: el tinte rojizo era la **gamma del panel** (E0 SETGAMMA + 4×C1 DGC). Solución:
+  envolver esos bloques en `#if 0` en `panel-himax-hx8389.c` → el panel usa su gamma por defecto.
+- **lima/Mali-400 MP2 OK**: `Initialized lima 1.1.0 for 13010000.gpu` (bus 312 / core 416 MHz),
+  gracias al poke MTCMOS del MFG (`mt6582-mfg-power.c`, `subsys_initcall` antes de lima). `renderD128`.
+- **Phosh ACELERADO**: `phoc` abre **`card1`** (mtk_drm, scanout) **+ `renderD128`** (lima, render GL).
+  Stack vivo: phoc + phosh + squeekboard. `WLR_RENDERER=gles2` en `launch_phosh.sh`.
+- **Autostart robusto**: `zzzz-phosh.start` ahora **espera a `/dev/dri/card1` + seatd** (timeout 90s)
+  en vez de `sleep 3` ciego → arregla el "primer boot de kernel nuevo no lanza GUI" (crng lento ~60s
+  retrasaba udev → phoc arrancaba sin DRM y moría). Tras este fix no hace falta reiniciar.
+
+**Siguiente driver del roadmap: WiFi (CONSYS MT6582 / conn_soc + WMT).**
+
 ## 🏆🏆🏆 HITO (2026-06-18, kernel #31, boot-disp6) — EL DRM PINTA EL PANEL
 **El driver `mtk_drm` mainline inicializa y escanea el panel HX8389 del MT6582.** Ramoops del boot:
 ```
@@ -107,7 +121,7 @@ hermanos del mmsys basta. El MUTEX lo busca por `of_alias_get_id(node,"mutex")` 
 no hace falta alias). main_path mt2701 = OVL0→RDMA0→COLOR0→BLS→DSI0.
 
 ## ACCESO / ENTORNO (para continuar desde otro PC)
-- **Pi de build**: `ssh cpcd@192.168.0.38` (pass `cpcdupct`; sudo NOPASSWD). Kernel en
+- **Pi de build**: `ssh cpcd@192.168.0.123` (antes .38; pass `cpcdupct`; sudo NOPASSWD). Kernel en
   `~/mainline/linux-7.0.12`, build dir `build-krillin`. Downstream 3.10 de referencia en
   `~/mainline/downstream/`. boot.img y backups en `~/mainline/pkg/`.
 - **Teléfono** (desde la Pi): `ssh root@172.16.42.1` (la Pi tiene 172.16.42.2/24 en usb0;
