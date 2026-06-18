@@ -5,6 +5,27 @@
 > (`mtk_drm`) → flujo de frames por DSI → MUTEX latchea con SOF → **backlight
 > controlable** + vsync + base GPU.
 
+## ⚠️⚠️ HALLAZGO CLAVE FASE 3 (2026-06-18 tarde, kernels #29/#30) — CAMBIA EL ENFOQUE
+Tras escribir el panel + DSI + mipi-tx + DT (boot-disp3/disp4) y flashear:
+- ✅ **El panel YA ENGANCHA**: `probe of 1400c000.dsi.0 returned 0`. El `mipi_dsi_attach -ENODEV`
+  se arregló añadiendo el **OF graph DSI↔panel** (ports/endpoints; el panel como hijo simple NO basta
+  porque `mtk_dsi_host_attach` usa `devm_drm_of_get_bridge`). DSI proba (returned 0), mipi-tx idem.
+- ❌ **PERO `mediatek-drm` sigue devolviendo -ENODEV (19) y NO crea card0.** DOS causas reales
+  (la "ENODEV esperado" de FASE 1/2 era ESTO, no "faltan componentes"):
+  1. **`mediatek,mt6582-mmsys` NO está en `mtk_drm_of_ids[]`** (drivers/gpu/drm/mediatek/mtk_drm_drv.c).
+     `mtk_drm_probe` hace `of_id = of_match_node(mtk_drm_of_ids, mmsys_node)` → NULL → `return -ENODEV`.
+     **FIX:** añadir `{ .compatible="mediatek,mt6582-mmsys", .data=&mt2701_mmsys_driver_data }` (o variante).
+  2. **Este mtk_drm (7.0.12) construye el pipeline por OF GRAPH**, no iterando /soc por compatible
+     (`mtk_drm_of_ddp_path_build_one`→`mtk_drm_of_get_ddp_ep_cid` sigue endpoints desde el mmsys).
+     El modelo "hijos de /soc" que asumía esta doc/roadmap es de un mtk_drm MÁS VIEJO. → hay que
+     **cablear el grafo completo: mmsys→OVL→RDMA→COLOR→DSI→panel** con ports/endpoints en cada nodo.
+- **PRÓXIMO** (la rework de FASE 3): (a) meter mt6582-mmsys en `mtk_drm_of_ids`; (b) rehacer el DT con
+  el grafo de puertos de TODO el pipeline (no solo DSI↔panel); (c) build+flash. El `panel-himax-hx8389.c`
+  ya está bien (compila, engancha). Quitar BLS del path mt2701 quizá sea irrelevante con el modelo de grafo.
+- Recuperación de pantalla: `boot-simpledrm.img` (#25, Phosh).
+
+---
+
 ## ESTADO ACTUAL
 - ✅✅ **FASE 2 VERIFICADA EN HW (2026-06-18, kernel #28, `boot-disp2.img` flasheada):**
   `probe of 14007000.ovl/14008000.rdma/1400b000.color returned 0` los tres. `mediatek-drm`
