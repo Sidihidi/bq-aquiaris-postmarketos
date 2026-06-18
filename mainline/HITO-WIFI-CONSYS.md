@@ -3,6 +3,17 @@
 Siguiente driver del roadmap tras display+GPU. **Es el más duro**: no hay driver mainline
 para este combo. Este doc fija el mapa de hardware (investigado del downstream 3.10) y el plan.
 
+## 🏆 M1 LOGRADO (2026-06-18, kernel boot-wifi1.img) — EL CONSYS RESPONDE
+```
+mt6582-consys 18070000.consys: CONSYS VIVO: chip-id=0x6582 (PWR_CON=0xd)
+probe of 18070000.consys returned 0 after 87495 usecs
+```
+El hardware WiFi (CONSYS) **enciende y es direccionable**: lee `chip-id=0x6582`. Flujo: primer
+probe `-517` (EPROBE_DEFER, reguladores no listos) → re-probe a 3.5s → OK. `PWR_CON=0xd` =
+PWR_ON|PWR_ON_S|PWR_RST_B, sin ISO/CLK_DIS/SRAM_PDN = estado correcto. **La secuencia MTCMOS
+portada del MFG funcionó a la primera.** Display/lima/Phosh siguen OK (no rompió nada).
+Equivale a "el power del GPU funciona": cimiento probado. Siguiente: **M2 (firmware)**.
+
 ## QUÉ ES (arquitectura)
 El BQ E4.5 usa `CONFIG_MTK_COMBO_CHIP_CONSYS_6582` = la **conectividad integrada en el SoC**
 (WiFi + BT + GPS + FM), NO un chip SDIO externo. Piezas downstream:
@@ -46,9 +57,8 @@ Reguladores PMIC (MT6323, ya en el driver mainline — faltan nodos DT):
 (Reset del MCU + AFE CR + DELSEL → en M3, los hace el FW patch.)
 
 ## ROADMAP (milestones)
-- **M1 — Bring-up + chip-id [LISTO PARA COMPILAR]**: `code/mt6582-consys.c` (platform_driver) +
-  `code/consys-dt-snippet.dts`. Enciende CONSYS (reguladores+MTCMOS) y lee CHIP_ID. **Criterio:
-  `CONSYS VIVO: chip-id=0x6582` en dmesg** = hardware probado (como la prueba de power del GPU).
+- **M1 — Bring-up + chip-id [✅ LOGRADO 2026-06-18]**: `code/mt6582-consys.c` (platform_driver) +
+  DT integrado. Enciende CONSYS (reguladores+MTCMOS) y lee `chip-id=0x6582`. HW probado.
 - **M2 — Firmware**: extraer `WIFI_RAM_CODE*`, `mt66xx_patch_hdr.bin`, `WMT*.cfg` del stock
   system.img → `/lib/firmware/`. Entender el formato de cabecera del patch.
 - **M3 — WMT + descarga FW**: portar el handshake WMT (BTIF/serial interno o EMI), reservar EMI,
