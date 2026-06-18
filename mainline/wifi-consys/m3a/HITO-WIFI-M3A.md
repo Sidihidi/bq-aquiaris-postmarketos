@@ -19,11 +19,26 @@ probe of 1100c000.btif returned 0 after 2869 usecs
   PERICFG 0x10003000 + PDN0_CLR 0x10)`, estado en PDN0_STA 0x18 (bit=1 → gated). Reset MCU
   CONSYS: en downstream está en `#if 0` (lo difiere al FW patch) → NO hace falta tocarlo.
 
-### ▶ SIGUIENTE = Fase C+D (TX + RX por POLLING, sin IRQ)
-TX del resync (4×0x7F) por `poll LSR.THRE → write THR`; RX por `poll LSR.DR → read RBR` acotado
-(~200 ms) + log de bytes. Si **RX>0**, el CONSYS responde algo (buena señal). Luego STP
-(header 4B + CRC16 del `stp_core.c`) + WMT `QUERY_BAUD` = M3a completo. El IRQ (Fase E) al final,
-con la ISR devolviendo `IRQ_NONE` si `!(LSR&DR)` para no colgar el GIC.
+### ✅ Fase C+D v2: EL TX DEL BTIF FUNCIONA (RX=0 al resync, esperado)
+`boot-btifCD2.img`: `faseCD2: resync TX OK (LSR pre=0x60 post-init=0x60). RX=0 bytes`.
+- **TX OK** (ya no hay timeout). Fixes vs v1: (1) el TX espera `LSR & (THRE|TEMT)` —cualquiera—
+  igual que `_btif_is_tx_allow` del downstream (mi v1 esperaba solo THRE y daba timeout con
+  LSR=0x40/TEMT=1); (2) init fiel a `hal_btif_hw_init`: FAKELCR normal + **HANDSHAKE on (0x6C bit0)**
+  + TRI_LVL TX8/RX1 + DMA off/AUTORST, SIN habilitar IER (RX por polling, no IRQ).
+- `LSR post-init=0x60` (THRE+TEMT) → el init deja el bus sano (v1 lo dejaba en 0x40).
+- **RX=0 al resync** = esperado: `4×0x7F` solo sincroniza la máquina STP, no provoca EVT. Para
+  que el CONSYS conteste hay que enviarle un **comando WMT** envuelto en **STP**.
+
+### ▶ SIGUIENTE = Fase STP + WMT (que el CONSYS CONTESTE)
+1. **STP framing** (de `conn_soc/common/core/stp_core.c`): header 4B `hdr[0]=0x80|seq<<3|ack`,
+   type/length en hdr[1..2], `hdr[3]=checksum`; payload; **CRC16** (copiar `crc16_table[256]` tal
+   cual; `crc=(crc>>8)^tbl[(crc^byte)&0xff]`, init 0). Antes del 1er paquete: resync `4×0x7F`.
+2. **WMT QUERY_BAUD** = payload `{01 04 01 00 02}` envuelto en STP. Enviar, luego RX-poll y loguear
+   el EVT crudo; comparar con `WMT_QUERY_BAUD_EVT`. Iterar el reparto type/len del header STP hasta
+   que CRC/seq cuadren. **RX>0 con EVT coherente = M3a CONSEGUIDO.**
+3. Si sigue RX=0: probar **WAK** (`set BTIF_WAK 0x64 bit0` para despertar ap_wakeup_consys) antes del TX.
+4. Luego: `WMT_RESET` → GET chip-id/ver → descargar patch (`mtk_wcn_soc_patch_dwn`) + WIFI_RAM_CODE = M3.
+5. IRQ (Fase E) al final, ISR con `IRQ_NONE` si `!(LSR&DR)`.
 
 ---
 
