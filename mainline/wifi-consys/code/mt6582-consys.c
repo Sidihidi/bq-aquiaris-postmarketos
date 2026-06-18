@@ -232,8 +232,7 @@ static int mt6582_consys_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_v33;
 
-	/* activar el subsistema interno (clock TOP + clock MCU + soltar reset) para
-	 * que el ROM corra y el enlace BTIF clockee */
+	/* activar el subsistema interno (clock TOP + clock MCU) para que el ROM corra */
 	consys_activate_mcu(cs);
 
 	/* poll del chip-id: el CONSYS debe devolver 0x6582 */
