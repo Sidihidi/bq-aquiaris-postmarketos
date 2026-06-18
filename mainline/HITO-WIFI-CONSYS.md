@@ -68,8 +68,7 @@ Reguladores PMIC (MT6323, ya en el driver mainline — faltan nodos DT):
   `mediatek.wlan.chip=CONSYS_MT6582`, `wifi.interface=wlan0`. Blobs propietarios MTK → NO se
   commitean al repo público; copia en Pi `~/wifi-fw/extracted/` + `system.img` guardado para
   re-extraer. (El formato del patch `_hdr.bin`: cabecera + payload, a parsear en M3.)
-- **M3 — WMT + descarga FW**: portar el handshake WMT (BTIF/serial interno o EMI), reservar EMI,
-  soltar reset del MCU, descargar firmware, esperar el "ready". El más incierto.
+- **M3 — WMT + descarga FW [SCOPING HECHO 2026-06-18, ver abajo]**: portar BTIF + STP + WMT.
 - **M4 — 802.11 / cfg80211**: el camino largo — o forward-port de `mt_wifi/wlan` (3.10→7.0.12,
   cfg80211 cambió mucho) o driver nuevo. Exponer `wlanX`.
 - **M5 — Integración**: nl80211/wpa_supplicant, NetworkManager en Phosh, escaneo+asociación.
@@ -84,6 +83,41 @@ Reguladores PMIC (MT6323, ya en el driver mainline — faltan nodos DT):
 3. Compilar zImage+dtbs, empaquetar boot-wifi1.img, flashear (ver DISP-DRM-CONTINUACION.md).
 4. dmesg/`/dev/kmsg`: buscar `mt6582-consys ... CONSYS VIVO: chip-id=0x6582`.
    Si "no responde": revisar reguladores (¿VCN on?), o añadir el ungate del clock CONNMCU.
+
+## M3 — SCOPING DETALLADO (2026-06-18): el muro, mapeado
+**Arquitectura del bring-up (de `wmt_ic_soc.c:mtk_wcn_soc_sw_init`):**
+1. (HW power — ✅ M1) → leer chip-id/hw_ver/fw_ver por WMT.
+2. `mtk_wcn_soc_patch_info_prepare()` → leer nº de patches → `mtk_wcn_soc_patch_dwn(i)` por cada uno.
+3. Descargar WIFI_RAM_CODE y continuar init → CONSYS "ready".
+
+**Transporte = BTIF (no SDIO).** Para el CONSYS integrado, STP corre sobre **BTIF** (`STP_BTIF_IF_TX`;
+stp_core incluye stp_btif.h). BTIF = transporte serie interno AP↔CONSYS, **memory-mapped**:
+- **BTIF base físico = `0x1100C000`** (APB). IRQ `MT_BTIF`=SPI 50, DMA TX/RX=SPI 71/72.
+- Driver downstream: `drivers/misc/mediatek/btif/mtk_btif.c`. **No existe BTIF en mainline.**
+- Cadena de control/descarga: WMT cmd → `wmt_core_tx` → STP (framing) → BTIF (bytes al CONSYS).
+
+**Formato del patch** (`struct WMT_PATCH`, 28 bytes de cabecera): `ucDateTime[16]` + `ucPLat[4]`
+(p.ej. "6582") + `u2HwVer` + `u2SwVer` + `u4PatchVer`, luego el payload. Loader downstream =
+`filp_open` (mainline usaría `request_firmware`, los blobs ya están en /lib/firmware — M2).
+
+**ESCALA DEL PORT (líneas de código downstream 3.10 a portar/reescribir):**
+| Pieza | Líneas | Para |
+|---|---|---|
+| BTIF driver (`mtk_btif.c`+) | **7.212** | transporte AP↔CONSYS |
+| STP core (`stp_core.c`+`stp_btif`) | **~4.000** | framing de paquetes |
+| WMT core (`wmt_core`+`wmt_ic_soc`+`wmt_lib`) | **6.670** | handshake + descarga FW |
+| conn_soc/common (todo) | 27.521 | (incluye lo de arriba) |
+| **drv_wlan (802.11/cfg80211, M4)** | **132.939** | el driver WiFi en sí |
+
+**Conclusión honesta:** el camino está 100% mapeado, pero es **enorme**: ~14K líneas solo para
+el canal de control (BTIF+STP+WMT mínimo), y ~133K más para el 802.11 (M4) — todo atado a APIs de
+kernel 3.10 de 2014. Mainline no soporta este combo precisamente por esto. Es un proyecto de
+**varios meses / equipo**, con riesgo real de no llegar nunca a WiFi funcional.
+
+**Próximo milestone realista si se sigue (M3a — "el CONSYS habla"):** portar BTIF (7K líneas) como
+platform_driver mainline (`@0x1100C000`, IRQ SPI50/71/72) + STP mínimo + enviar **un** comando WMT
+(reset/chip-id) y recibir respuesta del CONSYS por BTIF. Probaría el canal de control AP↔CONSYS
+(como M1 probó el power). Es la pieza atacable; el resto (WMT completo + 802.11) viene detrás.
 
 ## Recuperación
 WiFi no afecta al boot ni al display/GPU. Si el poke colgara (improbable), recuperar con
