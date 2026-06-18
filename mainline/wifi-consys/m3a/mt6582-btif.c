@@ -42,6 +42,7 @@
 #define DMA_EN_TX	(1u << 1)
 #define DMA_EN_AUTORST	(1u << 2)
 #define TRI_LVL_VAL	(((8u) & 0xf) | (((1u) & 0x7) << 4))
+#define TRI_LOOP_EN	(1u << 7)	/* loopback interno (diagnóstico del RX) */
 
 #define PERICFG_PHYS	0x10003000
 #define PERICFG_SIZE	0x100
@@ -189,17 +190,23 @@ static void mt6582_btif_hw_init(struct mt6582_btif *b)
 	u32 v;
 
 	btif_wr(b, BTIF_FAKELCR, 0);
-	/* HANDSHAKE OFF: en "new handshake" el shift no clockea hasta que el CONSYS
-	 * señala (TEMT se quedaba a 0). Lo desactivamos para transmitir por FIFO directo. */
+	/* HANDSHAKE ON: ahora que el MCU del CONSYS corre (mt6582-consys.c lo activó), el
+	 * "new handshake" se completa y habilita el flujo BIDIRECCIONAL (necesario p/ el RX). */
 	v = btif_rd(b, BTIF_HANDSHAKE);
-	btif_wr(b, BTIF_HANDSHAKE, v & ~HANDSHAKE_EN);
+	btif_wr(b, BTIF_HANDSHAKE, v | HANDSHAKE_EN);
 	btif_wr(b, BTIF_TRI_LVL, TRI_LVL_VAL);
 	v = btif_rd(b, BTIF_DMA_EN);
 	v &= ~(DMA_EN_TX | DMA_EN_RX);
 	v |= DMA_EN_AUTORST;
 	btif_wr(b, BTIF_DMA_EN, v);
 	btif_wr(b, BTIF_IER, 0);			/* sin IRQ */
-	/* NOTA: el WAK (despertar ap_wakeup_consys) se probó y dejaba LSR=0x0 en el
+	/* despertar el MCU del CONSYS via WAK (ap_wakeup_consys): pulso clr->set. El MCU
+	 * parece dormido (CPUPCR fijo 0x23d8); ahora que el enlace clockea el WAK no bloquea. */
+	btif_wr(b, BTIF_WAK, 0);
+	udelay(80);
+	btif_wr(b, BTIF_WAK, WAK_BIT);
+	udelay(80);
+	/* (obsoleto) NOTA: el WAK (despertar ap_wakeup_consys) se probó y dejaba LSR=0x0 en el
 	 * 2º TX -> fuera por ahora; el CONSYS ya está on (M1). */
 }
 
@@ -228,6 +235,24 @@ static int mt6582_btif_probe(struct platform_device *pdev)
 
 	mt6582_btif_clk_ungate(dev);
 	mt6582_btif_hw_init(b);
+
+	/* --- DIAGNÓSTICO: loopback interno del BTIF. Aísla si el RX del AP funciona,
+	 * independientemente del CONSYS. Si recibo lo que envío -> RX OK (el problema es
+	 * que el CONSYS no contesta); si RX=0 -> mi config del RX está mal. --- */
+	{
+		static const u8 lb[4] = { 0xaa, 0xbb, 0xcc, 0xdd };
+		u32 tri = btif_rd(b, BTIF_TRI_LVL);
+
+		btif_wr(b, BTIF_TRI_LVL, tri | TRI_LOOP_EN);
+		b->rxcnt = 0;
+		mt6582_btif_tx(b, lb, sizeof(lb));
+		mt6582_btif_rx_poll(b, 50);
+		dev_info(dev, "LOOPBACK: envie aa bb cc dd, RX=%u: %*ph -> RX del AP %s\n",
+			 b->rxcnt, min_t(unsigned int, b->rxcnt, 8), b->rxlog,
+			 b->rxcnt ? "FUNCIONA" : "NO recibe");
+		btif_wr(b, BTIF_TRI_LVL, tri);	/* loopback OFF */
+		b->rxcnt = 0;
+	}
 
 	/* El MCU del CONSYS ya está activo (mt6582-consys.c) y el enlace clockea
 	 * (LSR=0x60). Reintentamos resync + QUERY_BAUD varias veces por si el ROM
