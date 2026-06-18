@@ -14,6 +14,16 @@ PWR_ON|PWR_ON_S|PWR_RST_B, sin ISO/CLK_DIS/SRAM_PDN = estado correcto. **La secu
 portada del MFG funcionó a la primera.** Display/lima/Phosh siguen OK (no rompió nada).
 Equivale a "el power del GPU funciona": cimiento probado. Siguiente: **M2 (firmware)**.
 
+## ⭐ ES UN COMBO: M3a desbloquea WiFi + BT + GPS + FM
+El CONSYS es el **conectividad-combo** del SoC. Las 4 radios son "funciones" del MISMO WMT sobre
+el MISMO canal BTIF (`wmt_exp.h`: `WMTDRV_TYPE_BT=0, FM=1, GPS=2, WIFI=3`). Se levanta el chip UNA
+vez (M3a) y cada radio se activa con `mtk_wcn_wmt_func_on(tipo)`, exponiendo su interfaz:
+`stpbt` (BT/HCI), `stpgps` (GPS/NMEA), `FM`, `wmtWifi` (WiFi).
+
+**Giro estratégico:** tras M3a, **Bluetooth es el más fácil** (char `/dev/stpbt` con HCI → BlueZ
+estándar, SIN driver propio) y GPS igual (`/dev/stpgps` → NMEA → gpsd). **El WiFi es el más duro**
+(el 802.11/cfg80211 de 133K líneas, M4). Orden lógico tras M3a: BT → GPS → FM → WiFi.
+
 ## QUÉ ES (arquitectura)
 El BQ E4.5 usa `CONFIG_MTK_COMBO_CHIP_CONSYS_6582` = la **conectividad integrada en el SoC**
 (WiFi + BT + GPS + FM), NO un chip SDIO externo. Piezas downstream:
