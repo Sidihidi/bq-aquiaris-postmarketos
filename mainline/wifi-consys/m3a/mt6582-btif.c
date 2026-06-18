@@ -51,6 +51,9 @@
 #define STP_TYPE_WMT	0	/* task index del canal WMT en STP */
 #define BTIF_RX_LOG	128
 
+/* lo pone a true mt6582-consys.c cuando el MCU del CONSYS ya corre el ROM */
+extern bool mt6582_consys_ready;
+
 static const u16 crc16_table[256] = {
 	0x0000, 0xC0C1, 0xC181, 0x0140, 0xC301, 0x03C0, 0x0280, 0xC241,
 	0xC601, 0x06C0, 0x0780, 0xC741, 0x0500, 0xC5C1, 0xC481, 0x0440,
@@ -209,6 +212,11 @@ static int mt6582_btif_probe(struct platform_device *pdev)
 	static const u8 wmt_query_baud[5] = { 0x01, 0x04, 0x01, 0x00, 0x02 };
 	int ret;
 
+	/* esperar a que el CONSYS active su MCU (mt6582-consys.c); sin eso el enlace
+	 * BTIF no clockea (el shift TEMT se queda a 0) y el STP no llega. */
+	if (!mt6582_consys_ready)
+		return -EPROBE_DEFER;
+
 	b = devm_kzalloc(dev, sizeof(*b), GFP_KERNEL);
 	if (!b)
 		return -ENOMEM;
@@ -221,32 +229,38 @@ static int mt6582_btif_probe(struct platform_device *pdev)
 	mt6582_btif_clk_ungate(dev);
 	mt6582_btif_hw_init(b);
 
-	/* 1) resync STP */
-	ret = mt6582_btif_tx(b, stp_resync, sizeof(stp_resync));
-	if (ret) {
-		dev_err(dev, "STP: resync TX timeout (LSR=0x%x)\n", btif_rd(b, BTIF_LSR));
-		return 0;
+	/* El MCU del CONSYS ya está activo (mt6582-consys.c) y el enlace clockea
+	 * (LSR=0x60). Reintentamos resync + QUERY_BAUD varias veces por si el ROM
+	 * tarda en estar listo para procesar STP. */
+	{
+		int attempt;
+
+		for (attempt = 0; attempt < 6; attempt++) {
+			b->rxcnt = 0;
+			mt6582_btif_tx(b, stp_resync, sizeof(stp_resync));
+			usleep_range(2000, 4000);
+			ret = mt6582_btif_stp_send(b, STP_TYPE_WMT, wmt_query_baud,
+						   sizeof(wmt_query_baud));
+			if (ret) {
+				dev_err(dev, "STP: WMT TX timeout intento %d (LSR=0x%x)\n",
+					attempt, btif_rd(b, BTIF_LSR));
+				msleep(20);
+				continue;
+			}
+			mt6582_btif_rx_poll(b, 200);
+			dev_info(dev, "STP+WMT intento %d: LSR=0x%x RX=%u: %*ph\n",
+				 attempt, btif_rd(b, BTIF_LSR), b->rxcnt,
+				 min_t(unsigned int, b->rxcnt, 32), b->rxlog);
+			if (b->rxcnt)
+				break;
+			msleep(50);
+		}
 	}
-	usleep_range(2000, 4000);
-	dev_info(dev, "STP: tras resync LSR=0x%x\n", btif_rd(b, BTIF_LSR));
-
-	/* 2) paquete STP con WMT QUERY_BAUD */
-	ret = mt6582_btif_stp_send(b, STP_TYPE_WMT, wmt_query_baud, sizeof(wmt_query_baud));
-	if (ret) {
-		dev_err(dev, "STP: WMT TX timeout (LSR=0x%x)\n", btif_rd(b, BTIF_LSR));
-		return 0;
-	}
-
-	/* 3) leer la respuesta */
-	mt6582_btif_rx_poll(b, 500);
-
-	dev_info(dev, "STP+WMT: RX=%u bytes: %*ph\n",
-		 b->rxcnt, min_t(unsigned int, b->rxcnt, BTIF_RX_LOG), b->rxlog);
 	if (b->rxcnt)
 		dev_info(dev, "STP+WMT: *** EL CONSYS CONTESTA (%u bytes) — M3a CONSEGUIDO ***\n",
 			 b->rxcnt);
 	else
-		dev_info(dev, "STP+WMT: RX=0 (probar: type STP, seq/ack, o WAK timing)\n");
+		dev_info(dev, "STP+WMT: RX=0 tras 6 intentos (siguiente: WAK / type STP / delimiter)\n");
 
 	platform_set_drvdata(pdev, b);
 	return 0;
