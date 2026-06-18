@@ -2,6 +2,12 @@
 /*
  * mt6582-btif.c — transporte BTIF del MT6582 (canal serie AP<->CONSYS), modo PIO.
  *
+ * ⛔ ESTA v1 HACE BOOTLOOP (boot-m3a.img, 2026-06-18): cuelga en el logo, muy temprano.
+ *    Sospecha: tormenta de IRQ SPI50 (request_irq+IER_RXFEN con la ISR sin limpiar la
+ *    fuente real) o BTIF sin clock (readl -> external abort). Ver HITO-WIFI-M3A.md:
+ *    reescribir POR FASES (A pasivo solo-ioremap+log, B clock+reset MCU, C TX polled,
+ *    D RX polled, E IRQ al final). NO flashear tal cual sin el arreglo por fases.
+ *
  * M3a "el CONSYS habla": el BTIF es el bus serie interno por el que corre STP/WMT
  * para hablar con el CONSYS (WiFi/BT/GPS/FM). Este driver levanta el BTIF en modo
  * PIO (sin DMA VFF, mucho más simple) y expone TX/RX por bytes + logging de RX.

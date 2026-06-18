@@ -1,5 +1,51 @@
 # M3a — "el CONSYS habla": BTIF + STP + WMT (guía de implementación para casa)
 
+## ⛔ RESULTADO 2026-06-18: `boot-m3a.img` HACE BOOTLOOP en el logo BQ
+`boot-m3a.img` (USER_NS + WiFi M1 + **BTIF M3a**) **no pasa del logo** (bootloop, cuelga MUY
+temprano, antes de consola/switch_root). NO llegamos a leer ningún log.
+
+### 🔧 RECUPERAR EL TELÉFONO (hacer ESTO primero)
+Fastboot (Power 10s → Power+Vol↑, pantalla negra normal) y desde la Pi (`~/mainline/pkg`):
+```
+sudo fastboot flash boot boot-color1.img   # known-good: display+Phosh+lima+color
+sudo fastboot reboot
+```
+(`boot-wifi1.img` también arranca bien y mantiene WiFi M1, si prefieres esa base.)
+
+### 🐞 CAUSA MÁS PROBABLE = el driver BTIF (no USER_NS)
+boot-wifi1 (M1 solo) arrancó OK; lo NUEVO en boot-m3a que cuelga es el **acceso al BTIF**. Sospechas
+por orden de probabilidad:
+1. **Tormenta de IRQ en SPI 50** (LEVEL_LOW): hago `request_irq` + habilito `IER_RXFEN`. Si el IRQ
+   queda asertado y mi ISR no limpia la fuente real (solo leo RBR mientras LSR.DR), re-dispara en
+   bucle → cuelga. (Mismo patrón que la tormenta del pwrap que ya nos pasó.)
+2. **BTIF sin clock**: si el clock del BTIF (INFRACFG, `MT_CG_INFRA_BTIF`) está gated, `readl(BTIF_*)`
+   da *external abort* → cuelga. `clk_ignore_unused` quizá NO lo cubre.
+3. El **TX del resync** en probe se queda en el poll de LSR.THRE (acotado a 100ms, no debería colgar
+   solo, pero suma).
+4. Menos probable: **USER_NS** (es una feature de kernel, no suele romper el boot).
+
+### 🧪 AISLAR EN CASA (orden recomendado)
+1. Recuperar con boot-color1 (arriba).
+2. Flashear **`boot-userns.img`** (ya está en `~/mainline/pkg`, = USER_NS + M1, **sin BTIF**):
+   - **Si arranca** → USER_NS es inocente, **el BTIF es el culpable** (ir al paso 3). Y de paso
+     **probar Epiphany** (con USER_NS el sandbox bwrap ya funciona): `WEBKIT_DISABLE_DMABUF_RENDERER=1
+     epiphany` en la sesión Phosh.
+   - **Si también hace bootloop** → USER_NS está implicado (raro): revisar deps del config.
+3. **Arreglar el BTIF (driver pasivo primero):** reescribir `mt6582-btif.c` por fases, flasheando
+   entre cada una:
+   - **Fase A (pasivo):** solo `ioremap` + leer y loguear LSR/IIR (`dev_info`). SIN `request_irq`,
+     SIN TX, SIN `IER`. ¿Arranca? ¿LSR es un valor sano (no 0xffffffff)? Si 0xffffffff o cuelga →
+     es el **clock** (paso B). Si LSR sano → el bus está vivo.
+   - **Fase B (clock):** ungate el clock del BTIF antes de leer (buscar `MT_CG_INFRA_BTIF` en
+     `mt_clkmgr.c` downstream; es un bit de INFRACFG ~0x10001000). Soltar también el reset del MCU
+     CONSYS (TOPRGU 0x10007000+0x18 bit12 key 0x88<<24).
+   - **Fase C (TX polled):** init + `mt6582_btif_tx(resync)` (sin IRQ). Loguear LSR tras TX.
+   - **Fase D (RX polled, sin IRQ):** tras TX, poll LSR.DR y leer RBR en bucle acotado (p.ej. 200ms).
+     Loguear bytes. **Aquí ya se ve si el CONSYS responde** sin riesgo de tormenta de IRQ.
+   - **Fase E (IRQ):** solo cuando todo lo anterior va, añadir `request_irq` + `IER_RXFEN`, con la
+     ISR limpiando bien (y `IRQ_NONE` si no era para nosotros, para no colgar el GIC).
+
+
 Objetivo: que el AP envíe un comando WMT al CONSYS por BTIF y reciba la respuesta.
 Eso prueba el canal de control AP↔CONSYS (como M1 probó el power). Es el cimiento de
 **las 4 radios** (WiFi/BT/GPS/FM) — ver [[HITO-WIFI-CONSYS]].

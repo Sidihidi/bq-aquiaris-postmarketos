@@ -124,10 +124,15 @@ el canal de control (BTIF+STP+WMT mínimo), y ~133K más para el 802.11 (M4) —
 kernel 3.10 de 2014. Mainline no soporta este combo precisamente por esto. Es un proyecto de
 **varios meses / equipo**, con riesgo real de no llegar nunca a WiFi funcional.
 
-**Próximo milestone realista si se sigue (M3a — "el CONSYS habla"):** portar BTIF (7K líneas) como
-platform_driver mainline (`@0x1100C000`, IRQ SPI50/71/72) + STP mínimo + enviar **un** comando WMT
-(reset/chip-id) y recibir respuesta del CONSYS por BTIF. Probaría el canal de control AP↔CONSYS
-(como M1 probó el power). Es la pieza atacable; el resto (WMT completo + 802.11) viene detrás.
+**Próximo milestone realista si se sigue (M3a — "el CONSYS habla"):** portar BTIF (`@0x1100C000`,
+IRQ SPI50/71/72) + STP mínimo + enviar **un** comando WMT y recibir respuesta del CONSYS por BTIF.
+Probaría el canal de control AP↔CONSYS (como M1 probó el power). El resto (WMT + 802.11) viene detrás.
+
+**INTENTO M3a v1 (2026-06-18, `boot-m3a.img`): BOOTLOOP en el logo.** Driver BTIF PIO escrito
+(`wifi-consys/m3a/mt6582-btif.c`) pero `boot-m3a.img` (USER_NS+M1+BTIF) cuelga muy temprano —
+sospecha: tormenta de IRQ SPI50 o BTIF sin clock. **Diagnóstico completo, plan de aislamiento por
+fases y recuperación en [`wifi-consys/m3a/HITO-WIFI-M3A.md`](wifi-consys/m3a/HITO-WIFI-M3A.md).**
+Recuperar con `boot-color1.img`. Aislar con `boot-userns.img` (USER_NS+M1 sin BTIF, ya construido).
 
 ## Recuperación
 WiFi no afecta al boot ni al display/GPU. Si el poke colgara (improbable), recuperar con
