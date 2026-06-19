@@ -13,8 +13,13 @@ func_on[BT]/[FM]/[GPS]/[WIFI]: *** RADIO ENCENDIDO *** EVT=02 06 01 00 00 (statu
 **Esto enciende las radios A NIVEL DE CHIP.** Para USARLAS falta el puente a userspace:
 - **BT** (el más fácil): char dev `/dev/stpbt` -> HCI -> BlueZ. **GPS**: `/dev/stpgps` -> NMEA -> gpsd. **FM**: similar.
 - **WiFi**: ADEMÁS el netdev 802.11 (HifAhbProbe -> wlanProbe + descarga WIFI_RAM_CODE_MT6582) = el gigante (~133K líneas).
-**▶ SIGUIENTE**: el puente char-dev (empezar por BT/stpbt -> BlueZ, el camino más corto a un radio USABLE),
-o el WIFI_RAM_CODE + HIF-AHB para WiFi de verdad. Commits: 94b4eb1 (patch) + este (4 radios).
+**🎉 BT HABLA HCI (2026-06-19)**: tras func_on(BT), un **HCI RESET** (`01 03 0c 00`) por STP-BT (type=0)
+devuelve **HCI Command Complete** `04 0e 04 01 03 0c 00` (status=0). El controlador BT procesa HCI
+estándar → **BlueZ-ready**. Índices STP: BT=0 FM=1 GPS=2 WIFI=3 WMT=4.
+**▶ SIGUIENTE (puente a userspace, fase de integración)**: char dev async multi-canal (un dispatcher
+RX que rutea tramas STP por type a /dev/stpbt, /dev/stpgps...). Para **BT usable**: /dev/stpbt + `btattach`
+(BlueZ) → emparejar/conectar. GPS: leer NMEA de STP-GPS → gpsd. FM: comandos de registro. WiFi: el netdev
+802.11 (~133K). Commits: 94b4eb1 (patch) + fb979ff (4 radios) + este (BT habla HCI).
 
 
 ## 🎉🎉🎉🎉 ¡¡CONSEGUIDO 2026-06-19!! EL CONSYS RESPONDE (M3a LOGRADO) 🎉🎉🎉🎉

@@ -65,6 +65,9 @@
 #define PERI_CG_BTIF	(1u << 20)
 
 #define STP_TYPE_WMT	4
+#define STP_TYPE_BT	0	/* BT_TASK_INDX */
+#define STP_TYPE_FM	1
+#define STP_TYPE_GPS	2
 #define RXBUF_SZ	1024
 #define TXPKT_SZ	1100	/* trama STP máx (frag 1000 + WMT hdr 5 + STP 4 + CRC 2) */
 #define WMTBUF_SZ	1010	/* WMT cmd de un fragmento (5 + 1000) */
@@ -305,6 +308,31 @@ static int func_on(struct mt6582_btif *b, u8 type, const char *name)
 	return -EIO;
 }
 
+/* prueba que el BT habla HCI: HCI RESET (0x0C03) por STP-BT -> Command Complete. */
+static void bt_hci_reset(struct mt6582_btif *b)
+{
+	static const u8 hci_reset[4] = { 0x01, 0x03, 0x0c, 0x00 };	/* H4 cmd + opcode 0x0C03 + len 0 */
+	u8 rx[32];
+	int plen, k;
+
+	b->rxlen = 0;
+	stp_send(b, STP_TYPE_BT, hci_reset, 4);
+	for (k = 0; k < 3; k++) {	/* puede llegar un evento de init antes */
+		plen = wmt_wait_frame(b, rx, sizeof(rx), 700);
+		if (plen < 0) { dev_err(b->dev, "BT HCI RESET: sin respuesta\n"); return; }
+		if (plen >= 2 && rx[0] == 0x04) {	/* HCI event packet */
+			if (plen >= 6 && rx[1] == 0x0e && rx[4] == 0x03 && rx[5] == 0x0c)
+				dev_info(b->dev, "*** BLUETOOTH VIVO: HCI Command Complete (RESET) %*ph ***\n",
+					 min_t(int, plen, 8), rx);
+			else
+				dev_info(b->dev, "*** BT responde HCI event %*ph (el chip BT habla) ***\n",
+					 min_t(int, plen, 12), rx);
+			return;
+		}
+		dev_info(b->dev, "BT frame %d (no-HCI) plen=%d: %*ph\n", k, plen, min_t(int, plen, 12), rx);
+	}
+}
+
 static int bringup(struct mt6582_btif *b)
 {
 	static const u8 a_e1_1[4] = { 0x00, 0x00, 0x0e, 0xf0 };
@@ -326,7 +354,8 @@ static int bringup(struct mt6582_btif *b)
 	dev_info(b->dev, "*** PATCH + RESET COMPLETO — encendiendo radios ***\n");
 
 	/* encender radios (BT es el más fácil: no necesita WIFI_RAM_CODE) */
-	func_on(b, 0, "BT");
+	if (func_on(b, 0, "BT") == 0)
+		bt_hci_reset(b);	/* probar que el BT habla HCI de verdad */
 	func_on(b, 1, "FM");
 	func_on(b, 2, "GPS");
 	func_on(b, 3, "WIFI");
