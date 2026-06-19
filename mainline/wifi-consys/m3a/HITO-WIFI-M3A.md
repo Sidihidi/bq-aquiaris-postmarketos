@@ -1,5 +1,30 @@
 # M3a — "el CONSYS habla": BTIF + STP + WMT (guía de implementación para casa)
 
+## 🎉🎉🎉🎉 ¡¡CONSEGUIDO 2026-06-19!! EL CONSYS RESPONDE (M3a LOGRADO) 🎉🎉🎉🎉
+Con `mt6582-btif.c` en **modo DMA (TX+RX VFF)** enviamos GEN_HCR y **el CONSYS contestó 22 bytes**:
+```
+TX_VFF valid=0x0 rpt=0x1a wpt=0x1a BTIF_LSR=0x40   (el TX drenó, el BTIF transmitió)
+RX=22: 80 40 10 00 02 08 0c 00 00 00 00 01 08 00 00 80   (¡respuesta STP/WMT válida!)
+```
+Header respuesta `80 40 10 00` = STP MAND, type=4 (WMT), len=16. **Canal BTIF↔CONSYS bidireccional OK.**
+
+### 🔑 EL BUG QUE NOS BLOQUEABA (it.1 daba RX=0 + PC del MCU congelado):
+**El TX-DMA no expulsa la cola parcial (<8 bytes) de un paquete sin un FLUSH explícito.** Nuestro
+comando de 26 bytes (26 mod 8 = 2 bytes de cola) se quedaba atascado en el motor DMA → el MCU
+recibía una trama INCOMPLETA y la ignoraba (por eso el PC no se movía). Hallado en `hal_dma_send_data`:
+`if (0<VALID<8) _tx_dma_flush()`. El stock lo hace en su IRQ; nosotros (polled) a mano.
+**Los 3 arreglos de la it.2 (`mt6582-btif.c` actual):**
+1. **FLUSH** `TX_DMA_FLUSH @0x14 bit0` tras escribir WPT, en bucle mientras `0<VALID<8` hasta VALID==0.
+2. **Formato WPT correcto**: offset en bits[15:0] (tope vff_size), **wrap en bit16** (`DMA_WPT_WRAP=0x10000`), no bit12.
+3. **TX threshold = vff_size-7** (`DMA_TX_THRE`), STOP@0x10=0, EN antes de cada WPT.
+RX: `valid = WPT-RPT` (wrap-aware), no el registro VALID (mask 0x1F raro).
+
+### ▶ SIGUIENTE (con el canal ya abierto): parsear la respuesta hw_check (chip-id 0x6582, hw/fw ver)
+→ secuencia completa: hw_check → **descarga del patch** (`mt6572_82_patch_e1`) → WIFI_RAM_CODE →
+wlanProbe → **WiFi ON**. Y de ahí BT/GPS/FM casi gratis (mismo canal WMT). Ver §secuencia capturada abajo.
+
+---
+
 ## 🏆🏆🏆 PLAN B LOGRADO (2026-06-19): CAPTURADA LA SECUENCIA REAL DE ANDROID
 Vía **adb root sin auth** (default.prop ro.secure=0) en un stock con /data neutralizado + **busybox
 estático** en el ramdisk (`adb shell`) + **/system montado a mano por loop+offset 0x5900000** (el
