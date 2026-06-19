@@ -298,16 +298,13 @@ static int mt6582_btif_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct mt6582_btif *b;
 	static const u8 stp_resync[4] = { 0x7f, 0x7f, 0x7f, 0x7f };
-	/* GEN_HCR register-read: el PRIMER comando real para BTIF (wmt_core_hw_check, ANTES
-	 * de sw_init). op=2 (lectura), addr LE=0x80000008 (GEN_HCR), mask LE=0x0000FFFF.
-	 * EVT esperado: RD_EVT 16B {02 08 04 00 ...}. (QUERY_STP es de una fase posterior.) */
-	static const u8 wmt_gen_hcr[20] = {
-		0x01, 0x08, 0x10, 0x00,			/* CMD, opcode 0x08, len=0x10 (16) */
-		0x02, 0x01, 0x00, 0x01,			/* op=2 read */
-		0x08, 0x00, 0x00, 0x80,			/* addr LE = 0x80000008 (GEN_HCR) */
-		0x00, 0x00, 0x00, 0x00,			/* value (0 en lectura) */
-		0xff, 0xff, 0x00, 0x00			/* mask LE = 0x0000FFFF */
-	};
+	/* QUERY_STP: la config que SÍ hizo reaccionar al MCU (sesión de casa, type=0 -> el PC
+	 * saltaba al handler 0x13e8c). Reproducimos eso PERO con RX-DMA (que ya funciona, el
+	 * loopback lo probó). Objetivo: ver si la respuesta CONSYS->AP llega al ring DMA. */
+	static const u8 wmt_query_stp[5] = { 0x01, 0x04, 0x01, 0x00, 0x04 };
+	/* type del canal STP a probar: 0 reaccionaba (empírico); 4=WMT_TASK_INDX es el correcto
+	 * por código pero el MCU no reacciona (¿falta abrir el canal?). Probamos 0. */
+	const u8 stp_type = 0;
 	int ret;
 
 	/* esperar a que el CONSYS active su MCU (mt6582-consys.c); sin eso el enlace
@@ -361,16 +358,19 @@ static int mt6582_btif_probe(struct platform_device *pdev)
 		usleep_range(2000, 4000);
 		dev_info(dev, "DIAG PC: tras_hwinit+lpbk=0x%x  tras_resync=0x%x\n",
 			 pc0, mcu ? readl(mcu + 0x160) : 0);
-		ret = mt6582_btif_stp_send(b, STP_TYPE_WMT, wmt_gen_hcr,
-					   sizeof(wmt_gen_hcr));
+		ret = mt6582_btif_stp_send(b, stp_type, wmt_query_stp,
+					   sizeof(wmt_query_stp));
 		{
 			int k;
 
 			for (k = 0; k < 20; k++) {
 				mt6582_btif_rxdma_poll(b, 100);
-				dev_info(dev, "DIAG k=%2d PC=0x%-7x VALID=0x%x RX=%u: %*ph\n",
+				dev_info(dev, "DIAG k=%2d PC=0x%-7x VALID=0x%x WPT=0x%x RPT=0x%x LSR=0x%x RX=%u: %*ph\n",
 					 k, mcu ? readl(mcu + 0x160) : 0,
 					 b->apdma ? readl(b->apdma + RXDMA_VALID) : 0,
+					 b->apdma ? readl(b->apdma + RXDMA_VFF_WPT) : 0,
+					 b->apdma ? readl(b->apdma + RXDMA_VFF_RPT) : 0,
+					 btif_rd(b, BTIF_LSR),
 					 b->rxcnt, min_t(unsigned int, b->rxcnt, 16), b->rxlog);
 				if (b->rxcnt)
 					break;
