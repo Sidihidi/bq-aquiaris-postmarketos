@@ -298,10 +298,16 @@ static int mt6582_btif_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct mt6582_btif *b;
 	static const u8 stp_resync[4] = { 0x7f, 0x7f, 0x7f, 0x7f };
-	/* WMT_QUERY_STP: el PRIMER comando real para BTIF (init_table_1_2). El QUERY_BAUD
-	 * {..0x02} es SOLO UART (#if CFG_WMT_UART_HIF_USE) y hacía excepcionar al MCU.
-	 * EVT esperado: {02 04 06 00 00 04 11 00 00 00}. */
-	static const u8 wmt_query_baud[5] = { 0x01, 0x04, 0x01, 0x00, 0x04 };
+	/* GEN_HCR register-read: el PRIMER comando real para BTIF (wmt_core_hw_check, ANTES
+	 * de sw_init). op=2 (lectura), addr LE=0x80000008 (GEN_HCR), mask LE=0x0000FFFF.
+	 * EVT esperado: RD_EVT 16B {02 08 04 00 ...}. (QUERY_STP es de una fase posterior.) */
+	static const u8 wmt_gen_hcr[20] = {
+		0x01, 0x08, 0x10, 0x00,			/* CMD, opcode 0x08, len=0x10 (16) */
+		0x02, 0x01, 0x00, 0x01,			/* op=2 read */
+		0x08, 0x00, 0x00, 0x80,			/* addr LE = 0x80000008 (GEN_HCR) */
+		0x00, 0x00, 0x00, 0x00,			/* value (0 en lectura) */
+		0xff, 0xff, 0x00, 0x00			/* mask LE = 0x0000FFFF */
+	};
 	int ret;
 
 	/* esperar a que el CONSYS active su MCU (mt6582-consys.c); sin eso el enlace
@@ -355,8 +361,8 @@ static int mt6582_btif_probe(struct platform_device *pdev)
 		usleep_range(2000, 4000);
 		dev_info(dev, "DIAG PC: tras_hwinit+lpbk=0x%x  tras_resync=0x%x\n",
 			 pc0, mcu ? readl(mcu + 0x160) : 0);
-		ret = mt6582_btif_stp_send(b, STP_TYPE_WMT, wmt_query_baud,
-					   sizeof(wmt_query_baud));
+		ret = mt6582_btif_stp_send(b, STP_TYPE_WMT, wmt_gen_hcr,
+					   sizeof(wmt_gen_hcr));
 		{
 			int k;
 
