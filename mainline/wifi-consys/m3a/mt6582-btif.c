@@ -22,6 +22,10 @@
 #include <linux/kthread.h>
 #include <linux/mutex.h>
 #include <linux/skbuff.h>
+#include <linux/kfifo.h>
+#include <linux/poll.h>
+#include <linux/miscdevice.h>
+#include <linux/uaccess.h>
 #include <net/bluetooth/bluetooth.h>
 #include <net/bluetooth/hci_core.h>
 
@@ -64,7 +68,9 @@
 #define PERI_CG_BTIF	(1u << 20)
 
 #define STP_TYPE_BT	0
+#define STP_TYPE_GPS	2
 #define STP_TYPE_WMT	4
+#define GPS_FIFO_SZ	16384
 #define RXBUF_SZ	2048
 #define TXPKT_SZ	1100
 #define WMTBUF_SZ	1010
@@ -93,6 +99,11 @@ struct mt6582_btif {
 	struct task_struct *rx_task;
 	struct mutex tx_lock;
 	int dbg_n;
+	/* GPS: canal STP 2 -> /dev/stpgps (passthrough crudo, igual que el downstream). */
+	struct kfifo gps_fifo;
+	wait_queue_head_t gps_wq;
+	struct mutex gps_rd_lock;
+	u8 gps_tx[1024];
 };
 
 static struct mt6582_btif *g_btif;
@@ -315,7 +326,11 @@ static int bring_up_chip(struct mt6582_btif *b)
 	wmt_cmd(b, WMT_RESET_CMD, 5, WMT_RESET_EVT, 5, "RESET-2");
 	ret = func_on(b, 0, "BT");
 	if (ret) return ret;
-	dev_info(b->dev, "*** CHIP LISTO + BT ON — registrando hci0 ***\n");
+	/* GPS encendido aquí (síncrono, antes del kthread RX) para no competir por rxbuf.
+	 * El streaming NMEA lo dispara el daemon de userspace (mnld-equiv) vía /dev/stpgps. */
+	if (func_on(b, STP_TYPE_GPS, "GPS"))
+		dev_warn(b->dev, "GPS no encendió (sigo: BT ok)\n");
+	dev_info(b->dev, "*** CHIP LISTO + BT/GPS ON — registrando hci0 + /dev/stpgps ***\n");
 	return 0;
 }
 
@@ -332,6 +347,11 @@ static int btif_rx_thread(void *data)
 		while ((plen = stp_pop_frame(b, buf, sizeof(buf), &type)) > 0) {
 			struct sk_buff *skb;
 
+			if (type == STP_TYPE_GPS) {	/* NMEA/MNL -> /dev/stpgps */
+				kfifo_in(&b->gps_fifo, buf, plen);
+				wake_up_interruptible(&b->gps_wq);
+				continue;
+			}
 			if (type != STP_TYPE_BT || !b->hdev || plen < 2)
 				continue;
 			skb = bt_skb_alloc(plen - 1, GFP_KERNEL);
@@ -426,6 +446,79 @@ static ssize_t bringup_write(struct file *f, const char __user *u, size_t n, lof
 }
 static const struct file_operations bringup_fops = { .write = bringup_write, .owner = THIS_MODULE };
 
+/* ===== GPS: /dev/stpgps — passthrough crudo del canal STP 2 (NMEA/MNL) =====
+ * Mismo contrato que el stp_chrdev_gps del downstream: read/write entregan el
+ * payload STP ya desensamblado. Un daemon de userspace (mnld-equiv) arranca el
+ * GPS y vuelca NMEA, que se enchufa a gpsd -> geoclue -> Phosh. */
+static int gps_open(struct inode *ino, struct file *f)
+{
+	struct mt6582_btif *b = g_btif;
+
+	if (!b)
+		return -ENODEV;
+	if (!b->brought_up && bringup(b))	/* abre el chip si el BT no lo hizo ya */
+		return -EIO;
+	kfifo_reset(&b->gps_fifo);
+	f->private_data = b;
+	return 0;
+}
+
+static ssize_t gps_read(struct file *f, char __user *u, size_t n, loff_t *o)
+{
+	struct mt6582_btif *b = f->private_data;
+	unsigned int copied = 0;
+	int ret;
+
+	if (mutex_lock_interruptible(&b->gps_rd_lock))
+		return -ERESTARTSYS;
+	while (kfifo_is_empty(&b->gps_fifo)) {
+		if (f->f_flags & O_NONBLOCK) { ret = -EAGAIN; goto out; }
+		mutex_unlock(&b->gps_rd_lock);
+		if (wait_event_interruptible(b->gps_wq, !kfifo_is_empty(&b->gps_fifo)))
+			return -ERESTARTSYS;
+		if (mutex_lock_interruptible(&b->gps_rd_lock))
+			return -ERESTARTSYS;
+	}
+	ret = kfifo_to_user(&b->gps_fifo, u, n, &copied);
+out:
+	mutex_unlock(&b->gps_rd_lock);
+	return ret ? ret : (ssize_t)copied;
+}
+
+static ssize_t gps_write(struct file *f, const char __user *u, size_t n, loff_t *o)
+{
+	struct mt6582_btif *b = f->private_data;
+	u32 len = min_t(size_t, n, sizeof(b->gps_tx));
+
+	mutex_lock(&b->tx_lock);
+	if (copy_from_user(b->gps_tx, u, len)) { mutex_unlock(&b->tx_lock); return -EFAULT; }
+	stp_send(b, STP_TYPE_GPS, b->gps_tx, len);
+	mutex_unlock(&b->tx_lock);
+	return len;
+}
+
+static __poll_t gps_poll(struct file *f, struct poll_table_struct *wait)
+{
+	struct mt6582_btif *b = f->private_data;
+
+	poll_wait(f, &b->gps_wq, wait);
+	return kfifo_is_empty(&b->gps_fifo) ? 0 : (EPOLLIN | EPOLLRDNORM);
+}
+
+static const struct file_operations gps_fops = {
+	.owner = THIS_MODULE,
+	.open = gps_open,
+	.read = gps_read,
+	.write = gps_write,
+	.poll = gps_poll,
+};
+
+static struct miscdevice gps_miscdev = {
+	.minor = MISC_DYNAMIC_MINOR,
+	.name = "stpgps",
+	.fops = &gps_fops,
+};
+
 static int mt6582_btif_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -439,6 +532,10 @@ static int mt6582_btif_probe(struct platform_device *pdev)
 	if (!b) return -ENOMEM;
 	b->dev = dev;
 	mutex_init(&b->tx_lock);
+	mutex_init(&b->gps_rd_lock);
+	init_waitqueue_head(&b->gps_wq);
+	if (kfifo_alloc(&b->gps_fifo, GPS_FIFO_SZ, GFP_KERNEL))
+		return -ENOMEM;
 	dma_coerce_mask_and_coherent(dev, DMA_BIT_MASK(32));
 	b->base = ioremap(BTIF_PHYS, 0x100);
 	b->txdma = ioremap(APDMA_TX_PHYS, APDMA_SIZE);
@@ -460,7 +557,9 @@ static int mt6582_btif_probe(struct platform_device *pdev)
 	g_btif = b;
 	b->dbg = debugfs_create_dir("mt6582_btif", NULL);
 	debugfs_create_file("bringup", 0200, b->dbg, b, &bringup_fops);
+	misc_register(&gps_miscdev);
 	dev_info(dev, "BT: echo 1 > /sys/kernel/debug/mt6582_btif/bringup  (levanta hci0)\n");
+	dev_info(dev, "GPS: /dev/stpgps (abrir dispara bring-up; userspace mnld-equiv -> gpsd)\n");
 	platform_set_drvdata(pdev, b);
 	return 0;
 }
