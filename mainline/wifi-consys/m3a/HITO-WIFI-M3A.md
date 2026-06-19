@@ -30,6 +30,30 @@ Falta que el CONSYS TRANSMITA la respuesta. Dos frentes para casa (investigar, n
 - **type a usar:** type=0 hace que el MCU procese (mejor punto de partida que type=4). Mantener type=0
   hasta resolver CONSYS→AP; luego revisar si type=4 con el canal "abierto" es lo correcto.
 
+### ❌ Watchdog DESCARTADO (2026-06-19) + ▶ PLAN B (capturar la secuencia real de Android)
+**Cazado el watchdog: NO es un watchdog.** `CONSYS_WD_SYS_RST_REG` (0x10000018 bit9, key 0x88<<24)
+existe pero el downstream NO lo usa. Y el `exp_main` **lo dispara nuestro comando**, no un temporizador:
+con **type=4 el MCU NUNCA va a 0x23d8** (se queda idle 0xe38 todo el rato); con **type=0 procesa y
+SÍ excepciona a ~2s**. → el `exp_main` es el firmware *assertando* al recibir un comando por el canal
+**BT(0) equivocado**. El bloqueo real: **type=4 (canal WMT correcto) no engancha al MCU** → falta el
+**handshake que "abre" el canal WMT**, que es FIRMWARE (no está en el source del kernel).
+
+**→ PLAN B = capturar qué hace Android de verdad** (la única vía a ese handshake):
+- **Mecanismo de Android**: userspace `wmt_loader` + `6620_launcher` (en stock `/system/bin/`, el
+  daemon WMT genérico MTK) abren `/dev/stpwmt` → ioctl → el **kernel** (wmt_lib/wmt_ic_soc) hace el
+  handshake STP/BTIF real. **`stp_dbg_pkt_log` registra CADA paquete TX/RX** con dirección.
+- **Cómo capturar**: arrancar el **stock Android** (flashear `boot.img` + `system.img` de
+  `~/Downloads/1.5.2_krillin`, en la Pi `~/wifi-fw/`; **reversible**: el rootfs pmOS está en p7,
+  intacto; restaurar = flashear boot-color1.img). Activar el debug STP (proc/`wmt_dbg` o build eng) y
+  leer `dmesg` con el log de paquetes = **la secuencia EXACTA + las respuestas del CONSYS**.
+- **Refinamiento (idea del usuario)**: montar `system.img` rw en la Pi y meter un servicio init que en
+  el **primer boot** active stp_dbg + vuelque el dmesg a una partición leíble → sin interacción manual.
+  (system.img montado en Pi `/mnt/stocksys`; binarios en `/mnt/stocksys/bin/{wmt_loader,6620_launcher}`.)
+- **Mutualizar**: el patrón BTIF/STP/WMT que saquemos sirve de plantilla para el resto de coprocesadores
+  con firmware (el otro grande del MT6582 es el módem/MD, que es Halium-only).
+- Pendiente menor: el ramdisk del boot.img stock está en formato MTK comprimido (no gzip+cpio directo;
+  desempaquetar con el header MTK / lz4 si hace falta el init.rc exacto).
+
 
 ## ✅ FASE A RESUELVE EL BOOTLOOP (2026-06-18, `boot-btifA.img`) — EL BUS BTIF VIVE
 Reescrito `mt6582-btif.c` a **Fase A pasiva**: ungate del clock PERI_BTIF + leer LSR/IIR,
