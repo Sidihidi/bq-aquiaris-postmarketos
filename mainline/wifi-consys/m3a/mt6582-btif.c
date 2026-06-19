@@ -49,7 +49,8 @@
 #define PERI_PDN0_CLR	0x10
 #define PERI_CG_BTIF	(1u << 20)
 
-#define STP_TYPE_WMT	0	/* task index del canal WMT en STP */
+#define STP_TYPE_WMT	4	/* WMT_TASK_INDX=4 (canal WMT). header h[1]=(type<<4)|.. = 0x40.
+				 * Antes era 0 -> h[1]=0x00 = canal BT(0) -> el MCU enrutaba mal y excepcionaba */
 #define BTIF_RX_LOG	128
 
 /* lo pone a true mt6582-consys.c cuando el MCU del CONSYS ya corre el ROM */
