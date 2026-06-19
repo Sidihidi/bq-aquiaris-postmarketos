@@ -1,12 +1,14 @@
 #!/bin/sh
-# /etc/local.d/zz-consys-bt.start — levanta el CONSYS BT al arranque y reinicia bluetoothd.
-# (rc-update add local default; rc-update add bluetooth default)
-( for i in $(seq 1 25); do
-    mount -t debugfs none /sys/kernel/debug 2>/dev/null
-    if [ -e /sys/kernel/debug/mt6582_btif/bringup ]; then
-      echo 1 > /sys/kernel/debug/mt6582_btif/bringup
-      sleep 3; rc-service bluetooth restart
-      break
-    fi
-    sleep 2
-  done ) &
+# /etc/local.d/zz-consys-bt.start — levanta el CONSYS Bluetooth (hci0) al arranque.
+# Corre ANTES que zzzz-phosh.start (zz < zzzz), SÍNCRONO, así hci0 está presente+encendido
+# cuando Phosh construye su toggle de BT -> el toggle sale ACTIVO.
+# Habilitar: rc-update add local default; rc-update add bluetooth default.
+# (bluetoothd con AutoEnable=true en /etc/bluetooth/main.conf auto-enciende el adaptador.)
+mount -t debugfs none /sys/kernel/debug 2>/dev/null
+i=0
+while [ $i -lt 20 ] && [ ! -e /sys/kernel/debug/mt6582_btif/bringup ]; do sleep 1; i=$((i+1)); done
+if [ -e /sys/kernel/debug/mt6582_btif/bringup ]; then
+  timeout 50 sh -c 'echo 1 > /sys/kernel/debug/mt6582_btif/bringup'
+  sleep 2
+  bluetoothctl power on >/dev/null 2>&1
+fi
