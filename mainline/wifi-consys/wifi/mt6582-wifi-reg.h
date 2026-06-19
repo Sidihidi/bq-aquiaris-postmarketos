@@ -111,7 +111,7 @@
 #define CMD_PKT_SIZE_FOR_IMAGE		2048	/* máx payload por chunk (hif_tx.h:102) */
 
 /* firma de la cabecera del firmware seccionado: BUILD_SIGN('M','T','K','W') */
-#define MTK_WIFI_SIGNATURE		0x57544b4d	/* 'M' 'T' 'K' 'W' en LE */
+#define MTK_WIFI_SIGNATURE		0x574b544d	/* bytes 4d 54 4b 57 ('M''T''K''W') leídos LE */
 
 /* cabecera HIF de un comando init (4B) + cabecera de comando init (4B) — packed */
 struct init_hif_tx_header {
