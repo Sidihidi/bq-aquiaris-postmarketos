@@ -26,6 +26,7 @@
 #include <linux/poll.h>
 #include <linux/miscdevice.h>
 #include <linux/uaccess.h>
+#include <linux/completion.h>
 #include <net/bluetooth/bluetooth.h>
 #include <net/bluetooth/hci_core.h>
 
@@ -82,6 +83,8 @@
 #define FRAG_LAST	0x3
 
 extern bool mt6582_consys_ready;
+int mt6582_consys_func_on(u8 type);	/* exportadas para el driver WiFi (mt6582-wifi.c) */
+int mt6582_consys_func_off(u8 type);
 
 struct mt6582_btif {
 	struct device *dev;
@@ -104,6 +107,12 @@ struct mt6582_btif {
 	wait_queue_head_t gps_wq;
 	struct mutex gps_rd_lock;
 	u8 gps_tx[1024];
+	/* WMT runtime (canal 4): API exportada func_on/off para otras radios (p.ej. WiFi).
+	 * El kthread RX rutea el EVT WMT aquí vía completion (no compite por rxbuf). */
+	struct completion wmt_done;
+	struct mutex wmt_lock;
+	u8 wmt_rx[64];
+	u32 wmt_rxlen;
 };
 
 static struct mt6582_btif *g_btif;
@@ -347,6 +356,12 @@ static int btif_rx_thread(void *data)
 		while ((plen = stp_pop_frame(b, buf, sizeof(buf), &type)) > 0) {
 			struct sk_buff *skb;
 
+			if (type == STP_TYPE_WMT) {	/* EVT de func_on/off -> wmt_func() */
+				b->wmt_rxlen = min_t(u32, plen, sizeof(b->wmt_rx));
+				memcpy(b->wmt_rx, buf, b->wmt_rxlen);
+				complete(&b->wmt_done);
+				continue;
+			}
 			if (type == STP_TYPE_GPS) {	/* NMEA/MNL -> /dev/stpgps */
 				kfifo_in(&b->gps_fifo, buf, plen);
 				wake_up_interruptible(&b->gps_wq);
@@ -438,6 +453,43 @@ static int bringup(struct mt6582_btif *b)
 	dev_info(b->dev, "*** hci0 REGISTRADO — enciende BT: bluetoothctl power on / Phosh ***\n");
 	return 0;
 }
+
+/* ===== API exportada: encender/apagar una función del CONSYS en runtime =====
+ * type: 0=BT 1=FM 2=GPS 3=WIFI. Thread-safe: levanta el chip si hace falta (patch + kthread RX)
+ * y manda el comando WMT esperando el EVT por la completion que llena el kthread (sin competir
+ * por rxbuf). La usa el driver WiFi (mt6582-wifi.c) para func_on(WIFI). */
+static int wmt_func(struct mt6582_btif *b, u8 type, u8 on)
+{
+	u8 cmd[6] = { 0x01, 0x06, 0x02, 0x00, type, on };
+	int ret = -EIO;
+
+	if (!b->brought_up && bringup(b))
+		return -EIO;			/* asegura patch + kthread RX vivo */
+	mutex_lock(&b->wmt_lock);
+	reinit_completion(&b->wmt_done);
+	mutex_lock(&b->tx_lock);
+	stp_send(b, STP_TYPE_WMT, cmd, 6);
+	mutex_unlock(&b->tx_lock);
+	if (wait_for_completion_timeout(&b->wmt_done, msecs_to_jiffies(2000)) &&
+	    b->wmt_rxlen >= 5 && b->wmt_rx[0] == 0x02 && b->wmt_rx[1] == 0x06 && b->wmt_rx[4] == 0)
+		ret = 0;
+	mutex_unlock(&b->wmt_lock);
+	if (ret)
+		dev_warn(b->dev, "wmt_func(type=%u on=%u): sin EVT OK (rxlen=%u)\n", type, on, b->wmt_rxlen);
+	return ret;
+}
+
+int mt6582_consys_func_on(u8 type)
+{
+	return g_btif ? wmt_func(g_btif, type, 0x01) : -ENODEV;
+}
+EXPORT_SYMBOL_GPL(mt6582_consys_func_on);
+
+int mt6582_consys_func_off(u8 type)
+{
+	return g_btif ? wmt_func(g_btif, type, 0x00) : -ENODEV;
+}
+EXPORT_SYMBOL_GPL(mt6582_consys_func_off);
 
 static ssize_t bringup_write(struct file *f, const char __user *u, size_t n, loff_t *o)
 {
@@ -533,6 +585,8 @@ static int mt6582_btif_probe(struct platform_device *pdev)
 	b->dev = dev;
 	mutex_init(&b->tx_lock);
 	mutex_init(&b->gps_rd_lock);
+	mutex_init(&b->wmt_lock);
+	init_completion(&b->wmt_done);
 	init_waitqueue_head(&b->gps_wq);
 	if (kfifo_alloc(&b->gps_fifo, GPS_FIFO_SZ, GFP_KERNEL))
 		return -ENOMEM;
