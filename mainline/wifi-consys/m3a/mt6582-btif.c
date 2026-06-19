@@ -103,6 +103,9 @@ static const u8 PATCH_PADDR_CMD[20] = {
 	0x01,0x08,0x10,0x00,0x01,0x01,0x00,0x01,0xc4,0x04,0x09,0x02,0x00,0x3f,0x00,0x01,0xff,0xff,0xff,0xff };
 static const u8 PATCH_PADDR_EVT[8] = { 0x02,0x08,0x04,0x00,0x00,0x00,0x00,0x01 };
 static const u8 PATCH_EVT[5] = { 0x02,0x01,0x01,0x00,0x00 };
+static const u8 WMT_RESET_CMD[5] = { 0x01,0x07,0x01,0x00,0x04 };
+static const u8 WMT_RESET_EVT[5] = { 0x02,0x07,0x01,0x00,0x00 };
+/* func_on(type): {01,06,02,00,type,01}; EVT {02,06,01,00,status}. BT=0 FM=1 GPS=2 WIFI=3 */
 
 static inline u32 rd(void __iomem *b, u32 o) { return readl(b + o); }
 static inline void wr(void __iomem *b, u32 o, u32 v) { writel(v, b + o); }
@@ -278,23 +281,55 @@ out:
 	return ret;
 }
 
+/* enciende una función/radio: func_on(type). BT=0 FM=1 GPS=2 WIFI=3. */
+static int func_on(struct mt6582_btif *b, u8 type, const char *name)
+{
+	u8 cmd[6] = { 0x01, 0x06, 0x02, 0x00, type, 0x01 };
+	u8 rx[16];
+	int plen;
+
+	b->rxlen = 0;
+	stp_send(b, STP_TYPE_WMT, cmd, 6);
+	plen = wmt_wait_frame(b, rx, sizeof(rx), 2000);	/* func_on puede tardar */
+	if (plen < 5) {
+		dev_err(b->dev, "func_on[%s]: TIMEOUT/corto (plen=%d)\n", name, plen);
+		return -EIO;
+	}
+	if (rx[0] == 0x02 && rx[1] == 0x06 && rx[4] == 0) {
+		dev_info(b->dev, "func_on[%s]: *** RADIO %s ENCENDIDO *** EVT=%*ph\n",
+			 name, name, min_t(int, plen, 8), rx);
+		return 0;
+	}
+	dev_warn(b->dev, "func_on[%s]: status=%d EVT=%*ph (no encendió)\n",
+		 name, rx[4], min_t(int, plen, 8), rx);
+	return -EIO;
+}
+
 static int bringup(struct mt6582_btif *b)
 {
 	static const u8 a_e1_1[4] = { 0x00, 0x00, 0x0e, 0xf0 };
 	static const u8 a_e1_0[4] = { 0x00, 0x00, 0x06, 0x00 };
 	int ret;
 
-	dev_info(b->dev, "=== BRING-UP: descarga del patch ===\n");
-	/* confirmar el canal con GEN_HCR */
+	dev_info(b->dev, "=== BRING-UP: patch + reset + func_on ===\n");
 	ret = wmt_cmd(b, GEN_HCR, 20, (const u8[]){0x02,0x08}, 2, "GEN_HCR");
 	if (ret) { dev_err(b->dev, "canal KO (GEN_HCR)\n"); return ret; }
 	dev_info(b->dev, "canal OK (GEN_HCR responde)\n");
 
+	/* descarga del patch + WMT_RESET tras cada uno (como el stock, init_table_3) */
 	ret = patch_dwn(b, "mt6572_82_patch_e1_1_hdr.bin", a_e1_1);
 	if (ret) return ret;
+	wmt_cmd(b, WMT_RESET_CMD, 5, WMT_RESET_EVT, 5, "RESET-1");
 	ret = patch_dwn(b, "mt6572_82_patch_e1_0_hdr.bin", a_e1_0);
 	if (ret) return ret;
-	dev_info(b->dev, "*** PATCH COMPLETO — siguiente: WIFI_RAM_CODE + func_on ***\n");
+	wmt_cmd(b, WMT_RESET_CMD, 5, WMT_RESET_EVT, 5, "RESET-2");
+	dev_info(b->dev, "*** PATCH + RESET COMPLETO — encendiendo radios ***\n");
+
+	/* encender radios (BT es el más fácil: no necesita WIFI_RAM_CODE) */
+	func_on(b, 0, "BT");
+	func_on(b, 1, "FM");
+	func_on(b, 2, "GPS");
+	func_on(b, 3, "WIFI");
 	return 0;
 }
 

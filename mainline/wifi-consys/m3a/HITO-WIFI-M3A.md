@@ -1,5 +1,22 @@
 # M3a — "el CONSYS habla": BTIF + STP + WMT (guía de implementación para casa)
 
+## 🎉🎉🎉🎉🎉🎉 BRING-UP COMPLETO 2026-06-19: LAS 4 RADIOS ENCENDIDAS (chip-level) 🎉🎉🎉🎉🎉🎉
+`mt6582-btif.c` (it.4) hace el **bring-up completo del CONSYS** y enciende las 4 funciones:
+```
+patch e1_1 (21 frags) + e1_0 (41 frags) DESCARGADOS OK -> WMT_RESET x2 ->
+func_on[BT]/[FM]/[GPS]/[WIFI]: *** RADIO ENCENDIDO *** EVT=02 06 01 00 00 (status=0 OK) x4
+```
+**Secuencia completa que funciona** (todo por BTIF-DMA + STP/WMT, trigger debugfs `echo 1 > /sys/kernel/debug/mt6582_btif/bringup`):
+1. GEN_HCR (canal) -> 2. patch download x2 (request_firmware + ADDRESS_CMD + P_ADDRESS_CMD[addr] +
+   fragmentos de 1000B con WMT_PATCH_CMD/EVT) -> 3. WMT_RESET_CMD `{01,07,01,00,04}` -> 4. func_on(type)
+   `{01,06,02,00,type,01}` -> EVT `{02,06,01,00,status}` (OPCODE_FUNC_CTRL=6; BT=0 FM=1 GPS=2 WIFI=3).
+**Esto enciende las radios A NIVEL DE CHIP.** Para USARLAS falta el puente a userspace:
+- **BT** (el más fácil): char dev `/dev/stpbt` -> HCI -> BlueZ. **GPS**: `/dev/stpgps` -> NMEA -> gpsd. **FM**: similar.
+- **WiFi**: ADEMÁS el netdev 802.11 (HifAhbProbe -> wlanProbe + descarga WIFI_RAM_CODE_MT6582) = el gigante (~133K líneas).
+**▶ SIGUIENTE**: el puente char-dev (empezar por BT/stpbt -> BlueZ, el camino más corto a un radio USABLE),
+o el WIFI_RAM_CODE + HIF-AHB para WiFi de verdad. Commits: 94b4eb1 (patch) + este (4 radios).
+
+
 ## 🎉🎉🎉🎉 ¡¡CONSEGUIDO 2026-06-19!! EL CONSYS RESPONDE (M3a LOGRADO) 🎉🎉🎉🎉
 Con `mt6582-btif.c` en **modo DMA (TX+RX VFF)** enviamos GEN_HCR y **el CONSYS contestó 22 bytes**:
 ```
