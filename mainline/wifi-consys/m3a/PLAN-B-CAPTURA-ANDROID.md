@@ -1,5 +1,29 @@
 # PLAN B — Capturar la secuencia CONSYS real de Android (receta)
 
+## ⚠️⚠️ RIESGO CRÍTICO (2026-06-19): bootear stock Android TAL CUAL DESTRUYE pmOS
+Verificado en el `fstab` del ramdisk stock: **`/emmc@usrdata /data ext4 ... wait,check,encryptable=footer`**.
+El `/data` de Android = la partición **usrdata = p7 = el rootfs de pmOS**. Al arrancar, el init de
+Android monta p7 como /data y la **contamina o la FORMATEA** (encryptable) → adiós pmOS. **NO flashear
+y bootear stock sin neutralizar /data.**
+
+### Vía SEGURA (preparada): modificar el ramdisk del boot.img para NO montar /data
+- **Neutralizar /data**: comentar la línea `/data` en `fstab`, `fstab.nand`, `fstab.fat.nand` del
+  ramdisk → `mount_all` la salta → **p7 intacto**. (El launcher NO necesita /data para el chip-init;
+  el NVRAM/data hace falta luego para el MAC WiFi, no para el handshake STP/BTIF que queremos.)
+- **/system (p5) y /cache (p6) SÍ se montan** (seguros, pmOS no los usa). `/system` tiene los binarios
+  (`/system/bin/{wmt_loader,6620_launcher}`) y el firmware (`/system/etc/firmware/`).
+- **Servicios que hacen el bring-up** (init.project.rc): `service wmtLoader .../wmt_loader` (class main)
+  + `service conn_launcher .../6620_launcher -p /system/etc/firmware/` (class core). Arrancan solos al
+  boot → el kernel hace el chip-init (handshake STP/BTIF + patch) → `stp_dbg`/`WMT_INFO` printan a kmsg.
+- **Captura**: añadir un servicio `class late_start oneshot` que tras ~15s vuelque `dmesg` a /cache (p6)
+  o a la partición by-name cache; luego bootear pmOS y leer p6. (Confirmar el nº de partición de cache
+  en stock; usar by-name si existe.) Opcional: subir `gStpDbgDbgLevel`/`gWmtDbgLvl` por su proc.
+- **Estado prep**: ramdisk stock extraído en Pi `~/wifi-fw/bootx/rd/` (gzip @off 512 = header MTK).
+  Repack: `cpio -o -H newc | gzip` → `mtk_hdr.py ROOTFS` (re-añade header MTK) → `abootimg --create`.
+- Flashear `boot-stockcap.img` (modificado) + `system.img` stock (a p5, seguro). Restaurar pmOS =
+  `fastboot flash boot boot-color1.img` (p7 intacto).
+
+
 Objetivo: ver los **bytes STP/BTIF exactos** que el kernel stock (3.10, que SÍ funciona) intercambia
 con el CONSYS al arrancar — sobre todo el **handshake que "abre" el canal WMT** (lo que nos falta:
 con type=4 el MCU no engancha; eso es firmware, no está en el source). Es la fuente definitiva.
