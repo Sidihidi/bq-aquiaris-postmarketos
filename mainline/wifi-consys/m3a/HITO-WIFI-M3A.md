@@ -19,9 +19,26 @@ recibía una trama INCOMPLETA y la ignoraba (por eso el PC no se movía). Hallad
 3. **TX threshold = vff_size-7** (`DMA_TX_THRE`), STOP@0x10=0, EN antes de cada WPT.
 RX: `valid = WPT-RPT` (wrap-aware), no el registro VALID (mask 0x1F raro).
 
-### ▶ SIGUIENTE (con el canal ya abierto): parsear la respuesta hw_check (chip-id 0x6582, hw/fw ver)
-→ secuencia completa: hw_check → **descarga del patch** (`mt6572_82_patch_e1`) → WIFI_RAM_CODE →
-wlanProbe → **WiFi ON**. Y de ahí BT/GPS/FM casi gratis (mismo canal WMT). Ver §secuencia capturada abajo.
+### ▶ SIGUIENTE — BLUEPRINT COMPLETO DEL BRING-UP (todos los comandos extraídos de wmt_ic_soc.c):
+**Necesita primero**: un helper TX→RX **síncrono** (enviar cmd, esperar el EVT exacto, verificar) +
+`request_firmware()` para los blobs + generalizar `stp_send` para payloads grandes (~1005B).
+**0. hw_check** (ya contesta): GEN_HCR + más reg-reads → chip 0x6582, hw_ver 0x8a01, fw_ver 0x8a00.
+**1. Descarga del patch** (`mtk_wcn_soc_patch_dwn`, por cada patch e1_1 luego e1_0):
+   - Cargar el fichero (`request_firmware` mt6572_82_patch_e1_X_hdr.bin). Header `WMT_PATCH` = **28 bytes**
+     (ucDateTime[16] + ucPLat[4] + u2HwVer + u2SwVer + u4PatchVer). Cuerpo = resto (patchSize-28).
+   - `WMT_PATCH_ADDRESS_CMD[]={01,08,10,00,01,01,00,01,3c,02,09,02,00,00,00,00,ff,ff,ff,ff}` → EVT
+     `{02,08,04,00,00,00,00,01}` (8B).
+   - `WMT_PATCH_P_ADDRESS_CMD[]={01,08,10,00,01,01,00,01,c4,04,09,02,00,3f,00,01,ff,ff,ff,ff}` con la
+     **dirección de carga en [12..15]** (e1_1→0x00000ef0, e1_0→0x00000600) → EVT igual.
+   - **Bucle de fragmentos** (FRAG_SIZE=**1000**): `WMT_PATCH_CMD[]={01,01,LEN_L,LEN_H,FRAG}` (5B,
+     LEN=1+fragSize, FRAG=1ST(0x1)/MID(0x2)/LAST(0x3)) + datos del fragmento → `WMT_PATCH_EVT
+     {02,01,01,00,00}` (5B) por cada uno. (Todo va envuelto en STP type=4 WMT.)
+**2. WIFI_RAM_CODE** (`WIFI_RAM_CODE_MT6582`, similar pero más grande) → wlanProbe.
+**3. Encender cada radio**: `mtk_wcn_wmt_func_on(tipo)` — **WMTDRV_TYPE BT=0, FM=1, GPS=2, WIFI=3**.
+   BT/GPS/FM exponen char devs (stpbt/stpgps/...) → BlueZ/gpsd/userspace (FÁCIL, sin 802.11).
+   WiFi necesita ADEMÁS el netdev 802.11 (HifAhbProbe→wlanNetCreate, ~133K líneas = el gigante).
+
+**Orden realista de radios**: bring-up (patch+fw) → **BT** (el más fácil) → GPS → FM → WiFi-netdev.
 
 ---
 
