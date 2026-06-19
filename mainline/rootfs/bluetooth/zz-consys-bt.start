@@ -1,0 +1,12 @@
+#!/bin/sh
+# /etc/local.d/zz-consys-bt.start — levanta el CONSYS BT al arranque y reinicia bluetoothd.
+# (rc-update add local default; rc-update add bluetooth default)
+( for i in $(seq 1 25); do
+    mount -t debugfs none /sys/kernel/debug 2>/dev/null
+    if [ -e /sys/kernel/debug/mt6582_btif/bringup ]; then
+      echo 1 > /sys/kernel/debug/mt6582_btif/bringup
+      sleep 3; rc-service bluetooth restart
+      break
+    fi
+    sleep 2
+  done ) &
