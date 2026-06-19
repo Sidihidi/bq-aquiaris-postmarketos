@@ -1,5 +1,30 @@
 # PLAN B — Capturar la secuencia CONSYS real de Android (receta)
 
+## 📊 RESULTADOS 2 ciclos (2026-06-19): safe-boot OK, captura FALLÓ
+- ✅✅ **El safe-boot FUNCIONA**: `boot-stockcap.img` (stock kernel + ramdisk con /data neutralizado)
+  **arranca** (logo BQ fijo, sin bootloop). Flasheados stock boot + system(p5). **pmOS/p7 INTACTO tras
+  2 ciclos** (uptime+Phosh+rootfs p7 OK al volver) → el neutralizado de /data PROTEGE pmOS. La parte
+  peligrosa está resuelta.
+- ❌ **La captura NO aterrizó.** v1 (mount -t ext4 cache + `dmesg>`): la cache NO es ext4 montable
+  (offset/sin formato) → el redirect fue al ramdisk (RAM) → perdido. v2 (raw `dd` a by-name/cache +
+  marcador, escanear desde pmOS): el marcador NO apareció en 1.0-1.35GB; el escaneo 0-2GB del eMMC
+  **POR EL TÚNEL USB se estancó (42min sin terminar)** → inviable.
+- **Dos muros**: (a) **offsets** — pmOS arranca de usrdata/p7 (blkdevparts 0x71500000) pero NO monta
+  p5/p6 (offsets blkdevparts mal; el scatter da otros: CACHE 0x46d00000, USRDATA 0x72900000; el desfase
+  NO es constante → no fiable saber dónde cayó el dd). (b) **leer GBs del eMMC por la musb es lentísimo**.
+- **¿Llegó el init a `class core`?** SIN CONFIRMAR (el logo fijo no lo dice; quizá el init se bloqueó
+  temprano sin /data y el launcher/captura nunca corrió). Necesitamos acceso EN VIVO para saberlo.
+
+### ▶▶ CAMINO FIABLE (próxima sesión enfocada): SHELL EN VIVO en el stock (telnet/nc por USB)
+En vez de volcar a partición + leer por USB (offsets + lentitud), meter en el ramdisk un **busybox
+estático armv7** + un servicio init temprano que **levante usb0 + arranque `telnetd`/`nc -l -p 23`**.
+Desde la Pi: `telnet 172.16.42.1` → shell en el stock EN VIVO → `dmesg`, correr el launcher a mano,
+ver hasta dónde llega el init, leer `/proc/kmsg`, etc. **Resuelve los dos muros** (sin offsets, sin
+escaneo) y permite depurar interactivamente (la idea original del usuario). Requiere: busybox estático
+(armv7) en el ramdisk + cfg usb gadget (RNDIS/ECM) temprana — el stock kernel tiene el gadget; usar el
+mismo modo que pmOS (usb0 172.16.42.1). Alternativa: leer la partición por **mtkclient/BROM** (lee el
+eMMC directo, sin la musb) solo la región pequeña, si se resuelve el offset del PMT real.
+
 ## ⚠️⚠️ RIESGO CRÍTICO (2026-06-19): bootear stock Android TAL CUAL DESTRUYE pmOS
 Verificado en el `fstab` del ramdisk stock: **`/emmc@usrdata /data ext4 ... wait,check,encryptable=footer`**.
 El `/data` de Android = la partición **usrdata = p7 = el rootfs de pmOS**. Al arrancar, el init de
