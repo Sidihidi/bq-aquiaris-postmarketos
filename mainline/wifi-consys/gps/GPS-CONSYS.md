@@ -1,8 +1,25 @@
 # GPS por el CONSYS (MT6582) — /dev/stpgps → gpsd → Phosh
 
-> Estado 2026-06-19: **Stage 1 (kernel) HECHO y compila limpio** (objeto + zImage, linux-7.0.12,
-> build-krillin). Falta capturar la secuencia de arranque de `mnld` desde Android (Stage 2) y
-> escribir el daemon de userspace (Stage 3) + gpsd/geoclue (Stage 4).
+> Estado 2026-06-19: **Stage 1 (kernel) DESPLEGADO EN HARDWARE** (#79: /dev/stpgps vivo,
+> func_on(GPS)=RADIO ENCENDIDO, BT intacto). **Stage 3+4 (userspace) DESPLEGADO Y VALIDADO**: bridge +
+> gpsd + autostart corriendo en el teléfono; cadena gpsd→cliente probada con NMEA enlatada (TPV/fix
+> real). **Solo falta el dato que vive en Android: el `START_SEQ` de `mnld`** (Stage 2). Y el último
+> cable geoclue→Phosh.
+
+## Estado en HARDWARE (2026-06-19) — lo que YA corre en el teléfono
+- **Kernel #79** flasheado desde la pmOS viva (dd al sector 83968; ver nota de flasheo abajo). Tras
+  boot: `/dev/stpgps` (char 10,259), dmesg `func_on[GPS]: *** RADIO ENCENDIDO ***`, BT (hci0) intacto.
+- **gpsd 3.27.3 + gpsd-clients + socat** instalados (`apk`, internet por NAT de la Pi).
+- **Bridge desplegado** en `/usr/local/bin/mtk-gps-bridge` — OJO: compilar **`-static`** (la Pi tiene
+  `arm-linux-gnueabihf-gcc` = glibc, pero Alpine es **musl** → un binario dinámico da "not found" por
+  `/lib/ld-linux-armhf.so.3`; el estático corre en musl). Abre /dev/stpgps + crea `/dev/gps0` (pty).
+- **Autostart** `/etc/local.d/zzz-gps.start` (corre TRAS `zz-consys-bt.start`, sin carrera de bring-up):
+  lanza el bridge, espera a `/dev/gps0`, y `gpsd -N -n /dev/gps0`. Verificado: bridge+gpsd vivos, gpsd
+  sirve /dev/gps0.
+- **Cadena gpsd→cliente VALIDADA** con NMEA enlatada: `gpspipe -w` devolvió `TPV mode:3
+  lat=53.3613 lon=-6.5056 alt=61.7` + `SKY uSat:8`. Todo el receptor funciona; falta el emisor (NMEA real).
+- **Flasheo desde pmOS:** la partición boot REAL es **sector 83968 (0x2900000)**, NO el 0x1D80000 de
+  `flash_boot_dd*.sh` (a ceros). `dd ... seek=83968 conv=fsync` + verificación md5 + rollback `/tmp/b.img`.
 
 ## El descubrimiento (por qué esto es fácil en el kernel y el trabajo está en userspace)
 
