@@ -25,7 +25,7 @@
 		#size-cells = <1>;
 		ranges;
 
-		bootargs = "earlycon=mtk8250,mmio32,0x11002000 console=ttyS0,921600n8 panic=15 clk_ignore_unused blkdevparts=mmcblk0:512K@512K(ebr1),10240K@9216K(protect_f),10240K@19456K(protect_s),6144K@71168K(sec_ro),1048576K@91136K(android),716800K@1140736K(cache),-@1856512K(usrdata) initcall_debug ignore_loglevel";
+		bootargs = "earlycon=mtk8250,mmio32,0x11002000 console=ttyS0,921600n8 panic=15 clk_ignore_unused blkdevparts=mmcblk0:512K@512K(ebr1),10240K@9216K(protect_f),10240K@19456K(protect_s),6144K@71168K(sec_ro),1048576K@91136K(android),716800K@1140736K(cache),-@1856512K(usrdata) log_buf_len=4M ignore_loglevel";
 
 		/* FASE 6: simplefb retirado -> mtk_drm es el unico display */
 	};
@@ -110,6 +110,28 @@
 		no-mmc-hs200;
 		no-sd;
 		no-sdio;
+		status = "okay";
+	};
+};
+
+/* ===== DUAL-BOOT: ranura SD (mtk-msdc.1 @0x11240000) para rootfs pmOS en tarjeta =====
+ * IRQ SPI 40 (MT_MSDC1_IRQ). Bus 4-bit, removable (broken-cd = poll). Power SD = PMIC
+ * MT6323 VMCH (3.3V) + VMC (I/O). Android sigue intacto en la eMMC interna (mmcblk0). */
+&{/soc} {
+	mmc1: mmc@11240000 {
+		compatible = "mediatek,mt8135-mmc";
+		reg = <0x11240000 0x1000>;
+		interrupts = <GIC_SPI 40 IRQ_TYPE_LEVEL_LOW>;
+		clocks = <&msdc_src>, <&msdc_hclk>;
+		clock-names = "source", "hclk";
+		vmmc-supply = <&mt6323_vmch_reg>;
+		vqmmc-supply = <&mt6323_vmc_reg>;
+		bus-width = <4>;
+		max-frequency = <12000000>;
+		cap-sd-highspeed;
+		no-mmc;
+		no-sdio;
+		broken-cd;
 		status = "okay";
 	};
 };
@@ -352,6 +374,18 @@
 
 	mt6323_vcn33_wifi_reg: ldo_vcn33_wifi {
 		regulator-name = "vcn33_wifi";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+	};
+
+	/* power de la ranura SD (dual-boot): VMCH = VDD tarjeta, VMC = I/O */
+	mt6323_vmch_reg: ldo_vmch {
+		regulator-name = "vmch";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+	};
+	mt6323_vmc_reg: ldo_vmc {
+		regulator-name = "vmc";
 		regulator-min-microvolt = <3300000>;
 		regulator-max-microvolt = <3300000>;
 	};
