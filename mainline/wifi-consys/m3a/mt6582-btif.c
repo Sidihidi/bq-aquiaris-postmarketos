@@ -1,18 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * mt6582-btif.c — transporte BTIF del MT6582 en modo DMA/VFF + STP/WMT al CONSYS.
+ * mt6582-btif.c — BTIF (DMA) + CONSYS STP/WMT bring-up + Bluetooth HCI (hci0).
  *
- * ITERACIÓN 3 (2026-06-19): descarga del PATCH (bring-up del chip).
- *  - it.2 LOGRÓ que el CONSYS conteste (BTIF-DMA + FLUSH de la cola). Ver historial abajo.
- *  - it.3 añade: helper TX→RX síncrono (wmt_cmd: envía, espera el EVT STP, verifica) + parse de
- *    tramas STP en RX + request_firmware + descarga del patch en fragmentos (mtk_wcn_soc_patch_dwn).
- *  - Como el probe corre ANTES del rootfs (driver built-in), la descarga se dispara por **debugfs**
- *    (`echo 1 > /sys/kernel/debug/mt6582_btif/bringup`) cuando ya hay rootfs+firmware. Itera sin reflashear.
- *  Datos de la captura del stock: e1_1 addr 00 00 0e f0 (21 frags), e1_0 addr 00 00 06 00 (41 frags),
- *  FRAG_SIZE=1000, header patch 28B. Comandos extraídos de wmt_ic_soc.c.
+ * Historia: it.2 el CONSYS contesta (BTIF-DMA + FLUSH de cola); it.3 descarga del patch;
+ * it.4 las 4 radios encendidas (func_on); it.5 el BT responde HCI; **it.6 registra un hci0 real**
+ * para que BlueZ/Phosh lo usen (escanear/vincular/visible).
  *
- *  it.2 fix (el bug que desbloqueó todo): el TX-DMA no expulsa la cola parcial (<8B) sin FLUSH
- *  (TX_DMA_FLUSH @0x14 bit0); WPT wrap en bit16 (DMA_WPT_WRAP); RX valid=WPT-RPT.
+ * Arquitectura BT: el bring-up (patch + func_on(BT)) se dispara por debugfs (rootfs+firmware listos),
+ * que ADEMÁS registra hci0. TX: skb HCI -> [H4 type][datos] -> STP-BT (type=0) -> BTIF-DMA. RX: un
+ * kthread lee STP-BT -> hci_recv_frame(hdev). Índices STP: BT=0 FM=1 GPS=2 WIFI=3 WMT=4.
  */
 #include <linux/io.h>
 #include <linux/module.h>
@@ -23,8 +19,12 @@
 #include <linux/firmware.h>
 #include <linux/debugfs.h>
 #include <linux/slab.h>
+#include <linux/kthread.h>
+#include <linux/mutex.h>
+#include <linux/skbuff.h>
+#include <net/bluetooth/bluetooth.h>
+#include <net/bluetooth/hci_core.h>
 
-/* --- BTIF core @0x1100C000 --- */
 #define BTIF_PHYS	0x1100c000
 #define BTIF_LSR	0x14
 #define BTIF_FAKELCR	0x0c
@@ -37,7 +37,6 @@
 #define HANDSHAKE_EN	(1u << 0)
 #define TRI_LVL_VAL	(1u | (1u << 4))
 
-/* --- APDMA VFF (TX @0x11000780, RX @0x11000800) --- */
 #define APDMA_TX_PHYS	0x11000780
 #define APDMA_RX_PHYS	0x11000800
 #define APDMA_SIZE	0x80
@@ -57,22 +56,19 @@
 #define DMA_WPT_MASK	0x0000ffff
 #define DMA_WPT_WRAP	0x00010000
 
-#define TX_RING		0x2000	/* 8KB (frags de 1KB + STP) */
+#define TX_RING		0x2000
 #define RX_RING		0x2000
 
 #define PERICFG_PHYS	0x10003000
 #define PERI_PDN0_CLR	0x10
 #define PERI_CG_BTIF	(1u << 20)
 
+#define STP_TYPE_BT	0
 #define STP_TYPE_WMT	4
-#define STP_TYPE_BT	0	/* BT_TASK_INDX */
-#define STP_TYPE_FM	1
-#define STP_TYPE_GPS	2
-#define RXBUF_SZ	1024
-#define TXPKT_SZ	1100	/* trama STP máx (frag 1000 + WMT hdr 5 + STP 4 + CRC 2) */
-#define WMTBUF_SZ	1010	/* WMT cmd de un fragmento (5 + 1000) */
+#define RXBUF_SZ	2048
+#define TXPKT_SZ	1100
+#define WMTBUF_SZ	1010
 
-/* patch protocol (wmt_ic_soc.c) */
 #define PATCH_HDR	28
 #define FRAG_SIZE	1000
 #define FRAG_1ST	0x1
@@ -92,11 +88,15 @@ struct mt6582_btif {
 	u8 txpkt[TXPKT_SZ];
 	u8 wmtbuf[WMTBUF_SZ];
 	struct dentry *dbg;
+	bool brought_up;
+	struct hci_dev *hdev;
+	struct task_struct *rx_task;
+	struct mutex tx_lock;
+	int dbg_n;
 };
 
 static struct mt6582_btif *g_btif;
 
-/* comandos WMT (payloads, se envuelven en STP). De wmt_ic_soc.c. */
 static const u8 GEN_HCR[20] = {
 	0x01,0x08,0x10,0x00,0x02,0x01,0x00,0x01,0x08,0x00,0x00,0x80,0x00,0x00,0x00,0x00,0xff,0xff,0x00,0x00 };
 static const u8 PATCH_ADDR_CMD[20] = {
@@ -108,7 +108,6 @@ static const u8 PATCH_PADDR_EVT[8] = { 0x02,0x08,0x04,0x00,0x00,0x00,0x00,0x01 }
 static const u8 PATCH_EVT[5] = { 0x02,0x01,0x01,0x00,0x00 };
 static const u8 WMT_RESET_CMD[5] = { 0x01,0x07,0x01,0x00,0x04 };
 static const u8 WMT_RESET_EVT[5] = { 0x02,0x07,0x01,0x00,0x00 };
-/* func_on(type): {01,06,02,00,type,01}; EVT {02,06,01,00,status}. BT=0 FM=1 GPS=2 WIFI=3 */
 
 static inline u32 rd(void __iomem *b, u32 o) { return readl(b + o); }
 static inline void wr(void __iomem *b, u32 o, u32 v) { writel(v, b + o); }
@@ -140,7 +139,6 @@ static void btif_hw_init(struct mt6582_btif *b)
 	b->rxlen = 0;
 }
 
-/* TX por DMA: copiar al ring + WPT|wrap + FLUSH de la cola parcial. */
 static void btif_tx_raw(struct mt6582_btif *b, const u8 *buf, u32 len)
 {
 	u32 off = b->tx_off, first = min_t(u32, len, TX_RING - off);
@@ -163,7 +161,6 @@ static void btif_tx_raw(struct mt6582_btif *b, const u8 *buf, u32 len)
 	}
 }
 
-/* Envuelve payload en STP MAND y lo envía. */
 static void stp_send(struct mt6582_btif *b, u8 type, const u8 *pl, u32 len)
 {
 	u32 n;
@@ -175,11 +172,10 @@ static void stp_send(struct mt6582_btif *b, u8 type, const u8 *pl, u32 len)
 	b->txpkt[3] = 0x00;
 	memcpy(b->txpkt + 4, pl, len);
 	n = 4 + len;
-	b->txpkt[n++] = 0x00; b->txpkt[n++] = 0x00;	/* CRC (MAND: 0) */
+	b->txpkt[n++] = 0x00; b->txpkt[n++] = 0x00;
 	btif_tx_raw(b, b->txpkt, n);
 }
 
-/* drena RX-DMA al acumulador rxbuf. */
 static void rx_drain(struct mt6582_btif *b)
 {
 	u32 wpt = rd(b->rxdma, VFF_WPT), wo = wpt & DMA_WPT_MASK, ww = wpt & DMA_WPT_WRAP;
@@ -196,32 +192,38 @@ static void rx_drain(struct mt6582_btif *b)
 	wr(b->rxdma, VFF_RPT, wo | ww);
 }
 
-/* espera una trama STP completa; copia el payload a out; devuelve len del payload o <0. */
+/* extrae una trama STP completa de rxbuf (no bloqueante). Devuelve len payload o 0; *type = canal. */
+static int stp_pop_frame(struct mt6582_btif *b, u8 *out, u32 max, u8 *type)
+{
+	u32 len, frame, n;
+
+	if (b->rxlen < 4) return 0;
+	*type = (b->rxbuf[1] >> 4) & 0x0f;
+	len = ((b->rxbuf[1] & 0x0f) << 8) | b->rxbuf[2];
+	frame = 4 + len + 2;
+	if (b->rxlen < frame) return 0;
+	n = min_t(u32, len, max);
+	memcpy(out, b->rxbuf + 4, n);
+	memmove(b->rxbuf, b->rxbuf + frame, b->rxlen - frame);
+	b->rxlen -= frame;
+	return n;
+}
+
+/* bloqueante: espera una trama y compara con el EVT esperado (para el bring-up síncrono). */
 static int wmt_wait_frame(struct mt6582_btif *b, u8 *out, u32 max, u32 ms)
 {
-	int loops = ms * 10;
+	int loops = ms * 10, plen;
+	u8 type;
 
 	while (loops-- > 0) {
 		rx_drain(b);
-		if (b->rxlen >= 4) {
-			u32 len = ((b->rxbuf[1] & 0x0f) << 8) | b->rxbuf[2];
-			u32 frame = 4 + len + 2;
-
-			if (b->rxlen >= frame) {
-				u32 n = min_t(u32, len, max);
-
-				memcpy(out, b->rxbuf + 4, n);
-				memmove(b->rxbuf, b->rxbuf + frame, b->rxlen - frame);
-				b->rxlen -= frame;
-				return len;
-			}
-		}
+		plen = stp_pop_frame(b, out, max, &type);
+		if (plen > 0) return plen;
 		udelay(100);
 	}
 	return -ETIMEDOUT;
 }
 
-/* envía un comando WMT y verifica que el EVT coincide. */
 static int wmt_cmd(struct mt6582_btif *b, const u8 *cmd, u32 clen,
 		   const u8 *evt, u32 elen, const char *name)
 {
@@ -231,10 +233,7 @@ static int wmt_cmd(struct mt6582_btif *b, const u8 *cmd, u32 clen,
 	b->rxlen = 0;
 	stp_send(b, STP_TYPE_WMT, cmd, clen);
 	plen = wmt_wait_frame(b, rx, sizeof(rx), 400);
-	if (plen < 0) {
-		dev_err(b->dev, "wmt_cmd[%s]: TIMEOUT (sin EVT)\n", name);
-		return plen;
-	}
+	if (plen < 0) { dev_err(b->dev, "wmt_cmd[%s]: TIMEOUT\n", name); return plen; }
 	if ((u32)plen < elen || memcmp(rx, evt, elen) != 0) {
 		dev_err(b->dev, "wmt_cmd[%s]: EVT no coincide (plen=%d): %*ph\n",
 			name, plen, min_t(int, plen, 16), rx);
@@ -243,7 +242,6 @@ static int wmt_cmd(struct mt6582_btif *b, const u8 *cmd, u32 clen,
 	return 0;
 }
 
-/* descarga un patch: ADDRESS -> P_ADDRESS(addr) -> fragmentos. */
 static int patch_dwn(struct mt6582_btif *b, const char *fwname, const u8 addr[4])
 {
 	const struct firmware *fw;
@@ -258,7 +256,6 @@ static int patch_dwn(struct mt6582_btif *b, const char *fwname, const u8 addr[4]
 	body = fw->data + PATCH_HDR;
 	blen = fw->size - PATCH_HDR;
 	fragnum = (blen + FRAG_SIZE - 1) / FRAG_SIZE;
-	dev_info(b->dev, "patch %s: %u bytes, %u frags, addr %4ph\n", fwname, blen, fragnum, addr);
 
 	ret = wmt_cmd(b, PATCH_ADDR_CMD, 20, PATCH_ADDR_EVT, 8, "ADDR");
 	if (ret) goto out;
@@ -266,17 +263,16 @@ static int patch_dwn(struct mt6582_btif *b, const char *fwname, const u8 addr[4]
 	memcpy(paddr + 12, addr, 4);
 	ret = wmt_cmd(b, paddr, 20, PATCH_PADDR_EVT, 8, "PADDR");
 	if (ret) goto out;
-
 	for (seq = 0, off = 0; seq < fragnum; seq++, off += FRAG_SIZE) {
 		u32 fsz = min_t(u32, FRAG_SIZE, blen - off);
-		u16 wlen = 1 + fsz;	/* FRAG byte + datos */
+		u16 wlen = 1 + fsz;
 
 		b->wmtbuf[0] = 0x01; b->wmtbuf[1] = 0x01;
 		b->wmtbuf[2] = wlen & 0xff; b->wmtbuf[3] = (wlen >> 8) & 0xff;
 		b->wmtbuf[4] = (seq == fragnum - 1) ? FRAG_LAST : (seq == 0 ? FRAG_1ST : FRAG_MID);
 		memcpy(b->wmtbuf + 5, body + off, fsz);
 		ret = wmt_cmd(b, b->wmtbuf, 5 + fsz, PATCH_EVT, 5, "FRAG");
-		if (ret) { dev_err(b->dev, "patch frag %u/%u fallo\n", seq, fragnum); goto out; }
+		if (ret) goto out;
 	}
 	dev_info(b->dev, "*** patch %s DESCARGADO OK (%u frags) ***\n", fwname, fragnum);
 out:
@@ -284,7 +280,6 @@ out:
 	return ret;
 }
 
-/* enciende una función/radio: func_on(type). BT=0 FM=1 GPS=2 WIFI=3. */
 static int func_on(struct mt6582_btif *b, u8 type, const char *name)
 {
 	u8 cmd[6] = { 0x01, 0x06, 0x02, 0x00, type, 0x01 };
@@ -293,72 +288,134 @@ static int func_on(struct mt6582_btif *b, u8 type, const char *name)
 
 	b->rxlen = 0;
 	stp_send(b, STP_TYPE_WMT, cmd, 6);
-	plen = wmt_wait_frame(b, rx, sizeof(rx), 2000);	/* func_on puede tardar */
-	if (plen < 5) {
-		dev_err(b->dev, "func_on[%s]: TIMEOUT/corto (plen=%d)\n", name, plen);
-		return -EIO;
-	}
-	if (rx[0] == 0x02 && rx[1] == 0x06 && rx[4] == 0) {
-		dev_info(b->dev, "func_on[%s]: *** RADIO %s ENCENDIDO *** EVT=%*ph\n",
-			 name, name, min_t(int, plen, 8), rx);
+	plen = wmt_wait_frame(b, rx, sizeof(rx), 2000);
+	if (plen >= 5 && rx[0] == 0x02 && rx[1] == 0x06 && rx[4] == 0) {
+		dev_info(b->dev, "func_on[%s]: *** RADIO ENCENDIDO ***\n", name);
 		return 0;
 	}
-	dev_warn(b->dev, "func_on[%s]: status=%d EVT=%*ph (no encendió)\n",
-		 name, rx[4], min_t(int, plen, 8), rx);
+	dev_warn(b->dev, "func_on[%s]: no encendió (plen=%d)\n", name, plen);
 	return -EIO;
 }
 
-/* prueba que el BT habla HCI: HCI RESET (0x0C03) por STP-BT -> Command Complete. */
-static void bt_hci_reset(struct mt6582_btif *b)
-{
-	static const u8 hci_reset[4] = { 0x01, 0x03, 0x0c, 0x00 };	/* H4 cmd + opcode 0x0C03 + len 0 */
-	u8 rx[32];
-	int plen, k;
-
-	b->rxlen = 0;
-	stp_send(b, STP_TYPE_BT, hci_reset, 4);
-	for (k = 0; k < 3; k++) {	/* puede llegar un evento de init antes */
-		plen = wmt_wait_frame(b, rx, sizeof(rx), 700);
-		if (plen < 0) { dev_err(b->dev, "BT HCI RESET: sin respuesta\n"); return; }
-		if (plen >= 2 && rx[0] == 0x04) {	/* HCI event packet */
-			if (plen >= 6 && rx[1] == 0x0e && rx[4] == 0x03 && rx[5] == 0x0c)
-				dev_info(b->dev, "*** BLUETOOTH VIVO: HCI Command Complete (RESET) %*ph ***\n",
-					 min_t(int, plen, 8), rx);
-			else
-				dev_info(b->dev, "*** BT responde HCI event %*ph (el chip BT habla) ***\n",
-					 min_t(int, plen, 12), rx);
-			return;
-		}
-		dev_info(b->dev, "BT frame %d (no-HCI) plen=%d: %*ph\n", k, plen, min_t(int, plen, 12), rx);
-	}
-}
-
-static int bringup(struct mt6582_btif *b)
+/* bring-up del chip: patch + reset + func_on(BT). Síncrono (sin kthread aún). */
+static int bring_up_chip(struct mt6582_btif *b)
 {
 	static const u8 a_e1_1[4] = { 0x00, 0x00, 0x0e, 0xf0 };
 	static const u8 a_e1_0[4] = { 0x00, 0x00, 0x06, 0x00 };
 	int ret;
 
-	dev_info(b->dev, "=== BRING-UP: patch + reset + func_on ===\n");
+	dev_info(b->dev, "=== BRING-UP del CONSYS (patch + func_on BT) ===\n");
 	ret = wmt_cmd(b, GEN_HCR, 20, (const u8[]){0x02,0x08}, 2, "GEN_HCR");
-	if (ret) { dev_err(b->dev, "canal KO (GEN_HCR)\n"); return ret; }
-	dev_info(b->dev, "canal OK (GEN_HCR responde)\n");
-
-	/* descarga del patch + WMT_RESET tras cada uno (como el stock, init_table_3) */
+	if (ret) return ret;
 	ret = patch_dwn(b, "mt6572_82_patch_e1_1_hdr.bin", a_e1_1);
 	if (ret) return ret;
 	wmt_cmd(b, WMT_RESET_CMD, 5, WMT_RESET_EVT, 5, "RESET-1");
 	ret = patch_dwn(b, "mt6572_82_patch_e1_0_hdr.bin", a_e1_0);
 	if (ret) return ret;
 	wmt_cmd(b, WMT_RESET_CMD, 5, WMT_RESET_EVT, 5, "RESET-2");
-	dev_info(b->dev, "*** PATCH + RESET COMPLETO — encendiendo radios ***\n");
+	ret = func_on(b, 0, "BT");
+	if (ret) return ret;
+	dev_info(b->dev, "*** CHIP LISTO + BT ON — registrando hci0 ***\n");
+	return 0;
+}
 
-	/* encender radios (BT es el más fácil: no necesita WIFI_RAM_CODE) */
-	if (func_on(b, 0, "BT") == 0)
-		bt_hci_reset(b);	/* probar que el BT habla HCI de verdad */
-	func_on(b, 1, "FM");
-	func_on(b, 2, "GPS");
-	func_on(b, 3, "WIFI");
+/* hilo RX: STP-BT -> BlueZ. */
+static int btif_rx_thread(void *data)
+{
+	struct mt6582_btif *b = data;
+	u8 buf[512];
+	u8 type;
+	int plen;
+
+	while (!kthread_should_stop()) {
+		rx_drain(b);
+		while ((plen = stp_pop_frame(b, buf, sizeof(buf), &type)) > 0) {
+			struct sk_buff *skb;
+
+			if (type != STP_TYPE_BT || !b->hdev || plen < 2)
+				continue;
+			skb = bt_skb_alloc(plen - 1, GFP_KERNEL);
+			if (!skb)
+				continue;
+			hci_skb_pkt_type(skb) = buf[0];	/* H4 type */
+			skb_put_data(skb, buf + 1, plen - 1);
+			if (b->dbg_n < 40) { b->dbg_n++;
+				dev_info(b->dev, "RX<- HCI t=0x%x len=%d: %*ph\n", buf[0], plen, min_t(int, plen, 12), buf); }
+			if (hci_recv_frame(b->hdev, skb) < 0)
+				b->hdev->stat.err_rx++;
+		}
+		usleep_range(700, 1500);
+	}
+	return 0;
+}
+
+static int btif_hci_open(struct hci_dev *hdev) { return 0; }	/* chip ya levantado */
+static int btif_hci_close(struct hci_dev *hdev) { return 0; }
+static int btif_hci_flush(struct hci_dev *hdev) { return 0; }
+
+static int btif_hci_send(struct hci_dev *hdev, struct sk_buff *skb)
+{
+	struct mt6582_btif *b = hci_get_drvdata(hdev);
+	u32 n = skb->len;
+
+	if (n + 1 > WMTBUF_SZ) { kfree_skb(skb); return -EINVAL; }
+	mutex_lock(&b->tx_lock);
+	b->wmtbuf[0] = hci_skb_pkt_type(skb);	/* H4 type */
+	memcpy(b->wmtbuf + 1, skb->data, n);
+	if (b->dbg_n < 40) { b->dbg_n++;
+		dev_info(b->dev, "TX-> HCI t=0x%x len=%u: %*ph\n", b->wmtbuf[0], n + 1,
+			 min_t(int, n + 1, 8), b->wmtbuf); }
+	stp_send(b, STP_TYPE_BT, b->wmtbuf, n + 1);
+	mutex_unlock(&b->tx_lock);
+
+	switch (hci_skb_pkt_type(skb)) {
+	case HCI_COMMAND_PKT: hdev->stat.cmd_tx++; break;
+	case HCI_ACLDATA_PKT: hdev->stat.acl_tx++; break;
+	case HCI_SCODATA_PKT: hdev->stat.sco_tx++; break;
+	}
+	kfree_skb(skb);
+	return 0;
+}
+
+/* dispara (debugfs): bring-up del chip + registra hci0 + arranca el hilo RX. */
+static int bringup(struct mt6582_btif *b)
+{
+	struct hci_dev *hdev;
+	int ret;
+
+	if (b->brought_up) { dev_info(b->dev, "ya levantado (hci0 existe)\n"); return 0; }
+	ret = bring_up_chip(b);
+	if (ret) { dev_err(b->dev, "bring-up fallo (%d)\n", ret); return ret; }
+	b->brought_up = true;
+
+	/* descartar cualquier evento espurio del bring-up: RX limpio antes del kthread/HCI init */
+	msleep(60);
+	b->rxlen = 0;
+	rx_drain(b);
+	b->rxlen = 0;
+
+	hdev = hci_alloc_dev();
+	if (!hdev) return -ENOMEM;
+	b->hdev = hdev;
+	hdev->bus = HCI_UART;
+	hci_set_drvdata(hdev, b);
+	SET_HCIDEV_DEV(hdev, b->dev);
+	hdev->open = btif_hci_open;
+	hdev->close = btif_hci_close;
+	hdev->flush = btif_hci_flush;
+	hdev->send = btif_hci_send;
+	/* el CONSYS no soporta Read Local Ext Features page 2 (daba Opcode 0x1004 -38) */
+	hci_set_quirk(hdev, HCI_QUIRK_BROKEN_LOCAL_EXT_FEATURES_PAGE_2);
+
+	b->rx_task = kthread_run(btif_rx_thread, b, "mt6582-btif-rx");
+	ret = hci_register_dev(hdev);
+	if (ret) {
+		dev_err(b->dev, "hci_register_dev fallo (%d)\n", ret);
+		if (b->rx_task) { kthread_stop(b->rx_task); b->rx_task = NULL; }
+		hci_free_dev(hdev); b->hdev = NULL;
+		return ret;
+	}
+	dev_info(b->dev, "*** hci0 REGISTRADO — enciende BT: bluetoothctl power on / Phosh ***\n");
 	return 0;
 }
 
@@ -381,6 +438,7 @@ static int mt6582_btif_probe(struct platform_device *pdev)
 	b = devm_kzalloc(dev, sizeof(*b), GFP_KERNEL);
 	if (!b) return -ENOMEM;
 	b->dev = dev;
+	mutex_init(&b->tx_lock);
 	dma_coerce_mask_and_coherent(dev, DMA_BIT_MASK(32));
 	b->base = ioremap(BTIF_PHYS, 0x100);
 	b->txdma = ioremap(APDMA_TX_PHYS, APDMA_SIZE);
@@ -391,9 +449,6 @@ static int mt6582_btif_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	btif_hw_init(b);
-	dev_info(dev, "BTIF-DMA init: DMA_EN=0x%x\n", rd(b->base, BTIF_DMA_EN));
-
-	/* prueba el canal en boot (GEN_HCR) */
 	b->rxlen = 0;
 	stp_send(b, STP_TYPE_WMT, GEN_HCR, 20);
 	plen = wmt_wait_frame(b, rx, sizeof(rx), 300);
@@ -405,7 +460,7 @@ static int mt6582_btif_probe(struct platform_device *pdev)
 	g_btif = b;
 	b->dbg = debugfs_create_dir("mt6582_btif", NULL);
 	debugfs_create_file("bringup", 0200, b->dbg, b, &bringup_fops);
-	dev_info(dev, "trigger bring-up: echo 1 > /sys/kernel/debug/mt6582_btif/bringup\n");
+	dev_info(dev, "BT: echo 1 > /sys/kernel/debug/mt6582_btif/bringup  (levanta hci0)\n");
 	platform_set_drvdata(pdev, b);
 	return 0;
 }
@@ -422,5 +477,5 @@ static struct platform_driver mt6582_btif_driver = {
 };
 module_platform_driver(mt6582_btif_driver);
 
-MODULE_DESCRIPTION("MediaTek MT6582 BTIF (DMA) + CONSYS STP/WMT patch download");
+MODULE_DESCRIPTION("MediaTek MT6582 BTIF + CONSYS bring-up + Bluetooth HCI");
 MODULE_LICENSE("GPL");

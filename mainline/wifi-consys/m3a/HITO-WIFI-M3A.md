@@ -1,5 +1,21 @@
 # M3a — "el CONSYS habla": BTIF + STP + WMT (guía de implementación para casa)
 
+## 🎉🎉🎉🎉🎉🎉🎉 BLUETOOTH FUNCIONA POR COMPLETO (2026-06-19): hci0 + BlueZ + escaneo real 🎉🎉🎉🎉🎉🎉🎉
+`mt6582-btif.c` registra un **hci0 real** → BlueZ lo maneja → **escanea y encuentra dispositivos reales**
+(detectó "S24 Ultra de Juan", E4:92:82:F4:8E:43). `Powered:yes Discoverable:yes Pairable:yes`. Phosh
+(gnome-bluetooth) lo ve por D-Bus → Ajustes→Bluetooth funciona.
+**Requisitos de kernel (.config build-krillin)**: `CONFIG_BT=y` (mi driver built-in registra hci_dev) +
+`CONFIG_CRYPTO_AES=y` + `CONFIG_CRYPTO_CCM=y` (el BT necesita cmac(aes)/ccm(aes); con AES=m daba
+"Unable to create CMAC crypto context"). **Quirk**: `hci_set_quirk(hdev, HCI_QUIRK_BROKEN_LOCAL_EXT_FEATURES_PAGE_2)`
+(el CONSYS no soporta Read Local Ext Features page 2 → daba "Opcode 0x1004 failed -38" que impedía la init).
+**Arquitectura**: bring-up por debugfs (`echo 1 > /sys/kernel/debug/mt6582_btif/bringup` = patch+func_on(BT)+
+registra hci0). TX: skb HCI → `[H4 type][datos]` → STP-BT (type=0). RX: kthread → `hci_recv_frame`. La init
+HCI completa la hace BlueZ (RESET, read name="MTK M...", LE setup, event mask — el chip responde a todo).
+**Userspace**: `apk add bluez` (5.86) + bluetoothd. **Pendiente fino**: bdaddr es derivada (00:00:46:65:82:01,
+el 65:82=chipid) no la MAC real de NVRAM (vendor HCI); + auto-bring-up sin debugfs; + DISCOVERABLE/scan
+desde el arranque. **Mismo patrón sirve para GPS (/dev/stpgps→gpsd) y FM.** Commit del BT: ver git.
+
+
 ## 🎉🎉🎉🎉🎉🎉 BRING-UP COMPLETO 2026-06-19: LAS 4 RADIOS ENCENDIDAS (chip-level) 🎉🎉🎉🎉🎉🎉
 `mt6582-btif.c` (it.4) hace el **bring-up completo del CONSYS** y enciende las 4 funciones:
 ```
