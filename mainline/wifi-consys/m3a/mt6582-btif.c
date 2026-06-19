@@ -22,6 +22,7 @@
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/delay.h>
+#include <linux/dma-mapping.h>
 
 #define BTIF_RBR	0x00
 #define BTIF_THR	0x00
@@ -52,6 +53,24 @@
 #define STP_TYPE_WMT	4	/* WMT_TASK_INDX=4 (canal WMT). header h[1]=(type<<4)|.. = 0x40.
 				 * Antes era 0 -> h[1]=0x00 = canal BT(0) -> el MCU enrutaba mal y excepcionaba */
 #define BTIF_RX_LOG	128
+
+/* --- APDMA BTIF-RX (VFF) ---
+ * El RX real CONSYS->AP va por DMA/VFF, NO por el RBR/LSR (PIO). Con HANDSHAKE=1 el dato
+ * va al vFIFO por DMA. Base 0x11000800 (IRQ SPI 72, no usado en modo polled).
+ * Ver SECUENCIA-ARRANQUE-CONSYS.md §3. */
+#define APDMA_RX_PHYS	0x11000800
+#define APDMA_RX_SIZE	0x80
+#define RXDMA_INT_FLAG	0x00	/* W1C */
+#define RXDMA_INT_EN	0x04
+#define RXDMA_EN	0x08	/* bit0 = arrancar el motor */
+#define RXDMA_RST	0x0c	/* bit0 = warm reset */
+#define RXDMA_VFF_ADDR	0x1c
+#define RXDMA_VFF_LEN	0x24
+#define RXDMA_VFF_THRE	0x28
+#define RXDMA_VFF_WPT	0x2c	/* write ptr (HW avanza al recibir) */
+#define RXDMA_VFF_RPT	0x30	/* read ptr (SW avanza tras leer = el crédito) */
+#define RXDMA_VALID	0x3c	/* bytes disponibles */
+#define RX_RING_LEN	0x2000	/* 8KB (potencia de 2) */
 
 /* lo pone a true mt6582-consys.c cuando el MCU del CONSYS ya corre el ROM */
 extern bool mt6582_consys_ready;
@@ -103,6 +122,9 @@ static u16 stp_crc16(const u8 *buf, unsigned int len)
 struct mt6582_btif {
 	struct device *dev;
 	void __iomem *base;
+	void __iomem *apdma;		/* APDMA RX-VFF (0x11000800) */
+	void *ring;			/* buffer coherente del RX-DMA */
+	dma_addr_t ring_phys;
 	int irq;
 	u8 rxlog[BTIF_RX_LOG];
 	unsigned int rxcnt;
@@ -144,18 +166,75 @@ static int mt6582_btif_tx(struct mt6582_btif *b, const u8 *buf, size_t len)
 	return 0;
 }
 
-static void mt6582_btif_rx_poll(struct mt6582_btif *b, unsigned int ms)
+/* Configura el RX por DMA/VFF: reserva el ring coherente, programa el VFF del APDMA
+ * y enruta el RX del BTIF al DMA. El RX del CONSYS llega aquí (no al RBR). */
+static int mt6582_btif_rxdma_setup(struct mt6582_btif *b)
+{
+	void __iomem *d;
+
+	if (dma_coerce_mask_and_coherent(b->dev, DMA_BIT_MASK(32)))
+		dev_warn(b->dev, "no pude fijar dma mask 32\n");
+
+	b->apdma = ioremap(APDMA_RX_PHYS, APDMA_RX_SIZE);
+	if (!b->apdma)
+		return -ENOMEM;
+	b->ring = dma_alloc_coherent(b->dev, RX_RING_LEN, &b->ring_phys, GFP_KERNEL);
+	if (!b->ring) {
+		iounmap(b->apdma);
+		b->apdma = NULL;
+		return -ENOMEM;
+	}
+	memset(b->ring, 0, RX_RING_LEN);
+
+	d = b->apdma;
+	writel(0x1, d + RXDMA_RST);		/* warm reset del motor */
+	udelay(10);
+	writel(0x0, d + RXDMA_RST);
+	writel((u32)b->ring_phys, d + RXDMA_VFF_ADDR);
+	writel(RX_RING_LEN, d + RXDMA_VFF_LEN);
+	writel(0, d + RXDMA_VFF_WPT);
+	writel(0, d + RXDMA_VFF_RPT);
+	writel(RX_RING_LEN * 3 / 4, d + RXDMA_VFF_THRE);
+	writel(0x3, d + RXDMA_INT_FLAG);	/* W1C de pendientes */
+	writel(0x0, d + RXDMA_INT_EN);		/* polled: SIN IRQ (no tormenta) */
+	writel(0x1, d + RXDMA_EN);		/* arrancar el motor RX-DMA */
+	/* enrutar el RX del BTIF al DMA (mantiene TX en PIO) */
+	btif_wr(b, BTIF_DMA_EN, btif_rd(b, BTIF_DMA_EN) | DMA_EN_RX);
+
+	dev_info(b->dev, "RX-DMA listo: ring=%pad LEN=0x%x VALID=0x%x WPT=0x%x DMA_EN=0x%x\n",
+		 &b->ring_phys, RX_RING_LEN, readl(d + RXDMA_VALID),
+		 readl(d + RXDMA_VFF_WPT), btif_rd(b, BTIF_DMA_EN));
+	return 0;
+}
+
+/* Drena el ring DMA: copia los VALID bytes [RPT,WPT) a rxlog y avanza RPT (crédito). */
+static void mt6582_btif_rxdma_drain(struct mt6582_btif *b)
+{
+	void __iomem *d = b->apdma;
+	u32 valid, wpt, rpt, i, off;
+
+	if (!d)
+		return;
+	valid = readl(d + RXDMA_VALID);
+	if (!valid)
+		return;
+	wpt = readl(d + RXDMA_VFF_WPT);
+	rpt = readl(d + RXDMA_VFF_RPT);
+	for (i = 0; i < valid; i++) {
+		off = ((rpt & (RX_RING_LEN - 1)) + i) & (RX_RING_LEN - 1);
+		if (b->rxcnt < BTIF_RX_LOG)
+			b->rxlog[b->rxcnt] = ((u8 *)b->ring)[off];
+		b->rxcnt++;
+	}
+	writel(wpt, d + RXDMA_VFF_RPT);		/* consumido hasta WPT */
+}
+
+static void mt6582_btif_rxdma_poll(struct mt6582_btif *b, unsigned int ms)
 {
 	unsigned int loops = ms * 10;
-	u8 c;
 
 	while (loops--) {
-		while (btif_rd(b, BTIF_LSR) & LSR_DR) {
-			c = btif_rd(b, BTIF_RBR) & 0xff;
-			if (b->rxcnt < BTIF_RX_LOG)
-				b->rxlog[b->rxcnt] = c;
-			b->rxcnt++;
-		}
+		mt6582_btif_rxdma_drain(b);
 		udelay(100);
 	}
 }
@@ -242,9 +321,14 @@ static int mt6582_btif_probe(struct platform_device *pdev)
 	mt6582_btif_clk_ungate(dev);
 	mt6582_btif_hw_init(b);
 
-	/* --- DIAGNÓSTICO: loopback interno del BTIF. Aísla si el RX del AP funciona,
-	 * independientemente del CONSYS. Si recibo lo que envío -> RX OK (el problema es
-	 * que el CONSYS no contesta); si RX=0 -> mi config del RX está mal. --- */
+	/* RX por DMA/VFF: el RX del CONSYS llega por aquí (no por el RBR). */
+	ret = mt6582_btif_rxdma_setup(b);
+	if (ret)
+		dev_warn(dev, "RX-DMA setup fallo (%d) -> RX no captará nada\n", ret);
+
+	/* --- DIAGNÓSTICO: loopback interno del BTIF por el path DMA. Si recibo lo que
+	 * envío -> el RX-DMA (ring+VFF) está bien programado, independiente del CONSYS.
+	 * Si RX=0 aquí -> el problema es mi config del RX-DMA, no el CONSYS. --- */
 	{
 		static const u8 lb[4] = { 0xaa, 0xbb, 0xcc, 0xdd };
 		u32 tri = btif_rd(b, BTIF_TRI_LVL);
@@ -252,8 +336,8 @@ static int mt6582_btif_probe(struct platform_device *pdev)
 		btif_wr(b, BTIF_TRI_LVL, tri | TRI_LOOP_EN);
 		b->rxcnt = 0;
 		mt6582_btif_tx(b, lb, sizeof(lb));
-		mt6582_btif_rx_poll(b, 50);
-		dev_info(dev, "LOOPBACK: envie aa bb cc dd, RX=%u: %*ph -> RX del AP %s\n",
+		mt6582_btif_rxdma_poll(b, 50);
+		dev_info(dev, "LOOPBACK(DMA): envie aa bb cc dd, RX=%u: %*ph -> RX-DMA %s\n",
 			 b->rxcnt, min_t(unsigned int, b->rxcnt, 8), b->rxlog,
 			 b->rxcnt ? "FUNCIONA" : "NO recibe");
 		btif_wr(b, BTIF_TRI_LVL, tri);	/* loopback OFF */
@@ -277,10 +361,11 @@ static int mt6582_btif_probe(struct platform_device *pdev)
 			int k;
 
 			for (k = 0; k < 20; k++) {
-				mt6582_btif_rx_poll(b, 100);
-				dev_info(dev, "DIAG k=%2d PC=0x%-7x RX=%u: %*ph\n",
-					 k, mcu ? readl(mcu + 0x160) : 0, b->rxcnt,
-					 min_t(unsigned int, b->rxcnt, 16), b->rxlog);
+				mt6582_btif_rxdma_poll(b, 100);
+				dev_info(dev, "DIAG k=%2d PC=0x%-7x VALID=0x%x RX=%u: %*ph\n",
+					 k, mcu ? readl(mcu + 0x160) : 0,
+					 b->apdma ? readl(b->apdma + RXDMA_VALID) : 0,
+					 b->rxcnt, min_t(unsigned int, b->rxcnt, 16), b->rxlog);
 				if (b->rxcnt)
 					break;
 			}
@@ -289,10 +374,10 @@ static int mt6582_btif_probe(struct platform_device *pdev)
 			iounmap(mcu);
 	}
 	if (b->rxcnt)
-		dev_info(dev, "STP+WMT: *** EL CONSYS CONTESTA (%u bytes) — M3a CONSEGUIDO ***\n",
+		dev_info(dev, "STP+WMT(RX-DMA): *** EL CONSYS CONTESTA (%u bytes) — M3a CONSEGUIDO ***\n",
 			 b->rxcnt);
 	else
-		dev_info(dev, "STP+WMT: RX=0 tras 6 intentos (siguiente: WAK / type STP / delimiter)\n");
+		dev_info(dev, "STP+WMT(RX-DMA): RX=0 (mirar: ¿VALID/WPT avanzan? ¿el MCU excepciona? ¿primer cmd GEN_HCR?)\n");
 
 	platform_set_drvdata(pdev, b);
 	return 0;
