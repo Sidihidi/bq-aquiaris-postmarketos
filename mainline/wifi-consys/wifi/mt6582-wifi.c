@@ -38,22 +38,9 @@
 /* exportado por mt6582-consys.c: el MCU del CONSYS corre y el chip-id leyó 0x6582 */
 extern bool mt6582_consys_ready;
 
-/*
- * TODO(btif): exportar esto desde mt6582-btif.c. Es exactamente el cuerpo de su func_on()
- * estático {0x01,0x06,0x02,0x00,type,0x01} -> stp_send(WMT) -> espera {0x02,0x06,..,0},
- * pero THREAD-SAFE (el kthread RX del BT está corriendo y comparte el BTIF/rxbuf).
- * type: 0=BT 1=FM 2=GPS 3=WIFI 4=WMT. Ver WIFI-DESIGN.md §6 y WIFI-ROADMAP.md Fase 0 / Riesgo A.
- *
- *   int  mt6582_consys_func_on(u8 type);
- *   int  mt6582_consys_func_off(u8 type);
- *
- * Mientras no exista, este scaffold lo declara débil para poder compilar y avisa en runtime.
- */
-int __weak mt6582_consys_func_on(u8 type)
-{
-	pr_warn("mt6582-wifi: mt6582_consys_func_on() aún no exportado por el btif (stub)\n");
-	return -ENODEV;
-}
+/* Provista (EXPORT_SYMBOL_GPL) por mt6582-btif.c — manda el comando WMT func_on y espera el EVT,
+ * thread-safe con el RX-thread del BT. type: 0=BT 1=FM 2=GPS 3=WIFI 4=WMT. */
+extern int mt6582_consys_func_on(u8 type);
 
 #define WMTDRV_TYPE_WIFI	3	/* == canal STP WIFI; type-id del func_on para la radio WiFi */
 
@@ -431,7 +418,7 @@ static int mt6582_wifi_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int mt6582_wifi_remove(struct platform_device *pdev)
+static void mt6582_wifi_remove(struct platform_device *pdev)	/* kernel 7.0.12: remove devuelve void */
 {
 	struct mt6582_wifi *w = platform_get_drvdata(pdev);
 
@@ -448,7 +435,6 @@ static int mt6582_wifi_remove(struct platform_device *pdev)
 	if (w->pdma)
 		iounmap(w->pdma);
 	g_wifi = NULL;
-	return 0;
 }
 
 static const struct of_device_id mt6582_wifi_of_ids[] = {
