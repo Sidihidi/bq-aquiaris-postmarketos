@@ -1,0 +1,10 @@
+#!/bin/sh
+# GPS CONSYS: bridge (/dev/stpgps -> pty /dev/gps0) + gpsd. Corre TRAS zz-consys-bt.start
+# (el bring-up del chip ya esta hecho -> sin carrera). Cuando el bridge tenga START_SEQ
+# (capturado de mnld) el GPS escupira NMEA y gpsd dara fix.
+# Instalar en /etc/local.d/ (servicio 'local' en runlevel default).
+BR=/usr/local/bin/mtk-gps-bridge
+[ -x "$BR" ] || exit 0
+start-stop-daemon --start --background --make-pidfile --pidfile /run/mtk-gps-bridge.pid --exec "$BR"
+i=0; while [ ! -e /dev/gps0 ] && [ $i -lt 30 ]; do sleep 0.2; i=$((i+1)); done
+start-stop-daemon --start --background --make-pidfile --pidfile /run/gpsd.pid --exec /usr/sbin/gpsd -- -N -n /dev/gps0
