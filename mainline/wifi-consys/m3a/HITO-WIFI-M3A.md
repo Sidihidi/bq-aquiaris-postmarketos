@@ -1,5 +1,36 @@
 # M3a — "el CONSYS habla": BTIF + STP + WMT (guía de implementación para casa)
 
+## 🔬 SESIÓN 2026-06-19 (cont.): RX-DMA RESUELTO + el muro acotado a CONSYS→AP
+Implementado el **RX por DMA/VFF** (`mt6582-btif.c`: rxdma_setup/drain/poll, APDMA-RX @0x11000800,
+ring 8KB coherente, BTIF_DMA_EN.RX). Resultados en HW (boot-btifHCR/btifT0, logs legibles con
+`log_buf_len=4M` + sin `initcall_debug`):
+- ✅ **`LOOPBACK(DMA): RX=4 aa bb cc dd FUNCIONA`** → el RX por DMA del AP funciona perfecto. Era
+  la pieza que la síntesis decía que faltaba. **RX-DMA RESUELTO.**
+- ✅ **El MCU PROCESA** (con type=0): tras el resync el PC salta `0xe38→0x13e8c` y **cicla activo**
+  por `0x13e7e/0x3952/0xf658/0x3980/0x394c` ~2s (k=0-8) — ejecuta handlers reales.
+- ❌ **`WPT=0x4` NO avanza nunca** (quedó del loopback) → **el CONSYS no escribe ni 1 byte al BTIF.**
+  El HW avanza WPT solo al recibir; no llega nada de la dirección CONSYS→AP.
+- Al k=9 (~2s) el MCU entra en `exp_main 0x23d8` (excepciona, "jump from RST").
+- **type=4** (WMT_TASK_INDX, correcto por `wmt_ctrl.c:345/348`): el MCU **NO reacciona** (PC=0xe38
+  idle) — peor que type=0. El "fix type=4" de la síntesis estaba SIN probar en HW y empeora.
+- Framing STP **validado exacto** vs `stp_core.c:899-902` MAND mode (`h0=0x80`, `h1=type<<4|len_hi`,
+  `h2=len_lo`, `h3=0`, +CRC 00 00). Comando GEN_HCR validado vs `wmt_core_reg_rw_raw`.
+
+**→ EL MURO REAL = la dirección CONSYS→AP del BTIF.** RX del AP ✓, TX del AP ✓, MCU procesa ✓.
+Falta que el CONSYS TRANSMITA la respuesta. Dos frentes para casa (investigar, no disparar):
+1. **Estabilidad del MCU (evitar exp_main):** el MCU excepciona ~2s tras procesar, quizá ANTES de
+   poder responder. Probar: **MBIST** `CONN_MCU_CONFIG 0x18070110 |= (1<<18)` en `consys_activate_mcu`
+   (la síntesis §1 lo señala, ACR leído=0x00300002 bit18=0); y/o la **secuencia de reset limpia**
+   (assert CPU_SW_RST key → clocks/MBIST → deassert key) en vez de no-tocar-reset; y/o cargar el
+   **patch** (mt6572_82_patch) en SRAM antes de esperar respuesta (el ROM puede requerirlo).
+2. **Handshake RX CONSYS→AP del BTIF:** el loopback (AP→AP interno) funciona, pero recibir del CONSYS
+   externo puede requerir más que limpiar TRI_LOOP_EN. Revisar en downstream `mtk_btif.c` el setup
+   del **rx_irq_handler / la VFF + el new-handshake** para RX externo (¿crédito/flow-control/RTOCNT
+   que el loopback no necesita?). Confirmar si el CONSYS realmente intenta TX (¿mide algún testpoint?).
+- **type a usar:** type=0 hace que el MCU procese (mejor punto de partida que type=4). Mantener type=0
+  hasta resolver CONSYS→AP; luego revisar si type=4 con el canal "abierto" es lo correcto.
+
+
 ## ✅ FASE A RESUELVE EL BOOTLOOP (2026-06-18, `boot-btifA.img`) — EL BUS BTIF VIVE
 Reescrito `mt6582-btif.c` a **Fase A pasiva**: ungate del clock PERI_BTIF + leer LSR/IIR,
 **SIN `request_irq`, SIN `IER`, SIN TX**. Resultado en HW: **ARRANCA a Alpine/Phosh**, el BTIF

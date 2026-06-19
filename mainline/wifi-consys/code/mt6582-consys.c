@@ -54,6 +54,11 @@
 #define CONSYS_CHIP_ID		0x008
 #define CONSYS_CHIP_ID_6582	0x6582
 #define CONSYS_CHIP_ID_6572	0x6572
+/* MCU_CFG_ACR (0x110) bit18 = MBIST a alta frecuencia. Downstream lo pone antes de soltar
+ * el MCU (#if 0 en el flujo que copiamos, pero el integrado mt6752/6580 SÍ lo hace). Sin él
+ * el MCU puede hacer el auto-test de memoria mal y excepcionar. Leído = 0x00300002 (bit18=0). */
+#define MCU_CFG_ACR		0x110
+#define MCU_CFG_ACR_MBIST	(1U << 18)
 
 /* --- activación del subsistema interno del CONSYS ---
  * El M1 sólo hacía power SPM (basta p/chip-id). Para que el MCU corra el ROM y el
@@ -167,6 +172,11 @@ static int consys_setup_emi(struct mt6582_consys *cs)
 static void consys_activate_mcu(struct mt6582_consys *cs)
 {
 	void __iomem *topck = ioremap(TOPCKGEN_PHYS, 0x100);
+
+	/* MBIST a alta frecuencia ANTES de soltar el MCU: sin él el auto-test de memoria del
+	 * MCU va mal y puede ser la causa del exp_main (~2s tras procesar). */
+	writel(readl(cs->mcu_cfg + MCU_CFG_ACR) | MCU_CFG_ACR_MBIST, cs->mcu_cfg + MCU_CFG_ACR);
+	dev_info(cs->dev, "MCU_CFG_ACR(MBIST) -> 0x%08x\n", readl(cs->mcu_cfg + MCU_CFG_ACR));
 
 	/* encender el 26M del CONSYS (AP2CONN_OSC_EN bit10) DESPUÉS del power; sin él el
 	 * MCU arranca con clock inestable y excepciona (jump from RST, visto en el coredump). */
