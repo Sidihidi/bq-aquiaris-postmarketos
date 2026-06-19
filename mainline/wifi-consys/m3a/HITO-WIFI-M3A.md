@@ -1,5 +1,46 @@
 # M3a — "el CONSYS habla": BTIF + STP + WMT (guía de implementación para casa)
 
+## 🏆🏆🏆 PLAN B LOGRADO (2026-06-19): CAPTURADA LA SECUENCIA REAL DE ANDROID
+Vía **adb root sin auth** (default.prop ro.secure=0) en un stock con /data neutralizado + **busybox
+estático** en el ramdisk (`adb shell`) + **/system montado a mano por loop+offset 0x5900000** (el
+offset real = linear − 0x1400000, dicho por el propio kernel: `[Dumchar] android start=5900000`),
+corrimos `wmt_loader` + `6620_launcher` + `echo 1 > /dev/wmtWifi` y capturamos el dmesg por
+`adb pull /proc/kmsg`. **El WiFi arrancó del todo.** Captura completa en `captura/stock-consys-bringup.txt`.
+
+### ✅ LO QUE NOS FALTABA (los 3 arreglos para nuestro driver M3a):
+1. **BTIF en modo DMA, NO PIO.** El stock hace `_btif_tx_dma_setup` + `_btif_rx_dma_setup` y
+   `btif_open: BTIF's Tx Mode:1, Rx Mode(1)` (1=DMA). **Nuestro M3a usaba PIO** → por eso RX=0 (la
+   respuesta del CONSYS va por el VFF/DMA, no por el RBR). El TX **también** es DMA. → reimplementar
+   el BTIF con VFF DMA en AMBAS direcciones (ya teníamos la receta RX-DMA en §3; aplicarla + TX-DMA).
+2. **Handshake "abrir canal STP" ANTES de los comandos WMT** (lo que buscábamos): la secuencia es
+   `mtk_wcn_stp_enable(0)` → `stp_ready(0)` → `stp_set_mode(PROTO=8)` → `stp_enable(1)` →
+   hw_check → `stp_set_mode(PROTO=4)` → `stp_enable(1)` → `enable host STP-BTIF-FULL mode`.
+   Sin esta secuencia de enable/mode el MCU no procesa (nuestro type=4 "no enganchaba").
+3. **Modo STP: empieza simple y pasa a FULL.** `STP_SUPPORT_PROTOCOL=8` (¿MAND?) al inicio, luego
+   `=4` (FULL/BTIF-FULL) tras el hw_check. El framing cambia con el modo.
+
+### 📋 La secuencia EXACTA del bring-up (de la captura):
+1. `func_ctrl OPID(3) type(3)` (func_on WiFi) → `consys_hw_pwr_on`: PMIC **VCN18+VCN28**, SPM
+   `TOP1_PWR_CTRL=0xd` (= nuestro PWR_CON), `PWR_CONN_ACK=0x314e`, poll `chipId=0x6582` (retry).
+2. `consys_hw_gpio_ctrl` (BGF IRQ registrado+disabled). Lee `WMT_SOC.cfg` (co_clock_flag=0).
+3. **`mtk_wcn_btif_open` (owner CONSYS_STP)** → loopback OFF → `_btif_controller_setup` →
+   **`_btif_tx_dma_setup` + `_btif_rx_dma_setup`** → `Tx Mode:1 Rx Mode:1` → `stp_btif_open OK` +
+   `register rxcb to btif`.
+4. **STP enable** (ver arriba) → `wmt_core_hw_check`: chip-id 0x6582, **hw_ver 0x8a01, fw_ver 0x8a00**,
+   ic info `SOC_CONSYS.E2 patch_ext _e1`.
+5. STP→FULL → **patch download** (2 patches, del launcher): `mt6572_82_patch_e1_1_hdr.bin`
+   (addr cmd `00 00 0e f0`, frag(21,488)) y `..._e1_0_hdr.bin` (addr `00 00 06 00`, frag(41,896)).
+   Cabecera patch: Built 20140904, HwVer 0x8a00, SwVer 0x8a00, PhVer 0x00fe, Platform 1432.
+6. `stp_ready(1)` → **`[MT6582] HifAhbProbe()`** (el HIF AHB del WiFi) → `wlanNetCreate` (wiphy+netdev)
+   → `wlanProbe: download firmware` → abre **`WIFI_RAM_CODE_MT6582`** → `nicVerifyChipID 0x6582` →
+   `wlanAdapterStart: Ready bit asserted` → `download firmware status=0` → **WiFi func ON**.
+
+### ▶ SIGUIENTE: reescribir mt6582-btif.c con BTIF-DMA (TX+RX VFF) + la secuencia STP-enable,
+luego portar el patch download (mtk_wcn_soc_patch_dwn) y por último el HIF-AHB + el 802.11 (M4).
+El blueprint completo está en la captura. **adb-en-stock queda como herramienta** para depurar/comparar
+en vivo (boot-stockadb2.img + /system por loop 0x5900000).
+
+
 ## 🔬 SESIÓN 2026-06-19 (cont.): RX-DMA RESUELTO + el muro acotado a CONSYS→AP
 Implementado el **RX por DMA/VFF** (`mt6582-btif.c`: rxdma_setup/drain/poll, APDMA-RX @0x11000800,
 ring 8KB coherente, BTIF_DMA_EN.RX). Resultados en HW (boot-btifHCR/btifT0, logs legibles con
