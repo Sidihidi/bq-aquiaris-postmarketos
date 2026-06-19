@@ -21,6 +21,26 @@
 - **Flasheo desde pmOS:** la partición boot REAL es **sector 83968 (0x2900000)**, NO el 0x1D80000 de
   `flash_boot_dd*.sh` (a ceros). `dd ... seek=83968 conv=fsync` + verificación md5 + rollback `/tmp/b.img`.
 
+## GUI EN PHOSH — geoclue (GPS) + Bluetooth: CABLEADO Y VALIDADO (2026-06-19)
+**GPS → geoclue → Phosh/Maps (VALIDADO end-to-end con NMEA enlatada):**
+- geoclue ya instalado; su fuente **network-nmea** lee NMEA de un **unix socket** (sin avahi):
+  `geoclue.conf [network-nmea] enable=true` + `nmea-socket=/var/run/gps-share.sock`.
+- El feed: `socat UNIX-LISTEN:/var/run/gps-share.sock,fork,mode=0666 EXEC:"gpspipe -r"` (NMEA crudo de
+  gpsd). Añadido al autostart `zzz-gps.start`. (El banner JSON de gpsd lo ignora geoclue, parsea el NMEA.)
+- **PRUEBA:** con NMEA enlatada, `/usr/libexec/geoclue-2.0/demos/where-am-i` (cliente D-Bus, = lo que usan
+  Phosh/GNOME Maps) imprimió `Latitude 53.361337 / Longitude -6.505620 / Accuracy 1 m`. geoclue logueó
+  `GClueNMEASource now active` → `New location available`. **Toda la cadena GPS→geoclue funciona.**
+  (Aviso cosmético: el NMEA da timestamp "en el futuro" porque el RTC está en 1970 — no afecta lat/lon.)
+
+**Bluetooth → Phosh:** Phosh ya está compilado con soporte BT (enlaza `libgnome-bluetooth-3.0`, símbolo
+`PhoshBt`). Instalado `gnome-bluetooth` 47.2 (+GIR `GnomeBluetooth-3.0.typelib` +udev). bluetoothd
+(BlueZ 5.86) up, controlador `00:00:46:65:82:01` Powered → el **toggle de Bluetooth sale en Phosh** tras
+recargar la sesión. (Emparejar: gnome-control-center → Bluetooth.)
+
+**Reboot-persistente:** tras reiniciar, arrancan solos bridge+gpsd+gps-share (zzz-gps.start), BT up,
+geoclue configurado. **Solo falta el `START_SEQ` real (Stage 2) para que fluya NMEA de verdad** y la
+posición salga en GNOME Maps/Phosh sin tocar nada más.
+
 ## El descubrimiento (por qué esto es fácil en el kernel y el trabajo está en userspace)
 
 El char dev del GPS del downstream (`stp_chrdev_gps.c`) es un **tubo crudo del canal STP 2**:
