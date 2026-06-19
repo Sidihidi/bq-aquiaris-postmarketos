@@ -35,6 +35,22 @@ corrimos `wmt_loader` + `6620_launcher` + `echo 1 > /dev/wmtWifi` y capturamos e
    → `wlanProbe: download firmware` → abre **`WIFI_RAM_CODE_MT6582`** → `nicVerifyChipID 0x6582` →
    `wlanAdapterStart: Ready bit asserted` → `download firmware status=0` → **WiFi func ON**.
 
+### 🔧 DATOS PARA LA REESCRITURA BTIF-DMA (extraídos del downstream):
+- **BTIF en modo DMA para TX y RX** (NO PIO): `hal_btif_tx_mode_ctrl(BTIF_MODE_DMA)` +
+  `hal_btif_rx_mode_ctrl(BTIF_MODE_DMA)` (registro de modo en el BTIF core) + **new-handshake**
+  `BTIF_HANDSHAKE(0x6C) bit0 = 1` (`btif_new_handshake_ctrl`). El stock loguea `Tx Mode:1 Rx Mode:1`.
+- **APDMA VFF**: TX-DMA @**0x11000780** (IRQ SPI71), RX-DMA @**0x11000800** (IRQ SPI72). Programar
+  ambos vFIFO (VFF_ADDR/LEN/THRE/WPT/RPT, INT_FLAG/EN, EN). Ring coherente. (Receta RX en §3, ya
+  validada por loopback; falta el TX-DMA análogo.)
+- **`mtk_wcn_stp_enable` es SOLO estado AP** (STP_SET_ENABLE en stp_core_ctx) — NO manda nada al MCU.
+  Lo que hace responder al MCU es el **setup DMA completo del BTIF**, no el handshake suelto que
+  probamos. → replicar `_btif_controller_setup`+`_btif_tx_dma_setup`+`_btif_rx_dma_setup` del stock.
+- **Framing: MAND → FULLSET**. Empieza `btif_mand_mode` (header `80 (type<<4) len 00`, CRC 0000),
+  cambia a `btif_fullset_mode` (con seq/ack/CRC) tras el hw_check (`STP_SUPPORT_PROTOCOL` 8→4).
+- Plan probado-en-stock (boot-stockadb2.img): `losetup -o 93323264 loop0 mmcblk0; mount loop0 /system;
+  /system/bin/wmt_loader; /system/bin/6620_launcher -p /system/etc/firmware/; echo 1 > /dev/wmtWifi`
+  → comparar el dmesg con el nuestro paso a paso. **Es un port grande (BTIF-DMA + STP + WMT + patch)**.
+
 ### ▶ SIGUIENTE: reescribir mt6582-btif.c con BTIF-DMA (TX+RX VFF) + la secuencia STP-enable,
 luego portar el patch download (mtk_wcn_soc_patch_dwn) y por último el HIF-AHB + el 802.11 (M4).
 El blueprint completo está en la captura. **adb-en-stock queda como herramienta** para depurar/comparar
