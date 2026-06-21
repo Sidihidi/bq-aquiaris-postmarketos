@@ -22,7 +22,7 @@ Teléfono `root@172.16.42.1` (USB) desde la Pi `cpcd@192.168.0.38`. Flash = `dd`
 | **Boot** | ✅ | Estable (seedrng/haveged); **sshd con bucle de reintento** (zz-sshd.start) |
 | **Backlight HW** | ✅ | `+0xa0` PWM_DUTY; **CLI `bl 0-100`** + daemon. SLIDER de Phosh pendiente (sesión elogind) |
 | Pila energía | 🟡 | **polkit + UPower + elogind + login1** instalados (groundwork batería + suspend) |
-| **Bluetooth** | 🟡 | `hci0` registrado y responde (MGMT 1.23). Falta BlueZ + RF |
+| **Bluetooth** | ✅ | RF arreglado (VCN33 al boot) + **S24 emparejado**. Audio A2DP aparte |
 | **GPS** | 🟡 | Protocolo `0xAAF0` capturado + bridge desplegado. Falta el MOTOR |
 | **WiFi** | 🔴 | Bring-up a WIFI_START + FW OK; `WLAN_READY`=0 (MAC no arranca) |
 
@@ -30,10 +30,12 @@ Teléfono `root@172.16.42.1` (USB) desde la Pi `cpcd@192.168.0.38`. Flash = `dd`
 
 ## 1. ★★ CONECTIVIDAD — prioridad nº1 (cerrar los 3)
 
-### 🟦 Bluetooth (~70% — el más cerca)
-- ✅ CONSYS encendido, BTIF (bootloop resuelto), `hci0` registrado **y el controlador responde** (`broken local ext features` = HCI vivo; `MGMT ver 1.23`). `zz-consys-bt.start` hace el bring-up al boot.
-- ❌ **FALTA:** `apk add bluez` + `bluetoothctl` (power on, scan, pairing real por RF). `/dev/stpbt`.
-- Driver `mt6582-btif.c`. Memoria `reference_mt6582_wifi_consys`.
+> **★ NVRAM/eFUSE (06-21):** nvram borrada (golden=solo log, proinfo=ceros) pero la **cal RF vive en eFUSE intacta** — GPS (06-20) y BT (06-19, el S24 lo vio como 'BlueZ 5.86') radiaron *tras* el borrado. ⇒ **restaurar nvram NO arregla el RF**; BT/WiFi RF roto = **driver/init**. BT = **regresión** (06-21 `RX/TX=0`; sospechoso: cambios VCN33/consys del WiFi). Identidad MAC/IMEI sí perdida → regenerar (baja prioridad). Detalle: memoria `reference_mt6582_nvram_rf_cal`.
+
+### 🟦 Bluetooth — ✅ FUNCIONA (RF + emparejamiento, 06-21)
+- ✅ **RESUELTO EN HW**: la regresión era el cambio VCN33 del consys (06-20) que dejó de encender el raíl RF de 3.3V al boot → `RX/TX=0`. Fix: encender **VCN33_BT** (`ANALDO_CON16` 0x0416 bit7) + VCN33_WIFI **antes del bringup** en `zz-consys-bt.start` (vía `pwrap_poke`, sin reflashear). Tras reboot el **S24 ve "krillin-bq"**.
+- ✅ **Emparejamiento**: agente auto-yes persistente `zzz-bt-agent.start` (bluetoothctl NoInputNoOutput + `echo yes`) → **S24 VINCULADO** (`/var/lib/bluetooth`, Bonded/Paired yes, reconecta solo).
+- Pendiente (no bloquea): fix limpio en el driver consys; audio A2DP (sin ALSA, aparte); reverificar scan activo. Memorias `reference_mt6582_bt_rf_fix`, `reference_mt6582_wifi_consys`.
 
 ### 🛰️ GPS (~70% — falta el motor)
 - ✅ Protocolo **capturado 100%** en Lineage: `mnld`↔`/dev/stpgps` = binario **`0xAAF0`** + NMEA out + PMTK/AGPS (posición real de Murcia). Bridge `mtk-gps-bridge`→`gpsd`→geoclue desplegado en mainline.
