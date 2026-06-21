@@ -8,6 +8,7 @@
  */
 
 /dts-v1/;
+#include <dt-bindings/gpio/gpio.h>
 #include "mt6582.dtsi"
 
 / {
@@ -24,16 +25,9 @@
 		#size-cells = <1>;
 		ranges;
 
-		bootargs = "earlycon=mtk8250,mmio32,0x11002000 console=ttyS0,921600n8 panic=15 clk_ignore_unused blkdevparts=mmcblk0:512K@512K(ebr1),10240K@9216K(protect_f),10240K@19456K(protect_s),6144K@71168K(sec_ro),1048576K@91136K(android),716800K@1140736K(cache),-@1856512K(usrdata) initcall_debug ignore_loglevel";
+		bootargs = "earlycon=mtk8250,mmio32,0x11002000 console=ttyS0,921600n8 panic=15 clk_ignore_unused blkdevparts=mmcblk0:512K@512K(ebr1),10240K@9216K(protect_f),10240K@19456K(protect_s),6144K@71168K(sec_ro),1048576K@91136K(android),716800K@1140736K(cache),-@1856512K(usrdata) log_buf_len=4M ignore_loglevel";
 
-		framebuffer0: framebuffer@bf400000 {
-			compatible = "simple-framebuffer";
-			reg = <0xbf400000 0x200000>;
-			width = <540>;
-			height = <960>;
-			stride = <1088>;
-			format = "r5g6b5";
-		};
+		/* FASE 6: simplefb retirado -> mtk_drm es el unico display */
 	};
 
 	memory@80000000 {
@@ -120,6 +114,28 @@
 	};
 };
 
+/* ===== DUAL-BOOT: ranura SD (mtk-msdc.1 @0x11240000) para rootfs pmOS en tarjeta =====
+ * IRQ SPI 40 (MT_MSDC1_IRQ). Bus 4-bit, removable (broken-cd = poll). Power SD = PMIC
+ * MT6323 VMCH (3.3V) + VMC (I/O). Android sigue intacto en la eMMC interna (mmcblk0). */
+&{/soc} {
+	mmc1: mmc@11240000 {
+		compatible = "mediatek,mt8135-mmc";
+		reg = <0x11240000 0x1000>;
+		interrupts = <GIC_SPI 40 IRQ_TYPE_LEVEL_LOW>;
+		clocks = <&msdc_src>, <&msdc_hclk>;
+		clock-names = "source", "hclk";
+		vmmc-supply = <&mt6323_vmch_reg>;
+		vqmmc-supply = <&mt6323_vmc_reg>;
+		bus-width = <4>;
+		max-frequency = <12000000>;
+		cap-sd-highspeed;
+		no-mmc;
+		no-sdio;
+		broken-cd;
+		status = "okay";
+	};
+};
+
 /* M2b: USB MUSB en modo gadget (peripheral). MAC 0x11200000 + SIF 0x11210000.
  * IRQ GIC_SPI 32 (downstream: GIC_PRIVATE_SIGNALS+32 = hwirq 64). Polaridad
  * LEVEL_LOW como el mmc que ya funciona. Clocks/PHY los gestiona el driver. */
@@ -177,5 +193,281 @@
 				};
 			};
 		};
+	};
+};
+
+/* ---- EINT (interrupciones externas) MT6582 — driver gpio-mt6582-eint ---- */
+&{/soc} {
+	eint: interrupt-controller@1000b000 {
+		compatible = "mediatek,mt6582-eint";
+		reg = <0x1000b000 0x1000>,	/* [0] EINT */
+		      <0x10005000 0x1000>;	/* [1] GPIO */
+		interrupt-controller;
+		#interrupt-cells = <2>;
+		gpio-controller;
+		#gpio-cells = <2>;
+		interrupts = <GIC_SPI 113 IRQ_TYPE_LEVEL_HIGH>;
+	};
+};
+
+/* ---- Keypad MT6582 (matriz): VOLUMEN up/down ----
+ * KPD @0x10011000 (0xF0011000 virt - 0xE0000000), IRQ GIC_SPI 116 EDGE
+ * (downstream MT_KP_IRQ_ID = 32+116). Offsets == mt6779-keypad. */
+/ {
+	kpd_clk: kpd-clk {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <32768>;
+	};
+};
+
+&{/soc} {
+	keypad: keypad@10011000 {
+		compatible = "mediatek,mt6779-keypad";
+		reg = <0x10011000 0x1000>;
+		interrupts = <GIC_SPI 116 IRQ_TYPE_EDGE_FALLING>;
+		clocks = <&kpd_clk>;
+		clock-names = "kpd";
+		keypad,num-rows = <1>;
+		keypad,num-columns = <2>;
+		/* vol up = indice 0, vol down = indice 1 (downstream cust_kpd.h) */
+		linux,keymap = <0x00000073   /* MATRIX_KEY(0,0,KEY_VOLUMEUP=115) */
+				0x00010072>; /* MATRIX_KEY(0,1,KEY_VOLUMEDOWN=114) */
+		wakeup-source;
+		status = "okay";
+	};
+};
+
+/* ============ DISP DRM — FASE 1: mmsys + MUTEX + fixed-clock ============
+ * Primer paso del port mtk_drm (roadmap wf_b890ed35). Levanta el master
+ * mmsys (su probe hace platform_device_register_data("mediatek-drm")) y el
+ * MUTEX (mediatek,mt2701-disp-mutex; sincroniza el commit con el SOF -> sera
+ * lo que de el backlight latcheado). simplefb + mt6582-dispfix SIGUEN ACTIVOS:
+ * el DRM aun NO pinta (faltan OVL/RDMA/COLOR/DSI) -> solo validamos que
+ * mediatek-drm sondea y el component framework arranca, SIN romper la imagen.
+ * IRQ DISP (X_DEFINE_IRQ downstream, SPI=raw-32): MUTEX=161, OVL=153, RDMA=152,
+ * COLOR=156, BLS=155, DSI=157 (todos LEVEL_LOW). */
+/ {
+	mm_dummy_clk: mm-dummy-clk {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <156000000>;
+	};
+};
+
+&{/soc} {
+	mmsys: syscon@14000000 {
+		compatible = "mediatek,mt6582-mmsys", "syscon";
+		reg = <0x14000000 0x1000>;
+		#clock-cells = <1>;
+		/* sin clocks (los deja LK + clk_ignore_unused), sin power-domains
+		 * (no hay scpsys). El driver se anade en of_match_mtk_mmsys[]. */
+	};
+
+	mutex: mutex@1400e000 {
+		compatible = "mediatek,mt2701-disp-mutex";
+		reg = <0x1400e000 0x1000>;
+		clocks = <&mm_dummy_clk>;   /* mt2701 pide 1 clk (no_clk=false) -> stub */
+	};
+};
+
+/* ============ DISP DRM — FASE 2: pipeline OVL -> RDMA -> COLOR ============
+ * Hijos de /soc: el mediatek-drm los enumera iterando /soc por compatible
+ * (mtk_drm_of_get_ddp_comp_type), NO usa grafo ports. main_path mt2701 =
+ * OVL0->RDMA0->COLOR0->BLS->DSI0; aqui los 3 primeros (BLS+DSI = Fase 3, sin
+ * ellos el mediatek-drm aun no bindea pero los componentes SI sondean).
+ * IRQ (SPI=raw-32, LEVEL_LOW): OVL=153, RDMA=152, COLOR=156. */
+&{/soc} {
+	ovl0: ovl@14007000 {
+		compatible = "mediatek,mt2701-disp-ovl";
+		reg = <0x14007000 0x1000>;
+		interrupts = <GIC_SPI 153 IRQ_TYPE_LEVEL_LOW>;
+		clocks = <&mm_dummy_clk>;
+		/* SIN iommus/larb: lee fisico directo, como el dispfix */
+	};
+
+	rdma0: rdma@14008000 {
+		compatible = "mediatek,mt6582-disp-rdma";   /* variante: MEM_START_ADDR @0x28 */
+		reg = <0x14008000 0x1000>;
+		interrupts = <GIC_SPI 152 IRQ_TYPE_LEVEL_LOW>;
+		clocks = <&mm_dummy_clk>;
+	};
+
+	color0: color@1400b000 {
+		compatible = "mediatek,mt2701-disp-color";
+		reg = <0x1400b000 0x1000>;
+		interrupts = <GIC_SPI 156 IRQ_TYPE_LEVEL_LOW>;
+		clocks = <&mm_dummy_clk>;
+	};
+};
+
+/* ============ DISP DRM — FASE 3: DSI + PHY mipi-tx + panel HX8389 ============ */
+/ {
+	clk26m: clk26m {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <26000000>;
+	};
+};
+
+&{/soc} {
+	mipi_tx0: dsi-phy@10010000 {
+		compatible = "mediatek,mt2701-mipi-tx";
+		reg = <0x10010000 0x90>;
+		clocks = <&clk26m>;
+		clock-output-names = "mipi_tx0_pll";
+		#clock-cells = <0>;
+		#phy-cells = <0>;
+	};
+
+	dsi0: dsi@1400c000 {
+		compatible = "mediatek,mt2701-dsi";
+		reg = <0x1400c000 0x1000>;
+		interrupts = <GIC_SPI 157 IRQ_TYPE_LEVEL_LOW>;
+		clocks = <&mm_dummy_clk>, <&mm_dummy_clk>, <&mipi_tx0>;
+		clock-names = "engine", "digital", "hs";
+		phys = <&mipi_tx0>;
+		phy-names = "dphy";
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		panel@0 {
+			compatible = "truly,hx8389-qhd";
+			reg = <0>;
+			reset-gpios = <&eint 112 GPIO_ACTIVE_LOW>;
+			power-supply = <&mt6323_vgp2_reg>;
+			backlight = <&backlight>;
+			port {
+				panel_in: endpoint { remote-endpoint = <&dsi0_out>; };
+			};
+		};
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			port@1 {
+				reg = <1>;
+				dsi0_out: endpoint { remote-endpoint = <&panel_in>; };
+			};
+		};
+	};
+};
+
+/* ===== Backlight: DISP BLS @ 0x1400a000 (pwm-mtk-disp variante mt6582, SIN BLS_DEBUG) ===== */
+&{/soc} {
+	disp_pwm: pwm@1400a000 {
+		compatible = "mediatek,mt6582-disp-pwm";
+		reg = <0x1400a000 0x1000>;
+		clocks = <&clk26m>, <&mm_dummy_clk>;
+		clock-names = "main", "mm";
+		#pwm-cells = <2>;
+	};
+};
+
+/ {
+	backlight: backlight {
+		compatible = "pwm-backlight";
+		pwms = <&disp_pwm 0 100000>;
+		brightness-levels = <0 8 16 32 64 96 128 160 192 224 255>;
+		default-brightness-level = <8>;
+	};
+};
+
+&mt6323regulator {
+	mt6323_vgp2_reg: ldo_vgp2 {
+		regulator-name = "vgp2";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+	};
+
+	/* WiFi CONSYS: digital 1.8V + analog 2.8V + RF WiFi 3.3V */
+	mt6323_vcn18_reg: ldo_vcn18 {
+		regulator-name = "vcn18";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+	};
+
+	mt6323_vcn28_reg: ldo_vcn28 {
+		regulator-name = "vcn28";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+	};
+
+	mt6323_vcn33_wifi_reg: ldo_vcn33_wifi {
+		regulator-name = "vcn33_wifi";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+	};
+
+	/* power de la ranura SD (dual-boot): VMCH = VDD tarjeta, VMC = I/O */
+	mt6323_vmch_reg: ldo_vmch {
+		regulator-name = "vmch";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+	};
+	mt6323_vmc_reg: ldo_vmc {
+		regulator-name = "vmc";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+	};
+};
+
+/* ============ lima / Mali-400 MP2 (GPU) ============ */
+/ {
+	gpu_core_clk: gpu-core-clk { compatible = "fixed-clock"; #clock-cells = <0>; clock-frequency = <416000000>; };
+	gpu_bus_clk:  gpu-bus-clk  { compatible = "fixed-clock"; #clock-cells = <0>; clock-frequency = <312000000>; };
+};
+
+&{/soc} {
+	gpu: gpu@13010000 {
+		compatible = "arm,mali-400", "arm,mali-utgard";
+		reg = <0x13010000 0x10000>;
+		interrupts = <GIC_SPI 170 IRQ_TYPE_LEVEL_LOW>,
+			     <GIC_SPI 171 IRQ_TYPE_LEVEL_LOW>,
+			     <GIC_SPI 172 IRQ_TYPE_LEVEL_LOW>,
+			     <GIC_SPI 173 IRQ_TYPE_LEVEL_LOW>,
+			     <GIC_SPI 174 IRQ_TYPE_LEVEL_LOW>,
+			     <GIC_SPI 175 IRQ_TYPE_LEVEL_LOW>;
+		interrupt-names = "gp", "gpmmu", "pp0", "ppmmu0", "pp1", "ppmmu1";
+		clocks = <&gpu_bus_clk>, <&gpu_core_clk>;
+		clock-names = "bus", "core";
+	};
+};
+
+/* ============ WiFi CONSYS MT6582 — M1 bring-up (lee chip-id) ============
+ * driver mt6582-consys.c: enciende el CONSYS (reguladores VCN + MTCMOS SPM,
+ * mismo patron que el MFG) y lee CONSYS_CHIP_ID (0x18070008) -> debe dar 0x6582.
+ * SPM/INFRACFG los mapea el driver por constante; reg aqui = CONN_MCU_CONFIG.
+ * IRQ WF_HIF = SPI 164 (downstream WF_HIF_IRQ_ID). */
+&{/soc} {
+	consys: consys@18070000 {
+		compatible = "mediatek,mt6582-consys";
+		reg = <0x18070000 0x1000>;
+		interrupts = <GIC_SPI 164 IRQ_TYPE_LEVEL_LOW>;
+		vcn18-supply = <&mt6323_vcn18_reg>;
+		vcn28-supply = <&mt6323_vcn28_reg>;
+		vcn33-supply = <&mt6323_vcn33_wifi_reg>;
+		status = "okay";
+	};
+};
+
+/* ============ WiFi M3a — BTIF (transporte serie AP<->CONSYS) ============
+ * driver mt6582-btif.c (PIO): canal por el que correra STP/WMT al CONSYS.
+ * Base 0x1100C000 (APB), IRQ MT_BTIF = SPI 50. */
+&{/soc} {
+	btif: btif@1100c000 {
+		compatible = "mediatek,mt6582-btif";
+		reg = <0x1100c000 0x100>;
+		interrupts = <GIC_SPI 50 IRQ_TYPE_LEVEL_LOW>;
+		status = "okay";
+	};
+};
+
+&{/soc} {
+	/* WiFi del CONSYS: bloque HIF estilo-SDIO (AHB) — driver mt6582-wifi.c */
+	wifi: wifi@180f0000 {
+		compatible = "mediatek,mt6582-wifi";
+		reg = <0x180f0000 0x5c>;
+		status = "okay";
 	};
 };
