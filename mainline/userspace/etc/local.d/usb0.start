@@ -1,0 +1,2 @@
+#!/bin/sh
+ifconfig usb0 172.16.42.1 netmask 255.255.255.0 up 2>/dev/null
