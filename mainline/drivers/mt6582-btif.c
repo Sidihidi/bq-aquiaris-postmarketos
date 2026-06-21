@@ -333,6 +333,26 @@ static int bring_up_chip(struct mt6582_btif *b)
 	ret = patch_dwn(b, "mt6572_82_patch_e1_0_hdr.bin", a_e1_0);
 	if (ret) return ret;
 	wmt_cmd(b, WMT_RESET_CMD, 5, WMT_RESET_EVT, 5, "RESET-2");
+
+	/* CALIBRACIÓN RF del CONSYS (OEM mtk_wcn_soc_sw_init, wmt_ic_soc.c:967, TRAS los parches
+	 * y ANTES de func_on). Sin esto el PHY/PLL/AFE del MAC WiFi NO se calibra → su FW arranca
+	 * pero WLAN_READY nunca se afirma (BT/GPS la toleran, por eso enlazan igual). VCN33 ya está
+	 * on (boot script zz-consys-bt). La cal RF tarda más que un cmd normal → timeout amplio. */
+	{
+		static const u8 rfcal[5] = { 0x01, 0x14, 0x01, 0x00, 0x01 };
+		u8 rx[16];
+		int plen;
+
+		b->rxlen = 0;
+		stp_send(b, STP_TYPE_WMT, rfcal, 5);
+		plen = wmt_wait_frame(b, rx, sizeof(rx), 5000);
+		if (plen >= 5 && rx[0] == 0x02 && rx[1] == 0x14 && rx[4] == 0x00)
+			dev_info(b->dev, "*** RF-CAL OK ***\n");
+		else
+			dev_warn(b->dev, "RF-CAL fallo/timeout (plen=%d): %*ph\n",
+				 plen, plen > 0 ? min_t(int, plen, 8) : 0, rx);
+	}
+
 	ret = func_on(b, 0, "BT");
 	if (ret) return ret;
 	/* GPS encendido aquí (síncrono, antes del kthread RX) para no competir por rxbuf.
