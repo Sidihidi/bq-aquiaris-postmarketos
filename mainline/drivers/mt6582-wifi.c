@@ -396,6 +396,10 @@ static int wifi_bringup(struct mt6582_wifi *w)
 	wr(w->hif, MCR_WHISR, rd(w->hif, MCR_WHISR));	/* limpiar status pendiente (W1C) */
 	wr(w->hif, MCR_WHIER, WHIER_DEFAULT);
 
+	/* nicDisableInterrupt (downstream nic.c:936, llamado en wlan_lib.c:1309 ANTES de descargar):
+	 * el OEM deshabilita el INT global (modo polling) antes de la descarga; nosotros lo saltábamos. */
+	wr(w->hif, MCR_WHLPCR, WHLPCR_INT_EN_CLR);
+
 	/* 4. descargar el firmware del MAC WiFi y arrancarlo */
 	ret = wifi_download_firmware(w);
 	if (ret)
