@@ -227,6 +227,164 @@ static int wifi_dl_section(struct mt6582_wifi *w, u32 dest, const u8 *data, u32 
 	return 0;
 }
 
+/* DIAG (read-FW): leer una palabra del espacio del chip vía INIT_CMD_ID_ACCESS_REG (query).
+ * Para ver si el FW se descifró bien en la RAM del MCU (0x6a000) o es basura (clave mala).
+ * INIT_CMD_ACCESS_REG = ucSetQuery(1)+rsv(3)+u4Address(4)+u4Data(4); evento = u4Address(4)+u4Data(4). */
+static u32 wifi_access_reg_read(struct mt6582_wifi *w, u32 addr)
+{
+	struct init_hif_tx_header *th = (void *)w->dlm;
+	u8 *ar = (u8 *)(th + 1);
+	u32 total = sizeof(*th) + 12;
+	struct init_wifi_event *ev;
+	u8 rxbuf[64];
+	u32 wrplr, plen, readlen, val = 0xdeadbeef;
+	int loops = 200;
+
+	th->tx_byte_count = cpu_to_le16(total);
+	th->ether_type_offset = 0;
+	th->cs_flags = 0;
+	th->cid = INIT_CMD_ID_ACCESS_REG;
+	th->seq_num = ++w->cmd_seq;
+	th->reserved = 0;
+	ar[0] = 0;			/* ucSetQuery = 0 (read) */
+	ar[1] = ar[2] = ar[3] = 0;
+	*(__le32 *)(ar + 4) = cpu_to_le32(addr);
+	*(__le32 *)(ar + 8) = 0;
+
+	mutex_lock(&w->hif_lock);
+	wifi_port_write_pio(w, w->dlm, total);
+	while (loops-- > 0) {
+		wrplr = rd(w->hif, MCR_WRPLR);
+		plen = wrplr & 0xffff;
+		if (plen == 0) { udelay(50); continue; }
+		readlen = ALIGN(plen, 4);
+		if (readlen > sizeof(rxbuf))
+			break;
+		wifi_port_read_pio(w, rxbuf, readlen);
+		ev = (struct init_wifi_event *)rxbuf;
+		if (ev->eid == INIT_EVENT_ID_ACCESS_REG)
+			val = le32_to_cpup((__le32 *)(rxbuf + sizeof(*ev) + 4));
+		else
+			val = 0xbade0000u | ev->eid;	/* respuesta inesperada */
+		break;
+	}
+	mutex_unlock(&w->hif_lock);
+	return val;
+}
+
+/* ======================================================================
+ *  FASE 1 — cmd/event runtime por TC4/puerto-1 (WTDR1/WRDR1).
+ *  Los comandos runtime NO van por el puerto 0 de la descarga: van por TC4 ->
+ *  puerto 1 (WTDR1=0x2c tx, WRDR1=0x34 rx), longitud en WRPLR mitad-alta. El body
+ *  de un evento empieza en offset 8 (struct wifi_event), no 12. (RE downstream.)
+ * ====================================================================== */
+
+/* escribir 'len' bytes al puerto de datos TX1 en PIO (clon de wifi_port_write_pio, target TXD1). */
+static void wifi_port1_write_pio(struct mt6582_wifi *w, const void *buf, u32 len)
+{
+	const u32 *p = buf;
+	u32 i, words = (len + 3) / 4;
+
+	wifi_hstcr(w, HIF_TARGET_TXD1, len);
+	for (i = 0; i < words; i++)
+		wr(w->hif, MCR_WTDR1, p[i]);
+}
+
+/* leer 'len' bytes del puerto de datos RX1 en PIO (target RXD1). */
+static void wifi_port1_read_pio(struct mt6582_wifi *w, void *buf, u32 len)
+{
+	u32 *p = buf;
+	u32 i, words = (len + 3) / 4;
+
+	wifi_hstcr(w, HIF_TARGET_RXD1, len);
+	for (i = 0; i < words; i++)
+		p[i] = rd(w->hif, MCR_WRDR1);
+}
+
+/* enviar un comando runtime (QUERY/SET) por TC4/puerto-1. 'resp_reserve' = tamaño del evento
+ * de respuesta (el FW dimensiona TxByteCount para incluirlo). El caller debe tener hif_lock. */
+static int wifi_send_cmd(struct mt6582_wifi *w, u8 cid, u8 set_query,
+			 const void *body, u16 body_len, u16 resp_reserve)
+{
+	struct wifi_cmd *c = (void *)w->dlm;
+	u16 info_len = sizeof(*c) + (body_len ? body_len : resp_reserve);
+
+	c->tx_byte_count_up = cpu_to_le16(ALIGN(info_len, 4) & 0x0fff);	/* UP=0 */
+	c->ether_type_offset = 0;
+	c->resource_pkttype_cs = (WIFI_TC4 << HIF_TX_RESOURCE_SHIFT) |
+				 (HIF_TX_PKT_TYPE_CMD << HIF_TX_PKT_TYPE_SHIFT);	/* = 0x50 */
+	c->cid = cid;
+	c->set_query = set_query;	/* 0 = QUERY */
+	c->seq_num = ++w->cmd_seq;
+	c->reserved2 = 0;
+	if (body && body_len)
+		memcpy((u8 *)w->dlm + sizeof(*c), body, body_len);
+	else
+		memset((u8 *)w->dlm + sizeof(*c), 0, resp_reserve);
+	wifi_port1_write_pio(w, w->dlm, info_len);
+	return w->cmd_seq;
+}
+
+/* sondear el puerto-1 RX por un evento con EID dado; copia el body (tras struct wifi_event) a out. */
+static int wifi_poll_event(struct mt6582_wifi *w, u8 want_eid, void *out, u32 out_len, u32 ms)
+{
+	struct wifi_event *ev;
+	u8 rx[96];
+	u32 wrplr, plen, rl;
+	int loops = ms * 20;	/* 50us/iter, como nicRxWaitResponse */
+
+	while (loops-- > 0) {
+		wrplr = rd(w->hif, MCR_WRPLR);
+		plen = WRPLR_RX1_LEN(wrplr);		/* *** puerto 1 = mitad ALTA *** */
+		if (!plen) { udelay(50); continue; }
+		rl = ALIGN(plen, 4);
+		if (rl > sizeof(rx))
+			return -EMSGSIZE;
+		wifi_port1_read_pio(w, rx, rl);
+		ev = (struct wifi_event *)rx;
+		if ((le16_to_cpu(ev->packet_type) & HIF_RX_PKT_TYPE_MASK) != HIF_RX_PKT_TYPE_EVENT) {
+			dev_warn(w->dev, "Fase1: pkt no-EVENT WRPLR=0x%08x rx=%*ph\n",
+				 wrplr, min_t(u32, plen, 16), rx);
+			return -EBADMSG;
+		}
+		if (ev->eid != want_eid) {
+			dev_warn(w->dev, "Fase1: EID=0x%x (esperaba 0x%x)\n", ev->eid, want_eid);
+			return -EBADMSG;
+		}
+		if (plen > sizeof(*ev))
+			memcpy(out, rx + sizeof(*ev), min_t(u32, out_len, plen - sizeof(*ev)));
+		return 0;
+	}
+	return -ETIMEDOUT;
+}
+
+/* "hello world" del firmware: MAC permanente (BASIC_CONFIG) + capacidades (NIC_CAPABILITY).
+ * Un EVENT_ID_NIC_CAPABILITY válido = el bucle cmd/event FUNCIONA (mata ~70% del riesgo Fase 1). */
+static void wifi_phase1_hello(struct mt6582_wifi *w)
+{
+	u8 cap[32], bc[12];
+	int ret;
+
+	mutex_lock(&w->hif_lock);
+	/* 1) MAC permanente: CMD_ID_BASIC_CONFIG (query) -> EVENT_ID_BASIC_CONFIG (MAC @body+0) */
+	wifi_send_cmd(w, CMD_ID_BASIC_CONFIG, 0, NULL, 0, sizeof(bc));
+	ret = wifi_poll_event(w, EVENT_ID_BASIC_CONFIG, bc, sizeof(bc), 1000);
+	if (!ret)
+		dev_info(w->dev, "*** Fase1: MAC permanente = %pM ***\n", bc);
+	else
+		dev_warn(w->dev, "Fase1: BASIC_CONFIG sin respuesta (%d)\n", ret);
+	/* 2) capacidades: CMD_ID_GET_NIC_CAPABILITY (query) -> EVENT_ID_NIC_CAPABILITY */
+	wifi_send_cmd(w, CMD_ID_GET_NIC_CAPABILITY, 0, NULL, 0, sizeof(cap));
+	ret = wifi_poll_event(w, EVENT_ID_NIC_CAPABILITY, cap, sizeof(cap), 1000);
+	if (!ret)
+		dev_info(w->dev, "*** Fase1: NIC_CAP ProductID=0x%04x FW=0x%04x 5Goff=%d efuse=%d macValid=%d ***\n",
+			 le16_to_cpup((__le16 *)cap), le16_to_cpup((__le16 *)(cap + 2)),
+			 cap[6], cap[8], cap[9]);
+	else
+		dev_warn(w->dev, "Fase1: NIC_CAPABILITY sin respuesta (%d)\n", ret);
+	mutex_unlock(&w->hif_lock);
+}
+
 /* arranca el firmware ya descargado: INIT_CMD_ID_WIFI_START + poll WLAN_READY. */
 static int wifi_fw_start(struct mt6582_wifi *w)
 {
@@ -252,8 +410,10 @@ static int wifi_fw_start(struct mt6582_wifi *w)
 
 	pc0 = rd(w->mcu, CONN_MCU_CPUPCR);	/* PC del MCU antes de esperar el ready */
 	for (t = 0; t < 500; t++) {	/* ~5 s (downstream: CFG_RESPONSE_POLLING_TIMEOUT x msleep 10) */
-		if (rd(w->hif, MCR_WCIR) & WCIR_WLAN_READY)
+		if (rd(w->hif, MCR_WCIR) & WCIR_WLAN_READY) {
+			wifi_phase1_hello(w);	/* Fase 1: hello-world del FW (NIC_CAPABILITY + MAC) */
 			return 0;
+		}
 		msleep(10);
 	}
 	dev_err(w->dev,
@@ -269,6 +429,25 @@ static int wifi_fw_start(struct mt6582_wifi *w)
 		dev_err(w->dev, "CPUPCR pre=0x%08x post=0x%08x/0x%08x/0x%08x (si cambia => MCU ejecutando)\n",
 			pc0, a, b, cc);
 	}
+	dev_err(w->dev,
+		"DIAG post-START: ACCESS_REG(0x6a000)=0x%08x [responde=ROM al mando, MAC NO salto; 0xdeadbeef=salto al FW (corre/crashea)]\n",
+		wifi_access_reg_read(w, 0x6a000));
+	/* DIAG: volcar el espacio de registros HIF (0x180F0000) y MCU (0x18070000) AP-side
+	 * (funcionan aunque el command-channel esté en FW-own). Buscar el estado/poll del MAC. */
+	{
+		/* SOLO registros documentados y seguros (saltar FIFOs de datos 0x28-0x3c y offsets
+		 * no mapeados, que cuelgan el bus al leerse). */
+		static const u16 safe[] = {
+			0x00, 0x04, 0x08, 0x0c, 0x10, 0x14, 0x18, 0x1c,
+			0x20, 0x24, 0x40, 0x44, 0x48, 0x50, 0x58,
+		};
+		int k;
+
+		for (k = 0; k < ARRAY_SIZE(safe); k++)
+			dev_err(w->dev, "HIFreg[%03x] = %08x\n", safe[k], rd(w->hif, safe[k]));
+		dev_err(w->dev, "MCUreg chipid[008]=%08x cpupcr[160]=%08x\n",
+			rd(w->mcu, 0x08), rd(w->mcu, 0x160));
+	}
 	return -ETIMEDOUT;
 }
 
@@ -278,6 +457,7 @@ static int wifi_download_firmware(struct mt6582_wifi *w)
 	const struct firmware *fw;
 	const struct firmware_divided_download *hdr;
 	int ret, i;
+	u32 sec0_dest = 0;
 
 	ret = request_firmware(&fw, WIFI_FW_NAME, w->dev);
 	if (ret) {
@@ -297,6 +477,9 @@ static int wifi_download_firmware(struct mt6582_wifi *w)
 			u32 foff = le32_to_cpu(hdr->section[i].offset);
 			u32 flen = le32_to_cpu(hdr->section[i].length);
 			u32 dest = le32_to_cpu(hdr->section[i].dest_addr);
+
+			if (i == 0)
+				sec0_dest = dest;
 
 			if (foff + flen > fw->size) {
 				dev_err(w->dev, "sección %d fuera de rango\n", i);
@@ -318,6 +501,18 @@ static int wifi_download_firmware(struct mt6582_wifi *w)
 		dev_err(w->dev, "FW sin firma 'MTKW' (blob plano): falta dirección destino; ver TODO\n");
 		ret = -EINVAL;
 		goto out;
+	}
+
+	/* DIAG (read-FW): antes de arrancar, leer la RAM REAL donde aterrizó sec0 (el código del
+	 * MAC, dest_addr del header) vía ACCESS_REG. Si sale código estructurado → FW bien
+	 * descifrado (muro = HW del MAC); si sale 0/basura/0xdeadbeef → la ROM no lee RAM o clave mala.
+	 * Leo también 0x6a000 (el PC interno del MAC) por si el ACCESS_REG usa ESE espacio. */
+	{
+		u32 i;
+
+		for (i = 0; i < 64; i++)
+			dev_info(w->dev, "FWdump[%02x] %08x = %08x\n",
+				 i, sec0_dest + i * 4, wifi_access_reg_read(w, sec0_dest + i * 4));
 	}
 
 	ret = wifi_fw_start(w);
