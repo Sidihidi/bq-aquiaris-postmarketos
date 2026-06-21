@@ -107,6 +107,11 @@ static void wifi_hstcr(struct mt6582_wifi *w, u32 target, u32 size)
 {
 	u32 cnt = (size & 0x3) ? (size + 4) : size;
 
+	/* Erratum "HIF 92B, 4B problem between 2 block transmissions" (downstream ahb.c:2153):
+	 * leer un registro no-func0 (WHIER) ANTES de programar HSTCR, o las transferencias cuya
+	 * longitud cae en el caso malo se corrompen. */
+	(void)rd(w->hif, MCR_WHIER);
+
 	wr(w->hif, MCR_HSTCR,
 	   (HIF_BURST_4DW << HSTCR_BURST_OFFSET) |
 	   (target << HSTCR_TARGET_OFFSET) |
@@ -379,6 +384,15 @@ static int wifi_bringup(struct mt6582_wifi *w)
 	 * antes de arrancar, aunque nosotros sondeemos (downstream nic.c:1328 escribe WHIER_DEFAULT
 	 * ANTES de la descarga). Sin esto el handshake de boot del FW no completa → WLAN_READY nunca.
 	 */
+	/* WHCR (nicSDIOInit, downstream nic.c:1013): MAX_HIF_RX_LEN_NUM=0 + RX_ENHANCE off.
+	 * El FW espera este estado del motor de status/RX antes de arrancar su MAC. */
+	{
+		u32 whcr = rd(w->hif, MCR_WHCR);
+
+		whcr &= ~WHCR_MAX_HIF_RX_LEN_NUM;	/* bits 4-7 = SDIO_MAXIMUM_RX_LEN_NUM (0) */
+		whcr &= ~WHCR_RX_ENHANCE_MODE_EN;	/* bit 16 off (CFG_SDIO_RX_ENHANCE=0) */
+		wr(w->hif, MCR_WHCR, whcr);
+	}
 	wr(w->hif, MCR_WHISR, rd(w->hif, MCR_WHISR));	/* limpiar status pendiente (W1C) */
 	wr(w->hif, MCR_WHIER, WHIER_DEFAULT);
 
