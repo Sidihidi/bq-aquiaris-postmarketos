@@ -42,11 +42,11 @@ Teléfono `root@172.16.42.1` (USB) desde la Pi `cpcd@192.168.0.38`. Flash = `dd`
 - ❌ **FALTA:** el **MOTOR** que hable `0xAAF0`. Vías: (a) correr el `mnld` de Android (falló por `__system_properties_init`), (b) motor nativo mínimo desde `wifi-work/mnld-*.strace`, (c) modo NMEA-directo del chip.
 - Memoria `reference_mt6582_gps`.
 
-### 📶 WiFi (~65% — análisis WLAN_READY hecho, 2 fixes aplicados, test pendiente)
-- ✅ `func_on(WIFI)`→`WCIR=0x6582`→descarga FW (2 secc + ACKs, MCU ejecuta)→`WIFI_START`. **VCN33 descartado**.
-- ✅ **Secuencia OEM `wlanAdapterStart` mapeada** (`wlan_lib.c:1219`). **#1 terminador DWORD-cero DESCARTADO**: la ruta PIO del OEM NO lo envía (`ahb.c:1759` está `#if 0`); nuestro `wifi_port_write_pio` ya coincide byte a byte. `nicInitSystemService/Tx/RxInitialize` = solo memoria host (Fase 1/3, **NO** bloquean ready).
-- 🔧 **2 fixes aplicados + flasheados (06-21), compilan limpio**: (#3) **dummy-read de `WHIER` antes de cada `HSTCR`** (workaround erratum HIF "4B problem", `ahb.c:2153`) en `wifi_hstcr`; (#2) **configurar `WHCR`** en `wifi_bringup` (`nicSDIOInit`: limpiar `MAX_HIF_RX_LEN_NUM` bits4-7 + `RX_ENHANCE` bit16). **TEST PENDIENTE**: el boot regulero colgó tras flashear → power-cycle → disparar bringup (`echo 1 > /sys/kernel/debug/mt6582_wifi/bringup`) → ver si `WLAN_READY=1`. Backup driver `mt6582-wifi.c.bak-pre-whcr-erratum` en la Pi.
-- Driver `mt6582-wifi.c` (HIF `0x180F0000`). Memoria `reference_mt6582_wifi_hif`.
+### 📶 WiFi (analizado a fondo — command-path byte-perfecto, el MAC no arranca)
+- ✅ `func_on(WIFI)`→`WCIR=0x6582`→descarga FW→`WIFI_START`. Protocolo **byte-idéntico al OEM** (subagente, comparación completa byte a byte: comandos, structs, CRC, encriptación).
+- ❌ **`WLAN_READY` no se afirma** (el MAC WiFi, procesador SEPARADO @0x6a000, no arranca). **DESCARTADOS en HW (06-21, cada uno build+flash+test)**: terminador DWORD-cero, WHCR, erratum WHIER, start-address, nicDisableInterrupt — todos sin efecto. Firmware confirmado device-correcto (= `WIFI_RAM_CODE_MT6582`, md5 7a62…, u4CRC OK, encriptado/flag correcto). El `CPUPCR` diagnostica el MCU de CONECTIVIDAD (sano = BT/GPS), no el MAC WiFi.
+- 🎯 **ÚNICO sospechoso sin probar (= sesión WiFi dedicada)**: portar el init nic COMPLETO de `wlanAdapterStart` que el scaffold salta — `nicInitSystemService`→`nicTxInitialize`→`nicRxInitialize`→`nicTxInitResetResource` (créditos TX TC0=8) ANTES de descargar (el log OEM hace `nicTxReleaseResource` al arrancar el FW → el MAC interactúa con el recurso TX).
+- Driver `mt6582-wifi.c` (fixes a-e) en GitHub. Memoria `reference_mt6582_wifi_hif`.
 
 ---
 
