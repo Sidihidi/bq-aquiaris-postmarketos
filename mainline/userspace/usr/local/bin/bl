@@ -1,0 +1,7 @@
+#!/bin/sh
+# bl [0-100] : ajusta el brillo de pantalla (escribe /run/mt6582-bl-pct -> daemon mt6582-backlight -> +0xa0)
+case "$1" in
+  ''|*[!0-9]*) echo "uso: bl 0-100   (brillo actual: $(cat /run/mt6582-bl-pct 2>/dev/null)%)"; exit 0;;
+esac
+V=$1; [ "$V" -gt 100 ] && V=100
+echo "$V" > /run/mt6582-bl-pct && echo "brillo = ${V}%"
