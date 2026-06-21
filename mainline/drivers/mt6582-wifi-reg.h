@@ -238,6 +238,33 @@ struct wifi_event {
 #define CMD_ID_BASIC_CONFIG		0xc1	/* QUERY -> EVENT_ID_BASIC_CONFIG (MAC permanente) */
 #define EVENT_ID_NIC_CAPABILITY		0x02
 #define EVENT_ID_BASIC_CONFIG		0x09
-/* (más adelante) CMD_ID_SCAN_REQ_V2 -> MGMT beacons + EVENT_ID_SCAN_DONE; SET_BSS_INFO; ADD_REMOVE_KEY */
+/* SCAN (Fase 1 cont., verificado downstream). OJO: el SET_DOMAIN_INFO/SCAN son SET (ucSetQuery=1).
+ * Beacons llegan por PUERTO 0 (MGMT); SCAN_DONE por puerto 1 (EVENT). */
+#define CMD_ID_SCAN_REQ_V2		0x04	/* SET; body=struct cmd_scan_req_v2 (220B p/IE vacío) */
+#define CMD_ID_SET_DOMAIN_INFO		0x13	/* SET; tabla regulatoria de canales */
+#define CMD_ID_SET_PHY_PARAM		0x31	/* SET; EFUSE/RF-cal (si el scan no recibe) */
+#define EVENT_ID_SCAN_DONE		0x15
+#define SCAN_TYPE_PASSIVE		0
+#define SCAN_CHANNEL_2G4		1
+#define NETWORK_TYPE_AIS		0
+#define HIF_RX_HDR_OFFSET_MASK		0x3	/* bits0-1 de hif_rx_header.header_len_offset */
+
+struct param_ssid { __le32 len; u8 ssid[32]; } __packed;	/* 36B */
+struct chan_info  { u8 band, chan; } __packed;			/* 2B */
+struct cmd_scan_req_v2 {
+	u8	seq_num, network_type, scan_type, ssid_type;	/* +0 */
+	struct param_ssid ssid[4];				/* +4  (144) */
+	__le16	probe_delay, dwell_time;			/* +148 */
+	u8	channel_type, channel_list_num;			/* +152 (list_num=0: el FW expande 2.4G) */
+	struct chan_info chan_list[32];				/* +154 (64) */
+	__le16	ie_len;						/* +218 */
+	u8	ie[600];					/* +220 (sizeof total = 820) */
+} __packed;
+struct cmd_subband { u8 reg_class, band, chan_span, first_chan, num_chans, rsv[3]; } __packed; /* 8B */
+struct cmd_set_domain_info {
+	__le16	country_code, rsv;
+	struct cmd_subband subband[6];
+	u8	bw_2g4, bw_5g, rsv2[2];				/* sizeof = 56 */
+} __packed;
 
 #endif /* _MT6582_WIFI_REG_H */
