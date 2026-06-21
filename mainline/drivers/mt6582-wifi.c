@@ -385,6 +385,102 @@ static void wifi_phase1_hello(struct mt6582_wifi *w)
 	mutex_unlock(&w->hif_lock);
 }
 
+/* loguear un beacon/probe-resp (sin cfg80211 todavía): SSID + canal + RSSI. (Valida el path firmware.) */
+static void wifi_rx_mgmt_log(struct mt6582_wifi *w, u8 *rx, u32 plen, int *beacons)
+{
+	struct hif_rx_header *h = (void *)rx;
+	u32 off = 12 + (h->header_len_offset & HIF_RX_HDR_OFFSET_MASK);
+	u8 *frame = rx + off;
+	u32 flen = (plen > off) ? plen - off : 0;
+	u8 subtype = flen ? (frame[0] & 0xf0) >> 4 : 0xff;
+	s32 dbm = (min_t(u32, h->rcpi, 220) >> 1) - 110;
+	char ssid[33] = "";
+	u8 *ie;
+	u32 ielen;
+
+	if (subtype != 8 && subtype != 5)	/* beacon=8, probe-resp=5 */
+		return;
+	(*beacons)++;
+	if (flen >= 38) {			/* 24 mac-hdr + 12 fixed (+2 IE mín) */
+		ie = frame + 36; ielen = flen - 36;
+		while (ielen >= 2) {
+			u8 id = ie[0], len = ie[1];
+
+			if (2u + len > ielen)
+				break;
+			if (id == 0) {		/* SSID IE */
+				u8 n = min_t(u8, len, 32);
+
+				memcpy(ssid, ie + 2, n); ssid[n] = 0;
+				break;
+			}
+			ie += 2 + len; ielen -= 2 + len;
+		}
+	}
+	if (w->dbg_evt < 40) { w->dbg_evt++;
+		dev_info(w->dev, "Fase1 BEACON: SSID='%s' ch=%u %ddBm\n",
+			 ssid[0] ? ssid : "(oculto)", h->hw_channel_num, dbm); }
+}
+
+/* drenar AMBOS puertos RX una vez: port0 (DATA/MGMT) + port1 (EVENT). Devuelve 1 si SCAN_DONE. */
+static int wifi_rx_drain_log(struct mt6582_wifi *w, int *beacons)
+{
+	u32 wrplr = rd(w->hif, MCR_WRPLR);
+	u32 l0 = WRPLR_RX0_LEN(wrplr), l1 = WRPLR_RX1_LEN(wrplr);
+	u8 rx[1600];
+
+	if (l0 && ALIGN(l0, 4) <= sizeof(rx)) {
+		struct hif_rx_header *h = (void *)rx;
+
+		wifi_port_read_pio(w, rx, ALIGN(l0, 4));		/* port 0 */
+		if ((le16_to_cpu(h->packet_type) & HIF_RX_PKT_TYPE_MASK) == HIF_RX_PKT_TYPE_MGMT)
+			wifi_rx_mgmt_log(w, rx, l0, beacons);
+	}
+	if (l1 && ALIGN(l1, 4) <= sizeof(rx)) {
+		struct wifi_event *ev = (void *)rx;
+
+		wifi_port1_read_pio(w, rx, ALIGN(l1, 4));		/* port 1 */
+		if ((le16_to_cpu(ev->packet_type) & HIF_RX_PKT_TYPE_MASK) == HIF_RX_PKT_TYPE_EVENT &&
+		    ev->eid == EVENT_ID_SCAN_DONE)
+			return 1;
+	}
+	return 0;
+}
+
+/* scan pasivo 2.4G (prereq SET_DOMAIN_INFO) + sondeo de beacons ~6s. Síncrono (bring-up). */
+static void wifi_scan_test(struct mt6582_wifi *w)
+{
+	struct cmd_set_domain_info dom;
+	struct cmd_scan_req_v2 sc;
+	int i, beacons = 0, done = 0;
+
+	mutex_lock(&w->hif_lock);
+	/* tabla regulatoria mundo: 2.4G ch1-13 */
+	memset(&dom, 0, sizeof(dom));
+	dom.subband[0].reg_class = 81;
+	dom.subband[0].band = 1;	/* BAND_2G4 */
+	dom.subband[0].chan_span = 1;	/* CHNL_SPAN_5 */
+	dom.subband[0].first_chan = 1;
+	dom.subband[0].num_chans = 13;
+	wifi_send_cmd(w, CMD_ID_SET_DOMAIN_INFO, 1, &dom, sizeof(dom), 0);
+	/* scan pasivo, el FW expande los canales 2.4G */
+	memset(&sc, 0, sizeof(sc));
+	sc.seq_num = 0x55;
+	sc.network_type = NETWORK_TYPE_AIS;
+	sc.scan_type = SCAN_TYPE_PASSIVE;
+	sc.channel_type = SCAN_CHANNEL_2G4;
+	wifi_send_cmd(w, CMD_ID_SCAN_REQ_V2, 1, &sc,
+		      offsetof(struct cmd_scan_req_v2, ie), 0);
+	dev_info(w->dev, "*** Fase1: scan pasivo 2.4G enviado, sondeando ~6s ***\n");
+	for (i = 0; i < 600 && !done; i++) {
+		done = wifi_rx_drain_log(w, &beacons);
+		msleep(10);
+	}
+	dev_info(w->dev, "*** Fase1: scan %s — %d beacons recibidos ***\n",
+		 done ? "DONE" : "timeout", beacons);
+	mutex_unlock(&w->hif_lock);
+}
+
 /* arranca el firmware ya descargado: INIT_CMD_ID_WIFI_START + poll WLAN_READY. */
 static int wifi_fw_start(struct mt6582_wifi *w)
 {
@@ -412,6 +508,7 @@ static int wifi_fw_start(struct mt6582_wifi *w)
 	for (t = 0; t < 500; t++) {	/* ~5 s (downstream: CFG_RESPONSE_POLLING_TIMEOUT x msleep 10) */
 		if (rd(w->hif, MCR_WCIR) & WCIR_WLAN_READY) {
 			wifi_phase1_hello(w);	/* Fase 1: hello-world del FW (NIC_CAPABILITY + MAC) */
+			wifi_scan_test(w);	/* Fase 1: scan pasivo 2.4G + log de beacons */
 			return 0;
 		}
 		msleep(10);
