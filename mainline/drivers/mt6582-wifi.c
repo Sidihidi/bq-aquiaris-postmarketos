@@ -31,6 +31,10 @@
 #include <linux/slab.h>
 #include <linux/mutex.h>
 #include <linux/crc32.h>
+#include <linux/netdevice.h>
+#include <linux/etherdevice.h>
+#include <linux/kthread.h>
+#include <net/cfg80211.h>
 
 #include "mt6582-wifi-reg.h"
 
@@ -68,7 +72,15 @@ struct mt6582_wifi {
 	int			dbg_evt;	/* limita el log de depuración de eventos init */
 	u8			*dlm;		/* buffer de descarga (DMA-able) */
 	dma_addr_t		dlm_phys;
-	/* TODO(Fase 1): struct wireless_dev *wdev; struct net_device *ndev; etc. */
+	/* Fase 1: cfg80211 full-MAC */
+	struct wiphy		*wiphy;
+	struct net_device	*ndev;
+	struct wireless_dev	wdev;
+	struct cfg80211_scan_request *scan_req;	/* scan en curso (NULL = idle) */
+	unsigned long		scan_deadline;	/* jiffies: forzar scan_done si el FW no manda SCAN_DONE */
+	struct task_struct	*rx_thread;	/* sondea el RX (beacons MGMT + eventos) */
+	u8			scan_seq;
+	bool			cfg_registered;
 };
 
 static struct mt6582_wifi *g_wifi;
@@ -448,7 +460,7 @@ static int wifi_rx_drain_log(struct mt6582_wifi *w, int *beacons)
 }
 
 /* scan pasivo 2.4G (prereq SET_DOMAIN_INFO) + sondeo de beacons ~6s. Síncrono (bring-up). */
-static void wifi_scan_test(struct mt6582_wifi *w)
+static void __maybe_unused wifi_scan_test(struct mt6582_wifi *w)
 {
 	struct cmd_set_domain_info dom;
 	struct cmd_scan_req_v2 sc;
@@ -481,6 +493,226 @@ static void wifi_scan_test(struct mt6582_wifi *w)
 	mutex_unlock(&w->hif_lock);
 }
 
+/* ======================================================================
+ *  FASE 1 (cfg80211): wiphy + netdev wlan0 + scan pasivo expuesto a userspace.
+ *  RX por kthread polling (sin IRQ aún): beacons MGMT (puerto 0) ->
+ *  cfg80211_inform_bss_frame; EVENT_ID_SCAN_DONE (puerto 1) -> cfg80211_scan_done.
+ *  El scan lo dispara `iw wlan0 scan` vía .scan. (wifi_*_log de arriba = el PoC
+ *  que validó 14 beacons; esta es la versión cfg80211 real.)
+ * ====================================================================== */
+#define CHAN2G(_ch, _freq) { .band = NL80211_BAND_2GHZ, .center_freq = (_freq), \
+			     .hw_value = (_ch), .max_power = 20 }
+static struct ieee80211_channel wifi_2ghz_channels[] = {
+	CHAN2G(1, 2412), CHAN2G(2, 2417), CHAN2G(3, 2422), CHAN2G(4, 2427),
+	CHAN2G(5, 2432), CHAN2G(6, 2437), CHAN2G(7, 2442), CHAN2G(8, 2447),
+	CHAN2G(9, 2452), CHAN2G(10, 2457), CHAN2G(11, 2462), CHAN2G(12, 2467),
+	CHAN2G(13, 2472),
+};
+static struct ieee80211_rate wifi_rates[] = {
+	{ .bitrate = 10 }, { .bitrate = 20 }, { .bitrate = 55 }, { .bitrate = 110 },
+	{ .bitrate = 60 }, { .bitrate = 90 }, { .bitrate = 120 }, { .bitrate = 180 },
+	{ .bitrate = 240 }, { .bitrate = 360 }, { .bitrate = 480 }, { .bitrate = 540 },
+};
+static struct ieee80211_supported_band wifi_band_2ghz = {
+	.band = NL80211_BAND_2GHZ,
+	.channels = wifi_2ghz_channels,
+	.n_channels = ARRAY_SIZE(wifi_2ghz_channels),
+	.bitrates = wifi_rates,
+	.n_bitrates = ARRAY_SIZE(wifi_rates),
+};
+/* dominio regulatorio custom (mundo, 2.4G ch1-13, solo pasivo) — evita depender de regulatory.db */
+static const struct ieee80211_regdomain wifi_regd = {
+	.n_reg_rules = 1,
+	.alpha2 = "99",
+	.reg_rules = {
+		REG_RULE(2412 - 10, 2472 + 10, 40, 0, 20, NL80211_RRF_NO_IR),
+	},
+};
+
+/* indicar un beacon/probe-resp a cfg80211 (recibido por el puerto 0 = MGMT). */
+static void wifi_rx_mgmt(struct mt6582_wifi *w, u8 *rx, u32 plen)
+{
+	struct hif_rx_header *h = (void *)rx;
+	u32 off = 12 + (h->header_len_offset & HIF_RX_HDR_OFFSET_MASK);
+	u8 *frame = rx + off;
+	u32 flen = (plen > off) ? plen - off : 0;
+	u8 subtype = flen ? (frame[0] & 0xf0) >> 4 : 0xff;
+	s32 dbm = (min_t(u32, h->rcpi, 220) >> 1) - 110;
+	struct ieee80211_channel *ch;
+	struct cfg80211_bss *bss;
+
+	if ((subtype != 8 && subtype != 5) || flen < 36 || !w->wiphy)
+		return;
+	ch = ieee80211_get_channel(w->wiphy,
+				   ieee80211_channel_to_frequency(h->hw_channel_num,
+								  NL80211_BAND_2GHZ));
+	if (!ch)
+		return;
+	bss = cfg80211_inform_bss_frame(w->wiphy, ch,
+					(struct ieee80211_mgmt *)frame, flen,
+					dbm * 100, GFP_ATOMIC);
+	if (bss)
+		cfg80211_put_bss(w->wiphy, bss);
+}
+
+/* drenar AMBOS puertos RX una vez: port0 (MGMT->inform_bss) + port1 (EVENT->scan_done). hif_lock. */
+static void wifi_rx_drain(struct mt6582_wifi *w)
+{
+	u32 wrplr = rd(w->hif, MCR_WRPLR);
+	u32 l0 = WRPLR_RX0_LEN(wrplr), l1 = WRPLR_RX1_LEN(wrplr);
+	u8 rx[1600];
+
+	if (l0 && ALIGN(l0, 4) <= sizeof(rx)) {
+		struct hif_rx_header *h = (void *)rx;
+
+		wifi_port_read_pio(w, rx, ALIGN(l0, 4));
+		if ((le16_to_cpu(h->packet_type) & HIF_RX_PKT_TYPE_MASK) == HIF_RX_PKT_TYPE_MGMT)
+			wifi_rx_mgmt(w, rx, l0);
+	}
+	if (l1 && ALIGN(l1, 4) <= sizeof(rx)) {
+		struct wifi_event *ev = (void *)rx;
+
+		wifi_port1_read_pio(w, rx, ALIGN(l1, 4));
+		if ((le16_to_cpu(ev->packet_type) & HIF_RX_PKT_TYPE_MASK) == HIF_RX_PKT_TYPE_EVENT &&
+		    ev->eid == EVENT_ID_SCAN_DONE && w->scan_req) {
+			struct cfg80211_scan_info info = { .aborted = false };
+
+			cfg80211_scan_done(w->scan_req, &info);
+			w->scan_req = NULL;
+		}
+	}
+}
+
+/* kthread RX: sondea ~20ms; cierra el scan por timeout si el FW no manda SCAN_DONE. */
+static int wifi_rx_thread(void *data)
+{
+	struct mt6582_wifi *w = data;
+
+	while (!kthread_should_stop()) {
+		mutex_lock(&w->hif_lock);
+		wifi_rx_drain(w);
+		if (w->scan_req && time_after(jiffies, w->scan_deadline)) {
+			struct cfg80211_scan_info info = { .aborted = false };
+
+			cfg80211_scan_done(w->scan_req, &info);
+			w->scan_req = NULL;
+		}
+		mutex_unlock(&w->hif_lock);
+		msleep(20);
+	}
+	return 0;
+}
+
+/* .scan: manda CMD_SCAN_REQ_V2 pasivo 2.4G; los beacons llegan async por el kthread. */
+static int wifi_cfg_scan(struct wiphy *wiphy, struct cfg80211_scan_request *request)
+{
+	struct mt6582_wifi *w = g_wifi;
+	struct cmd_scan_req_v2 sc;
+
+	if (!w || !w->started)
+		return -ENODEV;
+	mutex_lock(&w->hif_lock);
+	if (w->scan_req) {
+		mutex_unlock(&w->hif_lock);
+		return -EBUSY;
+	}
+	memset(&sc, 0, sizeof(sc));
+	sc.seq_num = ++w->scan_seq;
+	sc.network_type = NETWORK_TYPE_AIS;
+	sc.scan_type = SCAN_TYPE_PASSIVE;
+	sc.channel_type = SCAN_CHANNEL_2G4;
+	wifi_send_cmd(w, CMD_ID_SCAN_REQ_V2, 1, &sc,
+		      offsetof(struct cmd_scan_req_v2, ie), 0);
+	w->scan_req = request;
+	w->scan_deadline = jiffies + msecs_to_jiffies(8000);
+	mutex_unlock(&w->hif_lock);
+	dev_info(w->dev, "scan: pasivo 2.4G lanzado\n");
+	return 0;
+}
+
+static struct cfg80211_ops wifi_cfg_ops = {
+	.scan = wifi_cfg_scan,
+};
+
+static int wifi_ndo_open(struct net_device *ndev)
+{
+	netif_start_queue(ndev);
+	return 0;
+}
+static int wifi_ndo_stop(struct net_device *ndev)
+{
+	netif_stop_queue(ndev);
+	return 0;
+}
+static netdev_tx_t wifi_ndo_xmit(struct sk_buff *skb, struct net_device *ndev)
+{
+	dev_kfree_skb(skb);		/* TX = Fase 3 */
+	ndev->stats.tx_dropped++;
+	return NETDEV_TX_OK;
+}
+static const struct net_device_ops wifi_netdev_ops = {
+	.ndo_open = wifi_ndo_open,
+	.ndo_stop = wifi_ndo_stop,
+	.ndo_start_xmit = wifi_ndo_xmit,
+};
+
+/* registrar wiphy + wlan0 + arrancar el kthread RX. Llamado tras WLAN_READY + phase1. */
+static int wifi_register_cfg80211(struct mt6582_wifi *w)
+{
+	struct wiphy *wiphy;
+	struct net_device *ndev;
+	int ret;
+
+	if (w->cfg_registered)
+		return 0;
+	wiphy = wiphy_new(&wifi_cfg_ops, 0);
+	if (!wiphy)
+		return -ENOMEM;
+	set_wiphy_dev(wiphy, w->dev);
+	wiphy->interface_modes = BIT(NL80211_IFTYPE_STATION);
+	wiphy->bands[NL80211_BAND_2GHZ] = &wifi_band_2ghz;
+	wiphy->max_scan_ssids = 1;
+	wiphy->max_scan_ie_len = 512;
+	wiphy->signal_type = CFG80211_SIGNAL_TYPE_MBM;
+	wiphy->regulatory_flags = REGULATORY_CUSTOM_REG;
+	ret = wiphy_register(wiphy);
+	if (ret) {
+		dev_err(w->dev, "cfg80211: wiphy_register=%d\n", ret);
+		wiphy_free(wiphy);
+		return ret;
+	}
+	w->wiphy = wiphy;
+	wiphy_apply_custom_regulatory(wiphy, &wifi_regd);
+	dev_info(w->dev, "cfg80211: wiphy registrado (phy)\n");
+
+	ndev = alloc_netdev(0, "wlan0", NET_NAME_UNKNOWN, ether_setup);
+	if (!ndev) {
+		dev_err(w->dev, "cfg80211: alloc_netdev fallo\n");
+		wiphy_unregister(wiphy); wiphy_free(wiphy); w->wiphy = NULL;
+		return -ENOMEM;
+	}
+	w->ndev = ndev;
+	ndev->netdev_ops = &wifi_netdev_ops;
+	eth_hw_addr_random(ndev);
+	w->wdev.wiphy = wiphy;
+	w->wdev.iftype = NL80211_IFTYPE_STATION;
+	w->wdev.netdev = ndev;
+	ndev->ieee80211_ptr = &w->wdev;
+	SET_NETDEV_DEV(ndev, w->dev);
+	ret = register_netdev(ndev);
+	if (ret) {
+		dev_err(w->dev, "cfg80211: register_netdev=%d\n", ret);
+		free_netdev(ndev); w->ndev = NULL;
+		wiphy_unregister(wiphy); wiphy_free(wiphy); w->wiphy = NULL;
+		return ret;
+	}
+
+	w->rx_thread = kthread_run(wifi_rx_thread, w, "mt6582-wifi-rx");
+	w->cfg_registered = true;
+	dev_info(w->dev, "*** cfg80211: wiphy + wlan0 registrados, RX-thread vivo ***\n");
+	return 0;
+}
+
 /* arranca el firmware ya descargado: INIT_CMD_ID_WIFI_START + poll WLAN_READY. */
 static int wifi_fw_start(struct mt6582_wifi *w)
 {
@@ -508,7 +740,7 @@ static int wifi_fw_start(struct mt6582_wifi *w)
 	for (t = 0; t < 500; t++) {	/* ~5 s (downstream: CFG_RESPONSE_POLLING_TIMEOUT x msleep 10) */
 		if (rd(w->hif, MCR_WCIR) & WCIR_WLAN_READY) {
 			wifi_phase1_hello(w);	/* Fase 1: hello-world del FW (NIC_CAPABILITY + MAC) */
-			wifi_scan_test(w);	/* Fase 1: scan pasivo 2.4G + log de beacons */
+			wifi_register_cfg80211(w);	/* Fase 1: wiphy + wlan0 + kthread RX -> iw wlan0 scan */
 			return 0;
 		}
 		msleep(10);
