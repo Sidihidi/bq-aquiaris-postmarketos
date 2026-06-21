@@ -1,0 +1,16 @@
+#!/bin/sh
+chmod u-s /usr/bin/bwrap 2>/dev/null
+# /etc/local.d/zzzz-phosh.start — autoarranque de Phosh (Wayland) al boot.
+rc-service udev start 2>/dev/null
+rc-service udev-trigger start 2>/dev/null
+rc-service seatd start 2>/dev/null
+mkdir -p /run/user/1000
+chown sxmo:sxmo /run/user/1000
+chmod 700 /run/user/1000
+i=0
+while [ $i -lt 90 ]; do
+  if [ -e /dev/dri/card1 ] && rc-service seatd status 2>/dev/null | grep -q started; then break; fi
+  sleep 1; i=$((i + 1))
+done
+sleep 2
+nohup su - sxmo -c "sh /usr/local/bin/launch_phosh.sh" >/tmp/phosh-boot.log 2>&1 &
