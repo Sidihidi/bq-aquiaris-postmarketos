@@ -210,6 +210,7 @@ struct wifi_cmd {
  * hif_tx.h:158-171. Van por TC4 -> PUERTO 1 igual que el cmd, pero con PKT_TYPE=MGMT(3). */
 #define HIF_TX_FLAG_802_11	0x80	/* ucPktFormtId_Flags bit7: frame 802.11 crudo */
 #define HIF_TX_NEED_ACK		0x01	/* ucAck_BIP_BasicRate bit0: pedir ACK al peer */
+#define HIF_TX_BASIC_RATE	0x04	/* ucAck_BIP_BasicRate bit2: TX a basic-rate (AUTH/ASSOC lo EXIGEN, si no MPDU_ERROR) */
 struct hif_tx_header {
 	__le16	tx_byte_count_up;	/* bits0-11 = byte count (hdr+frame), UP en 12-15 */
 	u8	ether_type_offset;
