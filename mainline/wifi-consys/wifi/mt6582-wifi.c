@@ -379,6 +379,7 @@ static int wifi_poll_event(struct mt6582_wifi *w, u8 want_eid, void *out, u32 ou
 static void wifi_phase1_hello(struct mt6582_wifi *w)
 {
 	u8 cap[32], bc[12];
+	struct cmd_set_domain_info dom;
 	int ret;
 
 	mutex_lock(&w->hif_lock);
@@ -400,6 +401,17 @@ static void wifi_phase1_hello(struct mt6582_wifi *w)
 			 cap[6], cap[8], cap[9]);
 	else
 		dev_warn(w->dev, "Fase1: NIC_CAPABILITY sin respuesta (%d)\n", ret);
+	/* 3) dominio regulatorio 2.4G ch1-13 (mundo, reg_class 81). IMPRESCINDIBLE antes del scan:
+	 *    sin SET_DOMAIN_INFO el FW escanea con un dominio de canales sin inicializar => scan
+	 *    flaky (0 ó ~16 beacons según el boot). El OEM lo manda una vez en wlanAdapterStart. */
+	memset(&dom, 0, sizeof(dom));
+	dom.subband[0].reg_class = 81;
+	dom.subband[0].band = 1;		/* BAND_2G4 */
+	dom.subband[0].chan_span = 1;		/* CHNL_SPAN_5 */
+	dom.subband[0].first_chan = 1;
+	dom.subband[0].num_chans = 13;
+	wifi_send_cmd(w, CMD_ID_SET_DOMAIN_INFO, 1, &dom, sizeof(dom), 0);
+	dev_info(w->dev, "*** Fase1: SET_DOMAIN_INFO 2.4G ch1-13 ***\n");
 	mutex_unlock(&w->hif_lock);
 }
 
@@ -561,7 +573,36 @@ static void wifi_rx_mgmt(struct mt6582_wifi *w, u8 *rx, u32 plen)
 		cfg80211_put_bss(w->wiphy, bss);
 }
 
-/* drenar AMBOS puertos RX una vez: port0 (MGMT->inform_bss) + port1 (EVENT->scan_done). hif_lock. */
+/* despachar un EVENT del FW por su eid. *** EN ESTE CHIP LOS EVENTOS ASYNC LLEGAN POR EL PUERTO 0 ***
+ * (packet_type=EVENT=1); el puerto 1 solo trae las respuestas SÍNCRONAS de cmd (NIC_CAP, MAC). */
+static void wifi_handle_event(struct mt6582_wifi *w, u8 *rx, u32 len)
+{
+	struct wifi_event *ev = (void *)rx;
+
+	if (ev->eid == EVENT_ID_SCAN_DONE && w->scan_req) {
+		struct cfg80211_scan_info info = { .aborted = false };
+
+		cfg80211_scan_done(w->scan_req, &info);
+		w->scan_req = NULL;
+		dev_info(w->dev, "*** SCAN_DONE ***\n");
+	} else if (ev->eid == EVENT_ID_CONNECTION_STATUS && w->connecting) {
+		struct event_connection_status *cs = (void *)(rx + sizeof(*ev));
+		bool ok = (cs->media_status == MEDIA_STATE_CONNECTED);
+
+		cfg80211_connect_result(w->ndev,
+			ok ? cs->bssid : w->connect_bssid, NULL, 0, NULL, 0,
+			ok ? WLAN_STATUS_SUCCESS : WLAN_STATUS_UNSPECIFIED_FAILURE,
+			GFP_ATOMIC);
+		w->connecting = false;
+		dev_info(w->dev, "*** EVENT_CONNECTION_STATUS media=%u (%s) %pM ***\n",
+			 cs->media_status, ok ? "CONNECTED" : "fail", cs->bssid);
+	} else if (ev->eid != 0x0e) {	/* 0x0e = heartbeat periódico del FW (~30ms); ignorar sin spamear */
+		dev_info(w->dev, "evt eid=0x%02x len=%u %*ph\n",
+			 ev->eid, len, min_t(int, len, 20), rx);
+	}
+}
+
+/* drenar AMBOS puertos RX una vez: port0 (MGMT->inform_bss + EVENT->handle) + port1 (EVENT). hif_lock. */
 static void wifi_rx_drain(struct mt6582_wifi *w)
 {
 	u32 wrplr = rd(w->hif, MCR_WRPLR);
@@ -570,34 +611,21 @@ static void wifi_rx_drain(struct mt6582_wifi *w)
 
 	if (l0 && ALIGN(l0, 4) <= sizeof(rx)) {
 		struct hif_rx_header *h = (void *)rx;
+		u16 pt;
 
 		wifi_port_read_pio(w, rx, ALIGN(l0, 4));
-		if ((le16_to_cpu(h->packet_type) & HIF_RX_PKT_TYPE_MASK) == HIF_RX_PKT_TYPE_MGMT)
+		pt = le16_to_cpu(h->packet_type) & HIF_RX_PKT_TYPE_MASK;
+		if (pt == HIF_RX_PKT_TYPE_MGMT)
 			wifi_rx_mgmt(w, rx, l0);
+		else if (pt == HIF_RX_PKT_TYPE_EVENT)	/* *** los EVENTOS del FW llegan por aquí *** */
+			wifi_handle_event(w, rx, l0);
 	}
 	if (l1 && ALIGN(l1, 4) <= sizeof(rx)) {
 		struct wifi_event *ev = (void *)rx;
 
 		wifi_port1_read_pio(w, rx, ALIGN(l1, 4));
-		if ((le16_to_cpu(ev->packet_type) & HIF_RX_PKT_TYPE_MASK) == HIF_RX_PKT_TYPE_EVENT) {
-			if (ev->eid == EVENT_ID_SCAN_DONE && w->scan_req) {
-				struct cfg80211_scan_info info = { .aborted = false };
-
-				cfg80211_scan_done(w->scan_req, &info);
-				w->scan_req = NULL;
-			} else if (ev->eid == EVENT_ID_CONNECTION_STATUS && w->connecting) {
-				struct event_connection_status *cs = (void *)(rx + sizeof(*ev));
-				bool ok = (cs->media_status == MEDIA_STATE_CONNECTED);
-
-				cfg80211_connect_result(w->ndev,
-					ok ? cs->bssid : w->connect_bssid, NULL, 0, NULL, 0,
-					ok ? WLAN_STATUS_SUCCESS : WLAN_STATUS_UNSPECIFIED_FAILURE,
-					GFP_ATOMIC);
-				w->connecting = false;
-				dev_info(w->dev, "*** EVENT_CONNECTION_STATUS media=%u (%s) %pM ***\n",
-					 cs->media_status, ok ? "CONNECTED" : "fail", cs->bssid);
-			}
-		}
+		if ((le16_to_cpu(ev->packet_type) & HIF_RX_PKT_TYPE_MASK) == HIF_RX_PKT_TYPE_EVENT)
+			wifi_handle_event(w, rx, l1);	/* por si algún evento llegara también por aquí */
 	}
 }
 
