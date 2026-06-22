@@ -314,8 +314,8 @@ struct cmd_set_domain_info {
 #define STA_STATE_1			0	/* recién creado: auth pendiente (el host manda AUTH) */
 #define STA_STATE_3			2
 #define PHY_TYPE_SET_802_11BG		0x03
-#define RATE_SET_ERP			0x0fff
-#define BASIC_RATE_SET_ERP		0x000f
+#define RATE_SET_ERP			0x3fff	/* bits0-13 = 1..54M (el FW exige 0x3fff, NO 0x0fff) */
+#define BASIC_RATE_SET_ERP		0x0003	/* 1M/2M CCK = subset del desired; el FW manda el MMPDU a tasa básica baja */
 
 struct cmd_bss_activate { u8 net_type_idx, active, rsv[2]; } __packed;	/* 4 */
 
