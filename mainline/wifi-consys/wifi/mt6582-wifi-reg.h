@@ -267,4 +267,60 @@ struct cmd_set_domain_info {
 	u8	bw_2g4, bw_5g, rsv2[2];				/* sizeof = 56 */
 } __packed;
 
+/* ---- Fase 2: CONNECT (structs/CMD_IDs de combo/mt6628, ver FASE2-CONNECT.md) ---- */
+#define CMD_ID_ADD_REMOVE_KEY		0x08
+#define CMD_ID_DEFAULT_KEY_ID		0x09
+#define CMD_ID_INFRASTRUCTURE		0x0a
+#define CMD_ID_BSS_ACTIVATE_CTRL	0x15
+#define CMD_ID_SET_BSS_INFO		0x16
+#define CMD_ID_UPDATE_STA_RECORD	0x17
+#define CMD_ID_SET_BSS_RLM_PARAM	0x18	/* canal (provisional, afinar si falla) */
+#define EVENT_ID_CONNECTION_STATUS	0x03
+#define OP_MODE_INFRASTRUCTURE		0
+#define MEDIA_STATE_CONNECTED		0
+#define MEDIA_STATE_DISCONNECTED	1
+#define AUTH_MODE_OPEN			0	/* provisional (OPEN primero) */
+#define ENC_STATUS_DISABLED		0
+#define CIPHER_NONE			0
+#define CIPHER_CCMP			4
+
+struct cmd_bss_activate { u8 net_type_idx, active, rsv[2]; } __packed;	/* 4 */
+
+struct cmd_set_bss_rlm_param {		/* fija el canal del BSS */
+	u8	net_type_idx, rf_band, primary_channel, rf_sco;
+	u8	erp_prot, ht_prot, gf_mode, tx_rifs;
+	__le16	ht_op3, ht_op2;
+	u8	ht_op1, short_preamble, short_slot, check_id;	/* check_id = 0x72 */
+} __packed;	/* 16 */
+
+struct cmd_set_bss_info {		/* "conectar a este BSS" */
+	u8	net_type_idx, conn_state, op_mode, ssid_len;
+	u8	ssid[32];
+	u8	bssid[6];
+	u8	is_qbss, rsv1;
+	__le16	op_rate_set, basic_rate_set;
+	u8	sta_rec_idx_of_ap, rsv2, rsv3, nonht_basic_phy;
+	u8	auth_mode, enc_status, phy_type_set;
+	u8	own_mac[6];
+	u8	wapi_mode, is_ap_mode, rsv[1];
+} __packed;	/* 64 */
+
+struct cmd_802_11_key {			/* instalar PTK/GTK (WPA2) */
+	u8	add_remove, tx_key, key_type, is_auth;
+	u8	peer_addr[6];
+	u8	net_type, algorithm_id, key_id, key_len, rsv[2];
+	u8	key_material[32];
+	u8	key_rsc[16];
+} __packed;	/* 64 */
+
+struct event_connection_status {	/* EVENT_ID_CONNECTION_STATUS (async, puerto 1) */
+	u8	media_status, reason, infra_mode, ssid_len;
+	u8	ssid[32];
+	u8	bssid[6];
+	u8	auth_mode, enc_status;
+	__le16	beacon_period, aid, atim;
+	u8	net_type, rsv[1];
+	__le32	freq_khz;
+} __packed;
+
 #endif /* _MT6582_WIFI_REG_H */

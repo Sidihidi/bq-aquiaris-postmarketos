@@ -81,6 +81,10 @@ struct mt6582_wifi {
 	struct task_struct	*rx_thread;	/* sondea el RX (beacons MGMT + eventos) */
 	u8			scan_seq;
 	bool			cfg_registered;
+	/* Fase 2: connect */
+	u8			mac[ETH_ALEN];		/* MAC permanente (de phase1) */
+	bool			connecting;
+	u8			connect_bssid[ETH_ALEN];
 };
 
 static struct mt6582_wifi *g_wifi;
@@ -381,8 +385,10 @@ static void wifi_phase1_hello(struct mt6582_wifi *w)
 	/* 1) MAC permanente: CMD_ID_BASIC_CONFIG (query) -> EVENT_ID_BASIC_CONFIG (MAC @body+0) */
 	wifi_send_cmd(w, CMD_ID_BASIC_CONFIG, 0, NULL, 0, sizeof(bc));
 	ret = wifi_poll_event(w, EVENT_ID_BASIC_CONFIG, bc, sizeof(bc), 1000);
-	if (!ret)
+	if (!ret) {
+		memcpy(w->mac, bc, ETH_ALEN);		/* para SET_BSS_INFO.own_mac */
 		dev_info(w->dev, "*** Fase1: MAC permanente = %pM ***\n", bc);
+	}
 	else
 		dev_warn(w->dev, "Fase1: BASIC_CONFIG sin respuesta (%d)\n", ret);
 	/* 2) capacidades: CMD_ID_GET_NIC_CAPABILITY (query) -> EVENT_ID_NIC_CAPABILITY */
@@ -573,12 +579,24 @@ static void wifi_rx_drain(struct mt6582_wifi *w)
 		struct wifi_event *ev = (void *)rx;
 
 		wifi_port1_read_pio(w, rx, ALIGN(l1, 4));
-		if ((le16_to_cpu(ev->packet_type) & HIF_RX_PKT_TYPE_MASK) == HIF_RX_PKT_TYPE_EVENT &&
-		    ev->eid == EVENT_ID_SCAN_DONE && w->scan_req) {
-			struct cfg80211_scan_info info = { .aborted = false };
+		if ((le16_to_cpu(ev->packet_type) & HIF_RX_PKT_TYPE_MASK) == HIF_RX_PKT_TYPE_EVENT) {
+			if (ev->eid == EVENT_ID_SCAN_DONE && w->scan_req) {
+				struct cfg80211_scan_info info = { .aborted = false };
 
-			cfg80211_scan_done(w->scan_req, &info);
-			w->scan_req = NULL;
+				cfg80211_scan_done(w->scan_req, &info);
+				w->scan_req = NULL;
+			} else if (ev->eid == EVENT_ID_CONNECTION_STATUS && w->connecting) {
+				struct event_connection_status *cs = (void *)(rx + sizeof(*ev));
+				bool ok = (cs->media_status == MEDIA_STATE_CONNECTED);
+
+				cfg80211_connect_result(w->ndev,
+					ok ? cs->bssid : w->connect_bssid, NULL, 0, NULL, 0,
+					ok ? WLAN_STATUS_SUCCESS : WLAN_STATUS_UNSPECIFIED_FAILURE,
+					GFP_ATOMIC);
+				w->connecting = false;
+				dev_info(w->dev, "*** EVENT_CONNECTION_STATUS media=%u (%s) %pM ***\n",
+					 cs->media_status, ok ? "CONNECTED" : "fail", cs->bssid);
+			}
 		}
 	}
 }
@@ -630,8 +648,113 @@ static int wifi_cfg_scan(struct wiphy *wiphy, struct cfg80211_scan_request *requ
 	return 0;
 }
 
+/* .connect (Fase 2): activa el BSS AIS + canal + SET_BSS_INFO (OPEN). El resultado llega async
+ * por EVENT_ID_CONNECTION_STATUS en el kthread RX -> cfg80211_connect_result. */
+static int wifi_cfg_connect(struct wiphy *wiphy, struct net_device *ndev,
+			    struct cfg80211_connect_params *sme)
+{
+	struct mt6582_wifi *w = g_wifi;
+	struct cmd_bss_activate act = { .net_type_idx = NETWORK_TYPE_AIS, .active = 1 };
+	struct cmd_set_bss_rlm_param rlm = {};
+	struct cmd_set_bss_info bss = {};
+	u32 ch = sme->channel ? sme->channel->hw_value : 1;
+
+	if (!w || !w->started)
+		return -ENODEV;
+	if (sme->ssid_len > 32)
+		return -EINVAL;
+	mutex_lock(&w->hif_lock);
+	if (sme->bssid)
+		memcpy(w->connect_bssid, sme->bssid, ETH_ALEN);
+	else
+		eth_zero_addr(w->connect_bssid);
+	wifi_send_cmd(w, CMD_ID_BSS_ACTIVATE_CTRL, 1, &act, sizeof(act), 0);
+	rlm.net_type_idx = NETWORK_TYPE_AIS;
+	rlm.rf_band = 1;			/* BAND_2G4 */
+	rlm.primary_channel = ch;
+	rlm.check_id = 0x72;
+	wifi_send_cmd(w, CMD_ID_SET_BSS_RLM_PARAM, 1, &rlm, sizeof(rlm), 0);
+	bss.net_type_idx = NETWORK_TYPE_AIS;
+	bss.conn_state = MEDIA_STATE_CONNECTED;
+	bss.op_mode = OP_MODE_INFRASTRUCTURE;
+	bss.ssid_len = sme->ssid_len;
+	memcpy(bss.ssid, sme->ssid, sme->ssid_len);
+	if (sme->bssid)
+		memcpy(bss.bssid, sme->bssid, ETH_ALEN);
+	bss.auth_mode = AUTH_MODE_OPEN;		/* OPEN primero */
+	bss.enc_status = ENC_STATUS_DISABLED;
+	memcpy(bss.own_mac, w->mac, ETH_ALEN);
+	wifi_send_cmd(w, CMD_ID_SET_BSS_INFO, 1, &bss, sizeof(bss), 0);
+	w->connecting = true;
+	mutex_unlock(&w->hif_lock);
+	dev_info(w->dev, "*** .connect: SSID='%.*s' ch=%u (OPEN) enviado ***\n",
+		 sme->ssid_len, sme->ssid, ch);
+	return 0;
+}
+
+static int wifi_cfg_disconnect(struct wiphy *wiphy, struct net_device *ndev, u16 reason)
+{
+	struct mt6582_wifi *w = g_wifi;
+	struct cmd_set_bss_info bss = {};
+
+	if (!w || !w->started)
+		return -ENODEV;
+	mutex_lock(&w->hif_lock);
+	bss.net_type_idx = NETWORK_TYPE_AIS;
+	bss.conn_state = MEDIA_STATE_DISCONNECTED;
+	bss.op_mode = OP_MODE_INFRASTRUCTURE;
+	memcpy(bss.own_mac, w->mac, ETH_ALEN);
+	wifi_send_cmd(w, CMD_ID_SET_BSS_INFO, 1, &bss, sizeof(bss), 0);
+	w->connecting = false;
+	mutex_unlock(&w->hif_lock);
+	cfg80211_disconnected(ndev, reason, NULL, 0, true, GFP_KERNEL);
+	dev_info(w->dev, "*** .disconnect enviado ***\n");
+	return 0;
+}
+
+/* .add_key (WPA2): PTK/GTK vía CMD_802_11_KEY. */
+static int wifi_cfg_add_key(struct wiphy *wiphy, struct net_device *ndev, int link_id,
+			    u8 key_idx, bool pairwise, const u8 *mac_addr,
+			    struct key_params *params)
+{
+	struct mt6582_wifi *w = g_wifi;
+	struct cmd_802_11_key k = {};
+
+	if (!w || !w->started || !params || params->key_len > 32)
+		return -EINVAL;
+	mutex_lock(&w->hif_lock);
+	k.add_remove = 1;
+	k.tx_key = 1;
+	k.key_type = pairwise ? 1 : 0;
+	if (mac_addr)
+		memcpy(k.peer_addr, mac_addr, ETH_ALEN);
+	k.algorithm_id = (params->cipher == WLAN_CIPHER_SUITE_CCMP) ? CIPHER_CCMP : CIPHER_NONE;
+	k.key_id = key_idx;
+	k.key_len = params->key_len;
+	memcpy(k.key_material, params->key, params->key_len);
+	wifi_send_cmd(w, CMD_ID_ADD_REMOVE_KEY, 1, &k, sizeof(k), 0);
+	mutex_unlock(&w->hif_lock);
+	return 0;
+}
+
+static int wifi_cfg_del_key(struct wiphy *wiphy, struct net_device *ndev, int link_id,
+			    u8 key_idx, bool pairwise, const u8 *mac_addr)
+{
+	return 0;	/* TODO: CMD_802_11_KEY add_remove=0 */
+}
+static int wifi_cfg_set_default_key(struct wiphy *wiphy, struct net_device *ndev, int link_id,
+				    u8 key_idx, bool unicast, bool multicast)
+{
+	return 0;	/* TODO: CMD_ID_DEFAULT_KEY_ID */
+}
+
 static struct cfg80211_ops wifi_cfg_ops = {
 	.scan = wifi_cfg_scan,
+	.connect = wifi_cfg_connect,
+	.disconnect = wifi_cfg_disconnect,
+	.add_key = wifi_cfg_add_key,
+	.del_key = wifi_cfg_del_key,
+	.set_default_key = wifi_cfg_set_default_key,
 };
 
 static int wifi_ndo_open(struct net_device *ndev)
