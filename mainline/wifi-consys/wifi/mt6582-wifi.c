@@ -655,40 +655,77 @@ static int wifi_cfg_connect(struct wiphy *wiphy, struct net_device *ndev,
 {
 	struct mt6582_wifi *w = g_wifi;
 	struct cmd_bss_activate act = { .net_type_idx = NETWORK_TYPE_AIS, .active = 1 };
-	struct cmd_set_bss_rlm_param rlm = {};
+	struct cmd_update_sta_record sta = {};
 	struct cmd_set_bss_info bss = {};
-	u32 ch = sme->channel ? sme->channel->hw_value : 1;
+	struct cfg80211_bss *cbss = NULL;
+	u8 bssid[ETH_ALEN];
+	u32 ch;
 
 	if (!w || !w->started)
 		return -ENODEV;
 	if (sme->ssid_len > 32)
 		return -EINVAL;
+
+	/* Necesitamos el BSSID + canal del AP: de sme, o de la caché del scan (cfg80211). */
+	if (sme->bssid && sme->channel) {
+		memcpy(bssid, sme->bssid, ETH_ALEN);
+		ch = sme->channel->hw_value;
+	} else {
+		cbss = cfg80211_get_bss(wiphy, sme->channel, sme->bssid,
+					sme->ssid, sme->ssid_len,
+					IEEE80211_BSS_TYPE_ESS, IEEE80211_PRIVACY_ANY);
+		if (!cbss) {
+			dev_warn(w->dev, ".connect: '%.*s' no está en la caché — escanea antes\n",
+				 sme->ssid_len, sme->ssid);
+			return -ENOENT;
+		}
+		memcpy(bssid, cbss->bssid, ETH_ALEN);
+		ch = cbss->channel->hw_value;
+		cfg80211_put_bss(wiphy, cbss);
+	}
+
 	mutex_lock(&w->hif_lock);
-	if (sme->bssid)
-		memcpy(w->connect_bssid, sme->bssid, ETH_ALEN);
-	else
-		eth_zero_addr(w->connect_bssid);
+	memcpy(w->connect_bssid, bssid, ETH_ALEN);
+
+	/* 1) activar el BSS AIS */
 	wifi_send_cmd(w, CMD_ID_BSS_ACTIVATE_CTRL, 1, &act, sizeof(act), 0);
-	rlm.net_type_idx = NETWORK_TYPE_AIS;
-	rlm.rf_band = 1;			/* BAND_2G4 */
-	rlm.primary_channel = ch;
-	rlm.check_id = 0x72;
-	wifi_send_cmd(w, CMD_ID_SET_BSS_RLM_PARAM, 1, &rlm, sizeof(rlm), 0);
+
+	/* 2) STA-record del AP (idx 1) — IMPRESCINDIBLE: sin él el FW no sabe a quién asociar */
+	sta.index = 1;
+	sta.sta_type = STA_TYPE_LEGACY_AP;
+	memcpy(sta.mac_addr, bssid, ETH_ALEN);
+	sta.net_type_index = NETWORK_TYPE_AIS;
+	sta.desired_phy_type_set = PHY_TYPE_SET_802_11BG;
+	sta.desired_nonht_rate_set = cpu_to_le16(RATE_SET_ERP);
+	sta.bss_basic_rate_set = cpu_to_le16(BASIC_RATE_SET_ERP);
+	sta.sta_state = STA_STATE_3;
+	wifi_send_cmd(w, CMD_ID_UPDATE_STA_RECORD, 1, &sta, sizeof(sta), 0);
+
+	/* 3) SET_BSS_INFO con el canal (RLM embebido) + sta_rec_idx_of_ap */
 	bss.net_type_idx = NETWORK_TYPE_AIS;
 	bss.conn_state = MEDIA_STATE_CONNECTED;
 	bss.op_mode = OP_MODE_INFRASTRUCTURE;
 	bss.ssid_len = sme->ssid_len;
 	memcpy(bss.ssid, sme->ssid, sme->ssid_len);
-	if (sme->bssid)
-		memcpy(bss.bssid, sme->bssid, ETH_ALEN);
-	bss.auth_mode = AUTH_MODE_OPEN;		/* OPEN primero */
+	memcpy(bss.bssid, bssid, ETH_ALEN);
+	bss.op_rate_set = cpu_to_le16(RATE_SET_ERP);
+	bss.basic_rate_set = cpu_to_le16(BASIC_RATE_SET_ERP);
+	bss.sta_rec_idx_of_ap = 1;
+	bss.nonht_basic_phy = PHY_TYPE_SET_802_11BG;
+	bss.auth_mode = AUTH_MODE_OPEN;
 	bss.enc_status = ENC_STATUS_DISABLED;
+	bss.phy_type_set = PHY_TYPE_SET_802_11BG;
 	memcpy(bss.own_mac, w->mac, ETH_ALEN);
+	bss.rlm.net_type_idx = NETWORK_TYPE_AIS;
+	bss.rlm.rf_band = 1;			/* BAND_2G4 */
+	bss.rlm.primary_channel = ch;
+	bss.rlm.check_id = 0x72;
 	wifi_send_cmd(w, CMD_ID_SET_BSS_INFO, 1, &bss, sizeof(bss), 0);
+
 	w->connecting = true;
 	mutex_unlock(&w->hif_lock);
-	dev_info(w->dev, "*** .connect: SSID='%.*s' ch=%u (OPEN) enviado ***\n",
-		 sme->ssid_len, sme->ssid, ch);
+	dev_info(w->dev, "*** .connect: SSID='%.*s' ch=%u BSSID=%pM (OPEN+STA-rec) enviado ***\n",
+		 sme->ssid_len, sme->ssid, ch, bssid);
 	return 0;
 }
 

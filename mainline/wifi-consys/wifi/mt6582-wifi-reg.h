@@ -274,7 +274,7 @@ struct cmd_set_domain_info {
 #define CMD_ID_BSS_ACTIVATE_CTRL	0x15
 #define CMD_ID_SET_BSS_INFO		0x16
 #define CMD_ID_UPDATE_STA_RECORD	0x17
-#define CMD_ID_SET_BSS_RLM_PARAM	0x18	/* canal (provisional, afinar si falla) */
+#define CMD_ID_SET_BSS_RLM_PARAM	0x1d	/* canal (REAL=0x1d; 0x18 era REMOVE_STA_RECORD!). Va EMBEBIDO en SET_BSS_INFO */
 #define EVENT_ID_CONNECTION_STATUS	0x03
 #define OP_MODE_INFRASTRUCTURE		0
 #define MEDIA_STATE_CONNECTED		0
@@ -283,6 +283,13 @@ struct cmd_set_domain_info {
 #define ENC_STATUS_DISABLED		0
 #define CIPHER_NONE			0
 #define CIPHER_CCMP			4
+/* valores para el STA-record del AP (de wlan_def.h): LEGACY_AP=BIT(0)|BIT(6); STATE_3=2;
+ * BG=HR_DSSS(0)|ERP(1); RATE_SET_ERP=1..54M; BASIC_RATE_SET_ERP=1/2/5.5/11M */
+#define STA_TYPE_LEGACY_AP		0x41
+#define STA_STATE_3			2
+#define PHY_TYPE_SET_802_11BG		0x03
+#define RATE_SET_ERP			0x0fff
+#define BASIC_RATE_SET_ERP		0x000f
 
 struct cmd_bss_activate { u8 net_type_idx, active, rsv[2]; } __packed;	/* 4 */
 
@@ -303,7 +310,25 @@ struct cmd_set_bss_info {		/* "conectar a este BSS" */
 	u8	auth_mode, enc_status, phy_type_set;
 	u8	own_mac[6];
 	u8	wapi_mode, is_ap_mode, rsv[1];
-} __packed;	/* 64 */
+	struct cmd_set_bss_rlm_param rlm;	/* rBssRlmParam EMBEBIDO (canal) — el real lo lleva dentro */
+} __packed;	/* 80 */
+
+struct cmd_update_sta_record {		/* CMD_ID_UPDATE_STA_RECORD (0x17) — el registro del AP peer */
+	u8	index;			/* sta_rec_idx -> SET_BSS_INFO.sta_rec_idx_of_ap */
+	u8	sta_type;		/* STA_TYPE_LEGACY_AP */
+	u8	mac_addr[6];		/* BSSID del AP */
+	__le16	aid, listen_interval;
+	u8	net_type_index;		/* NETWORK_TYPE_AIS */
+	u8	desired_phy_type_set;	/* PHY_TYPE_SET_802_11BG */
+	__le16	desired_nonht_rate_set;	/* RATE_SET_ERP */
+	__le16	bss_basic_rate_set;	/* BASIC_RATE_SET_ERP */
+	u8	is_qos, is_uapsd_sup, sta_state, mcs_set;
+	u8	sup_mcs32, ampdu_param;
+	__le16	ht_cap_info, ht_ext_cap;
+	__le32	tx_beamforming_cap;
+	u8	asel_cap, rcpi, need_resp, uapsd_ac, uapsd_sp;
+	u8	rsv[3];
+} __packed;	/* 40 */
 
 struct cmd_802_11_key {			/* instalar PTK/GTK (WPA2) */
 	u8	add_remove, tx_key, key_type, is_auth;
