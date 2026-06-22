@@ -559,6 +559,10 @@ static void wifi_rx_mgmt(struct mt6582_wifi *w, u8 *rx, u32 plen)
 	struct ieee80211_channel *ch;
 	struct cfg80211_bss *bss;
 
+	/* AUTH(11)/ASSOC-RESP(1)/DEAUTH(12)/DISASSOC(10) = respuesta del AP a nuestro mgmt-TX (SAA) */
+	if (subtype == 11 || subtype == 1 || subtype == 12 || subtype == 10)
+		dev_info(w->dev, "*** mgmt-RX subtype=%u len=%u %*ph ***\n",
+			 subtype, flen, min_t(int, flen, 30), frame);
 	if ((subtype != 8 && subtype != 5) || flen < 36 || !w->wiphy)
 		return;
 	ch = ieee80211_get_channel(w->wiphy,
@@ -676,6 +680,47 @@ static int wifi_cfg_scan(struct wiphy *wiphy, struct cfg80211_scan_request *requ
 	return 0;
 }
 
+/* enviar un frame de GESTIÓN 802.11 (AUTH/ASSOC) por TC4/puerto-1 con HIF_TX_HEADER de 16B
+ * (PKT_TYPE=MGMT). El caller debe tener hif_lock. *** El MT6582 es softMAC: el HOST manda los
+ * frames de auth/assoc (no el FW) — módulo SAA del downstream. *** */
+static void wifi_send_mgmt(struct mt6582_wifi *w, const void *frame, u16 frame_len, u8 sta_idx)
+{
+	struct hif_tx_header *h = (void *)w->dlm;
+	u16 total = sizeof(*h) + frame_len;
+
+	memset(h, 0, sizeof(*h));
+	h->tx_byte_count_up = cpu_to_le16(total & 0x0fff);
+	h->ether_type_offset = (sizeof(*h) + 24) >> 1;	/* mgmt: cabecera 802.11 = 24B, sin LLC */
+	h->resource_pkttype_cs = (WIFI_TC4 << HIF_TX_RESOURCE_SHIFT) |
+				 (HIF_TX_PKT_TYPE_MGMT << HIF_TX_PKT_TYPE_SHIFT);	/* 0xD0 */
+	h->wlan_header_len = 24;
+	h->pktfmt_flags = HIF_TX_FLAG_802_11;		/* frame 802.11 crudo (net_type AIS=0) */
+	h->sta_rec_idx = sta_idx;
+	h->ack_bip_rate = HIF_TX_NEED_ACK;
+	memcpy((u8 *)w->dlm + sizeof(*h), frame, frame_len);
+	wifi_port1_write_pio(w, w->dlm, total);
+}
+
+/* construir y enviar un AUTH Open-System (seq=N) al AP (paso 1 del SAA). */
+static void wifi_send_auth(struct mt6582_wifi *w, const u8 *bssid, u16 seq)
+{
+	struct {
+		__le16 fc, dur;
+		u8 da[6], sa[6], bssid[6];
+		__le16 seq_ctrl, alg, auth_seq, status;
+	} __packed f;
+
+	memset(&f, 0, sizeof(f));
+	f.fc = cpu_to_le16(IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_AUTH);	/* 0x00b0 */
+	memcpy(f.da, bssid, ETH_ALEN);
+	memcpy(f.sa, w->mac, ETH_ALEN);
+	memcpy(f.bssid, bssid, ETH_ALEN);
+	f.alg = cpu_to_le16(0);			/* Open System */
+	f.auth_seq = cpu_to_le16(seq);
+	wifi_send_mgmt(w, &f, sizeof(f), 1);
+	dev_info(w->dev, "*** mgmt-TX: AUTH open seq=%u -> %pM ***\n", seq, bssid);
+}
+
 /* .connect (Fase 2): activa el BSS AIS + canal + SET_BSS_INFO (OPEN). El resultado llega async
  * por EVENT_ID_CONNECTION_STATUS en el kthread RX -> cfg80211_connect_result. */
 static int wifi_cfg_connect(struct wiphy *wiphy, struct net_device *ndev,
@@ -737,7 +782,7 @@ static int wifi_cfg_connect(struct wiphy *wiphy, struct net_device *ndev,
 	sta.desired_phy_type_set = PHY_TYPE_SET_802_11BG;
 	sta.desired_nonht_rate_set = cpu_to_le16(RATE_SET_ERP);
 	sta.bss_basic_rate_set = cpu_to_le16(BASIC_RATE_SET_ERP);
-	sta.sta_state = STA_STATE_3;
+	sta.sta_state = STA_STATE_1;	/* auth pendiente: el host hará el handshake AUTH/ASSOC (SAA) */
 	wifi_send_cmd(w, CMD_ID_UPDATE_STA_RECORD, 1, &sta, sizeof(sta), 0);
 
 	/* 3) SET_BSS_INFO con el canal (RLM embebido) + sta_rec_idx_of_ap */
@@ -760,6 +805,10 @@ static int wifi_cfg_connect(struct wiphy *wiphy, struct net_device *ndev,
 	bss.rlm.primary_channel = ch;
 	bss.rlm.check_id = 0x72;
 	wifi_send_cmd(w, CMD_ID_SET_BSS_INFO, 1, &bss, sizeof(bss), 0);
+
+	/* Fase 3 (softMAC): el host inicia el handshake — manda el AUTH Open seq=1. La respuesta
+	 * (AUTH seq=2) llega como mgmt-RX por el puerto 0; luego tocará el ASSOC-REQ. */
+	wifi_send_auth(w, bssid, 1);
 
 	w->connecting = true;
 	mutex_unlock(&w->hif_lock);
