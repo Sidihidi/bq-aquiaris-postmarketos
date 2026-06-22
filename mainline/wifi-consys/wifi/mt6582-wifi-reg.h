@@ -275,7 +275,11 @@ struct cmd_set_domain_info {
 #define CMD_ID_SET_BSS_INFO		0x16
 #define CMD_ID_UPDATE_STA_RECORD	0x17
 #define CMD_ID_SET_BSS_RLM_PARAM	0x1d	/* canal (REAL=0x1d; 0x18 era REMOVE_STA_RECORD!). Va EMBEBIDO en SET_BSS_INFO */
+#define CMD_ID_CH_PRIVILEGE		0x20	/* conceder el canal ANTES del TX auth/assoc */
 #define EVENT_ID_CONNECTION_STATUS	0x03
+#define EVENT_ID_CH_PRIVILEGE		0x18	/* grant del canal (async) */
+#define CMD_CH_ACTION_REQ		0
+#define EVENT_CH_STATUS_GRANT		0
 #define OP_MODE_INFRASTRUCTURE		0
 #define MEDIA_STATE_CONNECTED		0
 #define MEDIA_STATE_DISCONNECTED	1
@@ -312,6 +316,14 @@ struct cmd_set_bss_info {		/* "conectar a este BSS" */
 	u8	wapi_mode, is_ap_mode, rsv[1];
 	struct cmd_set_bss_rlm_param rlm;	/* rBssRlmParam EMBEBIDO (canal) — el real lo lleva dentro */
 } __packed;	/* 80 */
+
+struct cmd_ch_privilege {		/* CMD_ID_CH_PRIVILEGE (0x20) — pide el canal antes del TX auth/assoc */
+	u8	net_type_idx, token_id, action, primary_channel;
+	u8	rf_sco, rf_band, req_type, rsv;
+	__le32	max_interval;		/* ms */
+	u8	bssid[6];
+	u8	rsv2[2];
+} __packed;	/* 20 */
 
 struct cmd_update_sta_record {		/* CMD_ID_UPDATE_STA_RECORD (0x17) — el registro del AP peer */
 	u8	index;			/* sta_rec_idx -> SET_BSS_INFO.sta_rec_idx_of_ap */

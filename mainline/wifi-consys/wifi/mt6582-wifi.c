@@ -657,6 +657,7 @@ static int wifi_cfg_connect(struct wiphy *wiphy, struct net_device *ndev,
 	struct cmd_bss_activate act = { .net_type_idx = NETWORK_TYPE_AIS, .active = 1 };
 	struct cmd_update_sta_record sta = {};
 	struct cmd_set_bss_info bss = {};
+	struct cmd_ch_privilege chp = {};
 	struct cfg80211_bss *cbss = NULL;
 	u8 bssid[ETH_ALEN];
 	u32 ch;
@@ -686,6 +687,16 @@ static int wifi_cfg_connect(struct wiphy *wiphy, struct net_device *ndev,
 
 	mutex_lock(&w->hif_lock);
 	memcpy(w->connect_bssid, bssid, ETH_ALEN);
+
+	/* 0) CH_PRIVILEGE: pedir/conceder el canal — sin esto el FW no puede TX el auth/assoc */
+	chp.net_type_idx = NETWORK_TYPE_AIS;
+	chp.action = CMD_CH_ACTION_REQ;
+	chp.primary_channel = ch;
+	chp.rf_band = 1;			/* BAND_2G4 */
+	chp.max_interval = cpu_to_le32(5000);
+	memcpy(chp.bssid, bssid, ETH_ALEN);
+	wifi_send_cmd(w, CMD_ID_CH_PRIVILEGE, 1, &chp, sizeof(chp), 0);
+	msleep(60);			/* dar tiempo al grant del canal antes del auth/assoc */
 
 	/* 1) activar el BSS AIS */
 	wifi_send_cmd(w, CMD_ID_BSS_ACTIVATE_CTRL, 1, &act, sizeof(act), 0);
@@ -724,7 +735,7 @@ static int wifi_cfg_connect(struct wiphy *wiphy, struct net_device *ndev,
 
 	w->connecting = true;
 	mutex_unlock(&w->hif_lock);
-	dev_info(w->dev, "*** .connect: SSID='%.*s' ch=%u BSSID=%pM (OPEN+STA-rec) enviado ***\n",
+	dev_info(w->dev, "*** .connect: SSID='%.*s' ch=%u BSSID=%pM (OPEN+CHPRIV+STA-rec) enviado ***\n",
 		 sme->ssid_len, sme->ssid, ch, bssid);
 	return 0;
 }
