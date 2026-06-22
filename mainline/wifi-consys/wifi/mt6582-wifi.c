@@ -80,6 +80,7 @@ struct mt6582_wifi {
 	unsigned long		scan_deadline;	/* jiffies: forzar scan_done si el FW no manda SCAN_DONE */
 	struct task_struct	*rx_thread;	/* sondea el RX (beacons MGMT + eventos) */
 	u8			scan_seq;
+	u8			mgmt_seq;	/* tx-seq de frames mgmt: !=0 => el FW manda EVENT_ID_TX_DONE */
 	bool			cfg_registered;
 	/* Fase 2: connect */
 	u8			mac[ETH_ALEN];		/* MAC permanente (de phase1) */
@@ -589,6 +590,13 @@ static void wifi_handle_event(struct mt6582_wifi *w, u8 *rx, u32 len)
 		cfg80211_scan_done(w->scan_req, &info);
 		w->scan_req = NULL;
 		dev_info(w->dev, "*** SCAN_DONE ***\n");
+	} else if (ev->eid == EVENT_ID_TX_DONE) {
+		u8 seq = rx[8], st = rx[9];	/* EVENT_TX_DONE_T: body[0]=seq, body[1]=status TX_RESULT */
+
+		dev_info(w->dev, "*** TX-DONE seq=%u status=%u (%s) ***\n", seq, st,
+			 st == 0 ? "SUCCESS transmitido+ACK" :
+			 st == 1 ? "LIFE_TIMEOUT (sin ACK del AP)" :
+			 st == 3 ? "MPDU_ERROR" : "fallo-TX");
 	} else if (ev->eid == EVENT_ID_CONNECTION_STATUS && w->connecting) {
 		struct event_connection_status *cs = (void *)(rx + sizeof(*ev));
 		bool ok = (cs->media_status == MEDIA_STATE_CONNECTED);
@@ -697,6 +705,9 @@ static void wifi_send_mgmt(struct mt6582_wifi *w, const void *frame, u16 frame_l
 	h->pktfmt_flags = HIF_TX_FLAG_802_11;		/* frame 802.11 crudo (net_type AIS=0) */
 	h->sta_rec_idx = sta_idx;
 	h->ack_bip_rate = HIF_TX_NEED_ACK;
+	if (++w->mgmt_seq == 0)		/* pkt_seq != 0 => el FW reporta EVENT_ID_TX_DONE con el status */
+		w->mgmt_seq = 1;
+	h->pkt_seq = w->mgmt_seq;
 	memcpy((u8 *)w->dlm + sizeof(*h), frame, frame_len);
 	wifi_port1_write_pio(w, w->dlm, total);
 }
@@ -721,15 +732,43 @@ static void wifi_send_auth(struct mt6582_wifi *w, const u8 *bssid, u16 seq)
 	dev_info(w->dev, "*** mgmt-TX: AUTH open seq=%u -> %pM ***\n", seq, bssid);
 }
 
-/* .connect (Fase 2): activa el BSS AIS + canal + SET_BSS_INFO (OPEN). El resultado llega async
- * por EVENT_ID_CONNECTION_STATUS en el kthread RX -> cfg80211_connect_result. */
+/* esperar el grant del canal (EVENT_ID_CH_PRIVILEGE, 0x18) por el puerto 0; ignora beacons/heartbeats.
+ * El downstream BLOQUEA aquí antes del JOIN — sin el grant el BSS queda off-channel (BSS-ABSENCE 0x19)
+ * y el AUTH se descarta (TX FLUSHED). Caller con hif_lock (el kthread no compite). */
+static bool wifi_wait_grant(struct mt6582_wifi *w, u32 ms)
+{
+	u8 rx[1600];
+	u32 t;
+
+	for (t = 0; t < ms; t += 5) {
+		u32 wrplr = rd(w->hif, MCR_WRPLR);
+		u32 l0 = WRPLR_RX0_LEN(wrplr);
+
+		if (l0 && ALIGN(l0, 4) <= sizeof(rx)) {
+			struct wifi_event *ev = (void *)rx;
+
+			wifi_port_read_pio(w, rx, ALIGN(l0, 4));
+			if ((le16_to_cpu(ev->packet_type) & HIF_RX_PKT_TYPE_MASK) == HIF_RX_PKT_TYPE_EVENT &&
+			    ev->eid == EVENT_ID_CH_PRIVILEGE) {
+				dev_info(w->dev, "*** CH_PRIVILEGE GRANT recibido ***\n");
+				return true;
+			}
+		} else {
+			msleep(5);
+		}
+	}
+	return false;
+}
+
+/* .connect (softMAC, coreografía verificada del downstream): BSS_ACTIVATE -> CH_PRIVILEGE(REQ) ->
+ * ESPERAR el grant (0x18) -> UPDATE_STA_RECORD(STATE_1) -> AUTH. SIN SET_BSS_INFO (solo tras el assoc).
+ * El connect lo conduce el HOST (SAA): AUTH/ASSOC por mgmt-TX, respuestas por mgmt-RX (puerto 0). */
 static int wifi_cfg_connect(struct wiphy *wiphy, struct net_device *ndev,
 			    struct cfg80211_connect_params *sme)
 {
 	struct mt6582_wifi *w = g_wifi;
 	struct cmd_bss_activate act = { .net_type_idx = NETWORK_TYPE_AIS, .active = 1 };
 	struct cmd_update_sta_record sta = {};
-	struct cmd_set_bss_info bss = {};
 	struct cmd_ch_privilege chp = {};
 	struct cfg80211_bss *cbss = NULL;
 	u8 bssid[ETH_ALEN];
@@ -761,7 +800,11 @@ static int wifi_cfg_connect(struct wiphy *wiphy, struct net_device *ndev,
 	mutex_lock(&w->hif_lock);
 	memcpy(w->connect_bssid, bssid, ETH_ALEN);
 
-	/* 0) CH_PRIVILEGE: pedir/conceder el canal — sin esto el FW no puede TX el auth/assoc */
+	/* 1) activar la red/BSS AIS (active=1) — ANTES del CH_PRIVILEGE (el downstream lo hace en SEARCH) */
+	wifi_send_cmd(w, CMD_ID_BSS_ACTIVATE_CTRL, 1, &act, sizeof(act), 0);
+
+	/* 2) CH_PRIVILEGE(REQ) y BLOQUEAR hasta el grant (0x18). Saltarse esto = BSS off-channel
+	 *    (EVENT 0x19 BSS-ABSENCE) y el AUTH descartado (TX FLUSHED). El msleep NO equivale al grant. */
 	chp.net_type_idx = NETWORK_TYPE_AIS;
 	chp.action = CMD_CH_ACTION_REQ;
 	chp.primary_channel = ch;
@@ -769,10 +812,8 @@ static int wifi_cfg_connect(struct wiphy *wiphy, struct net_device *ndev,
 	chp.max_interval = cpu_to_le32(5000);
 	memcpy(chp.bssid, bssid, ETH_ALEN);
 	wifi_send_cmd(w, CMD_ID_CH_PRIVILEGE, 1, &chp, sizeof(chp), 0);
-	msleep(60);			/* dar tiempo al grant del canal antes del auth/assoc */
-
-	/* 1) activar el BSS AIS */
-	wifi_send_cmd(w, CMD_ID_BSS_ACTIVATE_CTRL, 1, &act, sizeof(act), 0);
+	if (!wifi_wait_grant(w, 1000))
+		dev_warn(w->dev, ".connect: sin grant CH_PRIVILEGE en 1s\n");
 
 	/* 2) STA-record del AP (idx 1) — IMPRESCINDIBLE: sin él el FW no sabe a quién asociar */
 	sta.index = 1;
@@ -785,29 +826,9 @@ static int wifi_cfg_connect(struct wiphy *wiphy, struct net_device *ndev,
 	sta.sta_state = STA_STATE_1;	/* auth pendiente: el host hará el handshake AUTH/ASSOC (SAA) */
 	wifi_send_cmd(w, CMD_ID_UPDATE_STA_RECORD, 1, &sta, sizeof(sta), 0);
 
-	/* 3) SET_BSS_INFO con el canal (RLM embebido) + sta_rec_idx_of_ap */
-	bss.net_type_idx = NETWORK_TYPE_AIS;
-	bss.conn_state = MEDIA_STATE_CONNECTED;
-	bss.op_mode = OP_MODE_INFRASTRUCTURE;
-	bss.ssid_len = sme->ssid_len;
-	memcpy(bss.ssid, sme->ssid, sme->ssid_len);
-	memcpy(bss.bssid, bssid, ETH_ALEN);
-	bss.op_rate_set = cpu_to_le16(RATE_SET_ERP);
-	bss.basic_rate_set = cpu_to_le16(BASIC_RATE_SET_ERP);
-	bss.sta_rec_idx_of_ap = 1;
-	bss.nonht_basic_phy = PHY_TYPE_SET_802_11BG;
-	bss.auth_mode = AUTH_MODE_OPEN;
-	bss.enc_status = ENC_STATUS_DISABLED;
-	bss.phy_type_set = PHY_TYPE_SET_802_11BG;
-	memcpy(bss.own_mac, w->mac, ETH_ALEN);
-	bss.rlm.net_type_idx = NETWORK_TYPE_AIS;
-	bss.rlm.rf_band = 1;			/* BAND_2G4 */
-	bss.rlm.primary_channel = ch;
-	bss.rlm.check_id = 0x72;
-	wifi_send_cmd(w, CMD_ID_SET_BSS_INFO, 1, &bss, sizeof(bss), 0);
-
-	/* Fase 3 (softMAC): el host inicia el handshake — manda el AUTH Open seq=1. La respuesta
-	 * (AUTH seq=2) llega como mgmt-RX por el puerto 0; luego tocará el ASSOC-REQ. */
+	/* 4) el host arranca el handshake: AUTH Open seq=1. *** SIN SET_BSS_INFO aquí ***: el downstream
+	 *    solo manda SET_BSS_INFO en JoinComplete (tras el assoc-rsp); mandarlo antes confunde al FW
+	 *    (MPDU_ERROR). La respuesta (AUTH seq=2) llega como mgmt-RX por el puerto 0; luego el ASSOC-REQ. */
 	wifi_send_auth(w, bssid, 1);
 
 	w->connecting = true;
