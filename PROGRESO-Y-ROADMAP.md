@@ -26,7 +26,7 @@ Y un **quinto LOGRADO (2026-06-22)**: **cfg80211 `wlan0` CERRADO** — `wlan0` r
 - **Vie 19** — Tesis HIF confirmada en HW: `func_on(WIFI)` exportado del btif + `WCIR=0x00106582` (el WiFi responde por el bloque HIF @0x180F0000). Descarga de firmware empezada.
 - **Sáb 20** — Descarga de firmware **al 100%** (HSTCR, firmware device-correcto, parches 1432), pero `WLAN_READY` **timeout** (el MAC no arranca). Captura del Android stock (KitKat/Lineage) como verdad de referencia.
 - **Dom 21** — **BREAKTHROUGH**: un subagente RE-ando el `conn_soc` halló la **calibración RF** que faltaba → **`WLAN_READY=1`** al primer intento. BT emparejado (S24). Protocolo GPS `0xAAF0` capturado.
-- **Lun 22** — **cmd/event** (NIC_CAPABILITY + MAC), **SCAN funcionando (14 beacons reales)**, **cfg80211 wiphy/netdev** implementado (compila; registro en debug).
+- **Lun 22** — **cmd/event** (NIC_CAPABILITY + MAC), **SCAN (14 beacons)**, **cfg80211 `wlan0` CERRADO** (`iw scan` lista 16 redes desde userspace), **Fase 2 `.connect` implementada**, y **BOOT arreglado de raíz** (mutex en el bring-up). _(El connect + scan-flaky se afinan en casa.)_
 
 ---
 
@@ -41,9 +41,9 @@ Y un **quinto LOGRADO (2026-06-22)**: **cfg80211 `wlan0` CERRADO** — `wlan0` r
 | **WiFi cmd/event** | ✅ | El FW responde NIC_CAPABILITY + MAC (TC4/puerto-1) |
 | **WiFi SCAN** | ✅ | 14 beacons reales escaneados (cmd puerto-1, beacons MGMT puerto-0) |
 | **WiFi cfg80211 / `wlan0`** | ✅ | **wlan0 registra + `iw dev wlan0 scan` lista 16 redes reales** (Open-UPCT, eduroam, cpcd…) → cfg80211→userspace OK. Falta NM/Phosh + connect |
-| **WiFi connect** | ⬜ | Fase 2 (no empezada) — `.connect`/`.add_key` |
+| **WiFi connect** | 🟡 | Fase 2 `.connect` **IMPLEMENTADA** (CH_PRIVILEGE→BSS_ACTIVATE→UPDATE_STA_RECORD→SET_BSS_INFO); `wpa_supplicant` arranca `wlan0`. Falta confirmar **ASSOC** (bloqueo = scan flaky) |
 | **GPS** | 🟡 | Protocolo `0xAAF0` decodificado + bridge nativo escrito; falta 1 recaptura (comando RUN) |
-| Boot | 🟡 | Estable la mayoría de veces, pero **sshd cae intermitentemente** (≈1/4 reboots) → power-cycle |
+| **Boot** | ✅ | **ARREGLADO DE RAÍZ** (Mac): era carrera (3 disparos sin serializar del bring-up CONSYS) + atasco D-state → **mutex en btif + `zz-consys-bt` async**. Se acabaron los power-cycles |
 
 ---
 
@@ -51,11 +51,9 @@ Y un **quinto LOGRADO (2026-06-22)**: **cfg80211 `wlan0` CERRADO** — `wlan0` r
 
 ### 🔴 Inmediato (1-2 sesiones)
 
-1. **Cerrar cfg80211 / `wlan0`** (el WiFi ya escanea a nivel driver; falta exponerlo a userspace).
-   - Power-cycle → re-disparar el bring-up (`echo 1 > /sys/kernel/debug/mt6582_wifi/bringup`) → leer el `dmesg`: aparecerá `cfg80211: wiphy_register=<err>` / `register_netdev=<err>` / `alloc_netdev fallo` → arreglar ese paso.
-   - Sospechas: el orden/uso de `wiphy_apply_custom_regulatory`, o el `wireless_dev` embebido (`w->wdev`).
-   - Instalar `iw` en el teléfono (`apk add iw` vía NAT, o binario static) → **`iw wlan0 scan`** debe listar las redes → NetworkManager.
-   - Nota regdb: cfg80211 built-in pide `regulatory.db` a los 0.96 s (antes de montar el rootfs SD) → `-2`; el `REGULATORY_CUSTOM_REG` (regd propio) debería hacerlo irrelevante; si no, meter el regdb en el initramfs.
+1. **WiFi: confirmar el CONNECT + arreglar el SCAN FLAKY** (cfg80211 + `.connect` YA implementados por la sesión del Mac).
+   - **Bloqueo nº1 = scan flaky**: el RX devuelve **0 beacons en muchos boots** (en los buenos, ~16 redes). Investigar: el `.scan` es PASIVO (probar activo), `regulatory.db -2` (country 00 DFS-UNSET → ¿solo pasivo / canales restringidos?), ¿RF-cal del MAC flaky por boot? → meter el regdb en el initramfs o `iw reg set ES`.
+   - **Probar el connect**: `iw scan` hasta cachear el SSID **+ `iw connect` en el MISMO comando** (la caché cfg80211 expira ~30s) → esperar `EVENT_CONNECTION_STATUS media=2` → `iw dev wlan0 link` = Connected. Si no asocia con CH_PRIVILEGE: revisar el orden en `mgmt/ais_fsm.c` (¿esperar `EVENT_CH_PRIVILEGE` grant antes del assoc?).
 
 2. **GPS al 100%** (protocolo ya decodificado; falta el comando RUN exacto).
    - Flashear Lineage (sector 83968, `lineage13-boot.img`) → **trigger = GPSLogger** (`am start -n com.mendhak.gpslogger/.shortcuts.ShortcutStart`, NO la UI de ajustes) → `strace -p $(pidof mnld) -s 1024` → el `t=0x05` exacto + un frame `0x30` completo (con cielo) → pegar en `mtkgps_aaf0.c` → NMEA real → gpsd → Phosh.
@@ -66,7 +64,7 @@ Y un **quinto LOGRADO (2026-06-22)**: **cfg80211 `wlan0` CERRADO** — `wlan0` r
 3. **WiFi Fase 2 — conectar a una red WPA2** (tras cfg80211).
    - `.connect`: `CMD_ID_INFRASTRUCTURE` + `CMD_ID_SET_BSS_INFO` + STA-record; `.add_key`: `CMD_ID_ADD_REMOVE_KEY`. Coreografía en `mgmt/ais_fsm.c` del downstream. Objetivo: `wpa_cli status = COMPLETED`.
 
-4. **Estabilizar el boot** — el `sshd`-down recurrente (lleva varios power-cycles) merece un fix: endurecer `zz-sshd.start` (bucle de reintento más robusto) o investigar el cuelgue temprano de runlevel boot.
+4. **Boot — ✅ YA ARREGLADO DE RAÍZ** (Mac: mutex en el btif + `zz-consys-bt` async; causa = carrera + atasco D-state). Si recae, ver `reference_mt6582_boot_stability`.
 
 ### 🟪 Medio plazo
 
@@ -79,10 +77,12 @@ Y un **quinto LOGRADO (2026-06-22)**: **cfg80211 `wlan0` CERRADO** — `wlan0` r
 
 | Fichero | Qué es | Commit |
 |---|---|---|
-| `mainline/drivers/mt6582-btif.c` | btif con la **calibración RF** (arranca BT/GPS/MAC) | `daa77829` |
-| `mainline/drivers/mt6582-wifi.c` | driver WiFi: cmd/event + scan + cfg80211 | `1b47c5b0` |
-| `mainline/drivers/mt6582-wifi-reg.h` | regs HIF + CID/EID runtime + structs scan | `488fd6c1` |
-| `mainline/userspace/mtkgps_aaf0.c` | bridge GPS nativo `0xAAF0`→NMEA | `3b305604` |
+| **`mainline/wifi-consys/m3a/mt6582-btif.c`** | btif: **calibración RF** + **mutex (boot-fix)** | `4336263` |
+| **`mainline/wifi-consys/wifi/mt6582-wifi.c`** | driver WiFi: cmd/event + scan + **cfg80211 cerrado + Fase 2 `.connect`** | `fb6f502` |
+| **`mainline/wifi-consys/wifi/mt6582-wifi-reg.h`** | regs HIF + CID/EID + structs scan/connect | `fb6f502` |
+| `mainline/userspace/mtkgps_aaf0.c` | bridge GPS nativo `0xAAF0`→NMEA | `3dfb7c2` |
+
+> ⚠️ **El driver AUTORITATIVO está en `mainline/wifi-consys/`** (lo mantiene la sesión del Mac). Los `mainline/drivers/*` que subí en mi sesión nocturna son un **duplicado desfasado — NO usar**. **El repo (Mac) y la fuente de build (Pi `~/mainline/linux-7.0.12/drivers/soc/mediatek/`) DIVERGEN** → sincronizar por `scp` + comparar `md5` antes de editar. **Handoff de sesión vivo = `CONTINUAR-AQUI.md`** (con guion; el `CONTINUAR_AQUI.md` con guion-bajo es del 06-10 = pmOS 3.10 viejo, ignorar). Blueprint Fase 2 = `mainline/wifi-consys/wifi/FASE2-CONNECT.md`.
 
 **Memorias detalladas** (en el `.claude` local, con todas las recetas y offsets): `reference_mt6582_wifi_hif`, `reference_mt6582_gps`, `reference_mt6582_bt_rf_fix`, `reference_mt6582_boot_stability`, etc.
 
