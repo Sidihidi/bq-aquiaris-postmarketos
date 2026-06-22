@@ -17,7 +17,7 @@ El **lunes (22-jun)** el **WiFi ESCANEA REDES REALES** y el **GPS tiene su proto
 | 3 | **WiFi: bucle comando/evento runtime** | El firmware responde `NIC_CAPABILITY` + la MAC, por **TC4/puerto-1**. |
 | 4 | **WiFi: SCAN — 14 redes reales** | Escaneó los vecinos de Cartagena (vodafone, MOVISTAR, Telecartagena), canales 1-13, RSSI reales (-63…-95 dBm). |
 
-Y un **quinto en curso**: **cfg80211 (`wiphy`+`wlan0`)** para exponer el scan a userspace (`iw wlan0 scan` → NetworkManager). **Compila**; el registro de `wlan0` está en debug (un oops/fallo por pinpointar, logs de error ya puestos).
+Y un **quinto LOGRADO (2026-06-22)**: **cfg80211 `wlan0` CERRADO** — `wlan0` registra (wiphy+netdev) y **`iw dev wlan0 scan` lista 16 redes reales desde userspace** (Open-UPCT, eduroam, MikroTik, cpcd…). El scan ya está expuesto a userspace; falta NetworkManager/Phosh + el connect (Fase 2). (El driver real con cfg80211 = 1059 líneas, sincronizado al repo en `mainline/wifi-consys/wifi/mt6582-wifi.c`.)
 
 ---
 
@@ -40,8 +40,8 @@ Y un **quinto en curso**: **cfg80211 (`wiphy`+`wlan0`)** para exponer el scan a 
 | **WiFi MAC** | ✅ | Arranca (RF-cal → `WLAN_READY=1`) |
 | **WiFi cmd/event** | ✅ | El FW responde NIC_CAPABILITY + MAC (TC4/puerto-1) |
 | **WiFi SCAN** | ✅ | 14 beacons reales escaneados (cmd puerto-1, beacons MGMT puerto-0) |
-| **WiFi cfg80211** | 🟡 | wiphy/netdev/kthread/.scan implementado, **compila**; registro de wlan0 en debug |
-| **WiFi connect** | ⬜ | Fase 2 (no empezada) |
+| **WiFi cfg80211 / `wlan0`** | ✅ | **wlan0 registra + `iw dev wlan0 scan` lista 16 redes reales** (Open-UPCT, eduroam, cpcd…) → cfg80211→userspace OK. Falta NM/Phosh + connect |
+| **WiFi connect** | ⬜ | Fase 2 (no empezada) — `.connect`/`.add_key` |
 | **GPS** | 🟡 | Protocolo `0xAAF0` decodificado + bridge nativo escrito; falta 1 recaptura (comando RUN) |
 | Boot | 🟡 | Estable la mayoría de veces, pero **sshd cae intermitentemente** (≈1/4 reboots) → power-cycle |
 

@@ -27,7 +27,12 @@
 #define MCR_WHCR		0x000c	/* HIF control */
 #define MCR_WHISR		0x0010	/* int status (read) */
 #define MCR_WHIER		0x0014	/* int enable */
+#define WHIER_DEFAULT		0xffffff0fU	/* RX0|RX1|TX|ABNORMAL|D2H_SW (downstream mtreg.h:231); el FW lo necesita p/señalar el boot */
 #define MCR_WASR		0x0018	/* abnormal status */
+#define CONN_MCU_CPUPCR		0x0160	/* PC del MCU CONSYS (bloque w->mcu @0x18070000) — diagnóstico de ejecución */
+#define MCR_D2HRM0R		0x0040	/* device->host mailbox 0 (código de estado/error del FW) */
+#define MCR_D2HRM1R		0x0044
+#define MCR_D2HRM2R		0x0048
 #define MCR_WSICR		0x001c	/* SW int a device */
 #define MCR_WTSR0		0x0020	/* TX status 0 (buffers libres) */
 #define MCR_WTSR1		0x0024
@@ -69,6 +74,19 @@
 #define WHISR_RX1_DONE_INT	BIT(2)
 #define WHISR_RX0_DONE_INT	BIT(1)
 #define WHISR_TX_DONE_INT	BIT(0)
+
+/* HSTCR (0x58) = HSIF transaction count. Hay que escribirlo ANTES de CADA acceso al puerto de
+ * datos (HifAhbDmaEnhanceModeConf, ahb.c:2130): le dice al chip burst + puerto + nº de bytes.
+ * SIN él, el FIFO/WRPLR NO avanza (WRPLR se queda clavado). */
+#define MCR_HSTCR		0x0058
+#define HSTCR_BURST_OFFSET	24	/* HSTCR_AFF_BURST_LEN = BITS(24,25) */
+#define HSTCR_TARGET_OFFSET	20	/* HSTCR_TRANS_TARGET   = BITS(20,22) */
+#define HSTCR_TRANS_CNT		GENMASK(19, 2)	/* HSTCR_HSIF_TRANS_CNT */
+#define HIF_BURST_4DW		1
+#define HIF_TARGET_TXD0		0
+#define HIF_TARGET_RXD0		2
+#define HIF_TARGET_TXD1		1	/* comandos runtime (TC4 -> WTDR1) */
+#define HIF_TARGET_RXD1		3	/* eventos runtime (WRDR1) */
 #define WHIER_DEFAULT		(WHISR_RX0_DONE_INT | WHISR_RX1_DONE_INT | \
 				 WHISR_TX_DONE_INT  | WHISR_ABNORMAL_INT  | \
 				 WHISR_D2H_SW_INT)
@@ -210,12 +228,43 @@ struct wifi_event {
 	/* sigue el payload del evento */
 } __packed;
 
-/* Opcodes runtime que nos importan (CONFIRMAR valores numéricos en nic_cmd_event.h,
- * el enum tiene miembros condicionales que pueden desplazarlos). */
-/* CMD_ID_GET_NIC_CAPABILITY  -> EVENT_ID_NIC_CAPABILITY (lee MAC permanente) */
-/* CMD_ID_BASIC_CONFIG        -> fija MAC */
-/* CMD_ID_SCAN_REQ_V2         -> beacons como MGMT + EVENT_ID_SCAN_DONE */
-/* CMD_ID_SET_BSS_INFO        -> conectar */
-/* CMD_ID_ADD_REMOVE_KEY      -> claves (CMD_802_11_KEY) */
+/* Opcodes runtime (verificados en nic_cmd_event.h + structs compilados con -DMT6628).
+ * OJO: los comandos runtime van por TC4 -> PUERTO 1 (WTDR1/WRDR1), no el puerto 0 de la descarga.
+ * La MAC permanente NO está en NIC_CAPABILITY: está en BASIC_CONFIG (body+0). El body del evento
+ * empieza en offset 8 (struct wifi_event), no 12. */
+#define WIFI_TC4			4	/* TC de comandos: byte3 = (TC4<<2)|(CMD<<6) = 0x50 */
+#define HIF_TX_RESOURCE_SHIFT		2	/* TC en bits2-5 del byte3 */
+#define CMD_ID_GET_NIC_CAPABILITY	0x80	/* QUERY -> EVENT_ID_NIC_CAPABILITY (caps) */
+#define CMD_ID_BASIC_CONFIG		0xc1	/* QUERY -> EVENT_ID_BASIC_CONFIG (MAC permanente) */
+#define EVENT_ID_NIC_CAPABILITY		0x02
+#define EVENT_ID_BASIC_CONFIG		0x09
+/* SCAN (Fase 1 cont., verificado downstream). OJO: el SET_DOMAIN_INFO/SCAN son SET (ucSetQuery=1).
+ * Beacons llegan por PUERTO 0 (MGMT); SCAN_DONE por puerto 1 (EVENT). */
+#define CMD_ID_SCAN_REQ_V2		0x04	/* SET; body=struct cmd_scan_req_v2 (220B p/IE vacío) */
+#define CMD_ID_SET_DOMAIN_INFO		0x13	/* SET; tabla regulatoria de canales */
+#define CMD_ID_SET_PHY_PARAM		0x31	/* SET; EFUSE/RF-cal (si el scan no recibe) */
+#define EVENT_ID_SCAN_DONE		0x15
+#define SCAN_TYPE_PASSIVE		0
+#define SCAN_CHANNEL_2G4		1
+#define NETWORK_TYPE_AIS		0
+#define HIF_RX_HDR_OFFSET_MASK		0x3	/* bits0-1 de hif_rx_header.header_len_offset */
+
+struct param_ssid { __le32 len; u8 ssid[32]; } __packed;	/* 36B */
+struct chan_info  { u8 band, chan; } __packed;			/* 2B */
+struct cmd_scan_req_v2 {
+	u8	seq_num, network_type, scan_type, ssid_type;	/* +0 */
+	struct param_ssid ssid[4];				/* +4  (144) */
+	__le16	probe_delay, dwell_time;			/* +148 */
+	u8	channel_type, channel_list_num;			/* +152 (list_num=0: el FW expande 2.4G) */
+	struct chan_info chan_list[32];				/* +154 (64) */
+	__le16	ie_len;						/* +218 */
+	u8	ie[600];					/* +220 (sizeof total = 820) */
+} __packed;
+struct cmd_subband { u8 reg_class, band, chan_span, first_chan, num_chans, rsv[3]; } __packed; /* 8B */
+struct cmd_set_domain_info {
+	__le16	country_code, rsv;
+	struct cmd_subband subband[6];
+	u8	bw_2g4, bw_5g, rsv2[2];				/* sizeof = 56 */
+} __packed;
 
 #endif /* _MT6582_WIFI_REG_H */
