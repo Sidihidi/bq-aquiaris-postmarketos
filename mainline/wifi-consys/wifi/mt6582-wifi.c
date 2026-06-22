@@ -728,7 +728,7 @@ static void wifi_send_auth(struct mt6582_wifi *w, const u8 *bssid, u16 seq)
 	memcpy(f.bssid, bssid, ETH_ALEN);
 	f.alg = cpu_to_le16(0);			/* Open System */
 	f.auth_seq = cpu_to_le16(seq);
-	wifi_send_mgmt(w, &f, sizeof(f), 1);
+	wifi_send_mgmt(w, &f, sizeof(f), 0);	/* sta_rec_idx = el MISMO que el UPDATE_STA_RECORD (=0) */
 	dev_info(w->dev, "*** mgmt-TX: AUTH open seq=%u -> %pM ***\n", seq, bssid);
 }
 
@@ -816,7 +816,7 @@ static int wifi_cfg_connect(struct wiphy *wiphy, struct net_device *ndev,
 		dev_warn(w->dev, ".connect: sin grant CH_PRIVILEGE en 1s\n");
 
 	/* 2) STA-record del AP (idx 1) — IMPRESCINDIBLE: sin él el FW no sabe a quién asociar */
-	sta.index = 1;
+	sta.index = 0;	/* cnmStaRecAlloc da el PRIMER slot libre = 0 para el 1er STA del AIS (NO 1) */
 	sta.sta_type = STA_TYPE_LEGACY_AP;
 	memcpy(sta.mac_addr, bssid, ETH_ALEN);
 	sta.net_type_index = NETWORK_TYPE_AIS;
