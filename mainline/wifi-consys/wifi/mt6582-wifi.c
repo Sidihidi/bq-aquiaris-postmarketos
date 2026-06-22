@@ -704,7 +704,7 @@ static void wifi_send_mgmt(struct mt6582_wifi *w, const void *frame, u16 frame_l
 	h->wlan_header_len = 24;
 	h->pktfmt_flags = HIF_TX_FLAG_802_11;		/* frame 802.11 crudo (net_type AIS=0) */
 	h->sta_rec_idx = sta_idx;
-	h->ack_bip_rate = HIF_TX_NEED_ACK;
+	h->ack_bip_rate = HIF_TX_NEED_ACK | HIF_TX_BASIC_RATE;	/* AUTH/ASSOC a basic-rate, o el FW da MPDU_ERROR */
 	if (++w->mgmt_seq == 0)		/* pkt_seq != 0 => el FW reporta EVENT_ID_TX_DONE con el status */
 		w->mgmt_seq = 1;
 	h->pkt_seq = w->mgmt_seq;
