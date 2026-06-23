@@ -93,6 +93,7 @@ struct mt6582_wifi {
 	u8			connect_ssid_len;
 	struct cfg80211_bss	*connect_bss;	/* BSS retenido del .connect -> cfg80211_connect_bss (evita WARN sme.c:845) */
 	u8			connect_channel;	/* canal guardado para el SET_BSS_INFO del JoinComplete */
+	u16			assoc_id;		/* AID del ASSOC-RESP -> CMD_INDICATE_PM_BSS_CONNECTED */
 	struct delayed_work	auto_bringup;	/* auto-levanta wlan0 al boot, con reintento (WLAN_READY flaky) */
 	u8			bringup_tries;
 };
@@ -596,8 +597,10 @@ static void wifi_rx_mgmt(struct mt6582_wifi *w, u8 *rx, u32 plen)
 	if (w->connecting && subtype == 1 && flen >= 28) {		/* ASSOC-RESP */
 		u16 st = le16_to_cpu(*(__le16 *)(frame + 26));
 
-		if (st == 0)
+		if (st == 0) {
+			w->assoc_id = le16_to_cpu(*(__le16 *)(frame + 28)) & 0x3FFF;	/* AID (cap@24,status@26,AID@28; sin los 2 bits altos) */
 			wifi_send_join(w);	/* JoinComplete: SET_BSS_INFO(CONNECTED) -> el FW enruta datos */
+		}
 		cfg80211_connect_bss(w->ndev, w->connect_bssid, w->connect_bss, NULL, 0, NULL, 0,
 				     st == 0 ? WLAN_STATUS_SUCCESS : WLAN_STATUS_UNSPECIFIED_FAILURE,
 				     GFP_ATOMIC, NL80211_TIMEOUT_UNSPECIFIED);
@@ -688,7 +691,11 @@ static void wifi_tx_data(struct mt6582_wifi *w, struct sk_buff *skb)
 	h->pkt_seq = 0;
 	h->ack_bip_rate = 0;
 	memcpy((u8 *)w->dlm + sizeof(*h), skb->data, frame_len);
-	wifi_port_write_pio(w, w->dlm, total);			/* puerto 0 = WTDR0 */
+	/* dword-cero terminador de TX-aggregation (HAL_WRITE_TX_PORT downstream, hal.h:300): sin él el FW NO
+	 * cierra el frame de DATOS y no lo emite al aire (el DISCOVER sale del host pero no llega al S24).
+	 * SOLO datos — el init/descarga del FW NO lo lleva (corrompería la imagen). */
+	*(__le32 *)((u8 *)w->dlm + ALIGN(total, 4)) = 0;
+	wifi_port_write_pio(w, w->dlm, ALIGN(total, 4) + 4);	/* puerto 0 = WTDR0 (+4 = dword-cero terminador) */
 	w->ndev->stats.tx_packets++;
 	w->ndev->stats.tx_bytes += frame_len;
 }
@@ -879,6 +886,9 @@ static void wifi_send_join(struct mt6582_wifi *w)
 	struct cmd_set_bss_info bi = {};
 	struct cmd_update_sta_record sta = {};
 	struct cmd_ps_profile ps = {};
+	struct cmd_ch_privilege chp = {};
+	struct cmd_pm_bss_connected pm = {};
+	__le32 rxf;
 
 	bi.net_type_idx = NETWORK_TYPE_AIS;
 	bi.conn_state = MEDIA_STATE_CONNECTED;	/* =0. ENUM_PARAM_MEDIA_STATE_T (downstream wlan_oid.h:372) = {CONNECTED=0, DISCONNECTED=1}: el 2 estaba FUERA DE RANGO -> el FW ignoraba el SET_BSS_INFO -> nunca entraba en estado de datos (RX=0). Confirmado: reg.h, el EVENT_CONNECTION_STATUS y el enum del downstream coinciden en 0. */
@@ -920,7 +930,38 @@ static void wifi_send_join(struct mt6582_wifi *w)
 	ps.ps_profile = 0;			/* Param_PowerModeCAM = 0 */
 	wifi_send_cmd(w, CMD_ID_POWER_SAVE_MODE, 1, &ps, sizeof(ps), 0);
 
-	dev_info(w->dev, "*** JoinComplete: SET_BSS_INFO + STA->STATE_3 + PS=CAM ch=%u -> data-path ON ***\n",
+	/* FILTRO RX (clave para la OFFER): el FW por DEFECTO NO entrega broadcast al host -> la OFFER del
+	 * DHCP se descarta en la ENTRADA. CMD_ID_SET_RX_FILTER con DIRECTED|MULTICAST|BROADCAST (0x0B) abre
+	 * la entrega de la OFFER (broadcast) + unicast a mi MAC. = u4OsPacketFilter=PARAM_PACKET_FILTER_SUPPORTED
+	 * del downstream (wlan_lib.c:1248); un driver mínimo que solo replica el JOIN se lo salta. */
+	rxf = cpu_to_le32(0x0000000B);
+	wifi_send_cmd(w, CMD_ID_SET_RX_FILTER, 1, &rxf, sizeof(rxf), 0);
+
+	/* INDICAR BSS CONECTADO al power-management del FW: arma el monitor de conexión (beacon-interval/DTIM/AID).
+	 * Hipótesis fuerte para el EVENT_ID_BSS_BEACON_TIMEOUT (0x1b) que salta a +30s del connect PASE LO QUE PASE
+	 * con CAM/CH_ABORT: el FW espera esta indicación tras el assoc; sin ella su monitor de conexión expira.
+	 * = nicPmIndicateBssConnected (nic.c:2167). beacon=100/DTIM=1 por defecto (CAM => siempre despierto). */
+	pm.net_type_idx = NETWORK_TYPE_AIS;
+	pm.dtim_period = 1;
+	pm.assoc_id = cpu_to_le16(w->assoc_id);
+	pm.beacon_interval = cpu_to_le16(100);
+	wifi_send_cmd(w, CMD_ID_INDICATE_PM_BSS_CONNECTED, 1, &pm, sizeof(pm), 0);
+
+	/* *** CAUSA RAÍZ DEL BEACON-TIMEOUT: soltar el privilege del canal tras el join. *** El CH_PRIVILEGE(REQ)
+	 * del .connect es TEMPORAL (max_interval 5s). El downstream, tras el join exitoso (aisFsmRunEventJoinComplete
+	 * -> AIS_STATE_NORMAL_TR -> aisFsmReleaseCh, ais_fsm.c:2632), manda CMD_ID_CH_PRIVILEGE action=ABORT con el
+	 * MISMO token (0) -> el FW suelta el privilege temporal y cae al CANAL-HOME del BSS (fijado por el SET_BSS_INFO
+	 * de arriba) y se queda ahí oyendo beacons + la OFFER. Sin esto: el privilege expira -> radio off-channel ->
+	 * EVENT 0x1b (BSS_BEACON_TIMEOUT) a los ~30s + la OFFER nunca llega. */
+	chp.net_type_idx = NETWORK_TYPE_AIS;
+	chp.token_id = 0;			/* = el token del REQ en .connect (zero-init) */
+	chp.action = CMD_CH_ACTION_ABORT;
+	chp.primary_channel = w->connect_channel;
+	chp.rf_band = 1;			/* BAND_2G4 */
+	memcpy(chp.bssid, w->connect_bssid, ETH_ALEN);
+	wifi_send_cmd(w, CMD_ID_CH_PRIVILEGE, 1, &chp, sizeof(chp), 0);
+
+	dev_info(w->dev, "*** JoinComplete: SET_BSS_INFO + STA->STATE_3 + PS=CAM + RX_FILTER + CH_ABORT(home ch=%u) -> data-path ON ***\n",
 		 w->connect_channel);
 }
 
@@ -1184,7 +1225,14 @@ static int wifi_register_cfg80211(struct mt6582_wifi *w)
 	}
 	w->ndev = ndev;
 	ndev->netdev_ops = &wifi_netdev_ops;
-	eth_hw_addr_random(ndev);
+	/* MAC del netdev = MAC del FW (BASIC_CONFIG), NO una random: el AUTH/ASSOC y el SET_BSS_INFO.own_mac
+	 * usan w->mac, así que el AP asocia ESA MAC. Si el netdev (origen de los frames de DATOS) usa otra,
+	 * el DISCOVER del DHCP sale con source-MAC NO asociada -> el FW/AP lo descarta -> 0 OFFER, 0 DATA RX.
+	 * (causa raíz que halló el auditor; encaja con el síntoma exacto). Guarda: si BASIC_CONFIG falló, random. */
+	if (is_valid_ether_addr(w->mac))
+		eth_hw_addr_set(ndev, w->mac);
+	else
+		eth_hw_addr_random(ndev);
 	w->wdev.wiphy = wiphy;
 	w->wdev.iftype = NL80211_IFTYPE_STATION;
 	w->wdev.netdev = ndev;
