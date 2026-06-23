@@ -1558,7 +1558,16 @@ static void mt6582_wifi_remove(struct platform_device *pdev)	/* kernel 7.0.12: r
 
 	cancel_delayed_work_sync(&w->auto_bringup);
 
-	/* TODO(Fase 1+): unregister_netdev / wiphy_unregister / parar RX-thread o IRQ. */
+	/* cleanup cfg80211/netdev/RX-thread (parche 07 del auditor). Solo se ejecuta en rmmod;
+	 * con el driver built-in NO se llama, pero deja el .remove() correcto si se compila como modulo. */
+	if (w->cfg_registered) {
+		if (w->rx_thread) { kthread_stop(w->rx_thread); w->rx_thread = NULL; }
+		unregister_netdev(w->ndev);
+		wiphy_unregister(w->wiphy);
+		wiphy_free(w->wiphy);
+		w->cfg_registered = false;
+	}
+
 	if (w->started) {
 		wifi_set_fw_own(w);			/* devolver el chip a FW-own */
 		mt6582_consys_wifi_vcn33(false);	/* apagar el rail RF del WiFi */
