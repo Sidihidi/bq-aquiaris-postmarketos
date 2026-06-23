@@ -251,6 +251,7 @@ struct wifi_event {
  * empieza en offset 8 (struct wifi_event), no 12. */
 #define WIFI_TC4			4	/* TC de comandos: byte3 = (TC4<<2)|(CMD<<6) = 0x50 */
 #define WIFI_TC_DATA			1	/* TC1 = datos best-effort/no-QoS (puerto 0): byte3 = (TC1<<2)|(DATA<<6) = 0x04 */
+#define WIFI_TC_BMCAST			5	/* TC5 = broadcast/multicast: el FW EXIGE TC5 + staRecIdx=0xFF (que_mgt.c) */
 #define HIF_TX_RESOURCE_SHIFT		2	/* TC en bits2-5 del byte3 */
 #define CMD_ID_GET_NIC_CAPABILITY	0x80	/* QUERY -> EVENT_ID_NIC_CAPABILITY (caps) */
 #define CMD_ID_BASIC_CONFIG		0xc1	/* QUERY -> EVENT_ID_BASIC_CONFIG (MAC permanente) */

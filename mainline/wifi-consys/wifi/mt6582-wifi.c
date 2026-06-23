@@ -662,15 +662,19 @@ static void wifi_tx_data(struct mt6582_wifi *w, struct sk_buff *skb)
 	struct hif_tx_header *h = (void *)w->dlm;
 	u16 frame_len = skb->len;
 	u16 total = sizeof(*h) + frame_len;
+	bool bmc = is_multicast_ether_addr(skb->data);	/* DA = skb->data[0..5]; bit0 del byte0 = mcast/bcast */
 
 	if (frame_len > 1600 || !w->ndev)
 		return;
 	memset(h, 0, sizeof(*h));
 	h->tx_byte_count_up = cpu_to_le16(total & 0x0fff);	/* incluye los 16B de cabecera HIF */
 	h->ether_type_offset = 14;				/* ((ETH_HLEN-2)+16)>>1 palabras, incl. HIF */
-	h->resource_pkttype_cs = (WIFI_TC_DATA << HIF_TX_RESOURCE_SHIFT) |
-				 (HIF_TX_PKT_TYPE_DATA << HIF_TX_PKT_TYPE_SHIFT);	/* TC1|DATA = 0x04 */
-	/* wlan_header_len=0, pktfmt_flags=0 (802.3, el FW encapsula), sta_rec_idx=0 (el AP), sin TX-DONE */
+	/* broadcast/multicast (¡el DHCP DISCOVER!): TC5 + staRecIdx=0xFF; unicast: TC1 + staRecIdx=0 (el AP).
+	 * El FW pone el addressing 802.11 (A1=BSSID, A3=DA). que_mgt.c: BMCAST -> TC5_INDEX, idx=0xFF. */
+	h->resource_pkttype_cs = ((bmc ? WIFI_TC_BMCAST : WIFI_TC_DATA) << HIF_TX_RESOURCE_SHIFT) |
+				 (HIF_TX_PKT_TYPE_DATA << HIF_TX_PKT_TYPE_SHIFT);
+	h->wlan_header_len = ETH_HLEN;		/* =14: el FW localiza el ethertype para 802.3->802.11 (NO 0) */
+	h->sta_rec_idx = bmc ? 0xFF : 0;	/* STA_REC_INDEX_BMCAST / el AP. pkt_seq=0 (sin TX-DONE) */
 	memcpy((u8 *)w->dlm + sizeof(*h), skb->data, frame_len);
 	wifi_port_write_pio(w, w->dlm, total);			/* puerto 0 = WTDR0 */
 	w->ndev->stats.tx_packets++;
@@ -861,6 +865,7 @@ static void wifi_send_assoc(struct mt6582_wifi *w, const u8 *bssid)
 static void wifi_send_join(struct mt6582_wifi *w)
 {
 	struct cmd_set_bss_info bi = {};
+	struct cmd_update_sta_record sta = {};
 
 	bi.net_type_idx = NETWORK_TYPE_AIS;
 	bi.conn_state = MEDIA_STATE_CONNECTED;	/* =0. ENUM_PARAM_MEDIA_STATE_T (downstream wlan_oid.h:372) = {CONNECTED=0, DISCONNECTED=1}: el 2 estaba FUERA DE RANGO -> el FW ignoraba el SET_BSS_INFO -> nunca entraba en estado de datos (RX=0). Confirmado: reg.h, el EVENT_CONNECTION_STATUS y el enum del downstream coinciden en 0. */
@@ -880,7 +885,21 @@ static void wifi_send_join(struct mt6582_wifi *w)
 	bi.rlm.primary_channel = w->connect_channel;
 	bi.rlm.check_id = 0x72;
 	wifi_send_cmd(w, CMD_ID_SET_BSS_INFO, 1, &bi, sizeof(bi), 0);
-	dev_info(w->dev, "*** JoinComplete: SET_BSS_INFO(CONNECTED) ch=%u -> FW a estado de datos ***\n",
+
+	/* promover el STA a STATE_3 (asociado/data-ready). SIN esto el FW descarta TODO dato del STA:
+	 * secCheckClassError() (privacy.c) tira cada RX de datos como Class-3-error Y manda DEAUTH al AP,
+	 * y rechaza el TX. Es el cnmStaRecChangeState(STATE_3) del downstream -> abre la cola TX del STA. */
+	sta.index = 0;				/* el mismo staRec del AP (creado en .connect) */
+	sta.sta_type = STA_TYPE_LEGACY_AP;
+	memcpy(sta.mac_addr, w->connect_bssid, ETH_ALEN);
+	sta.net_type_index = NETWORK_TYPE_AIS;
+	sta.desired_phy_type_set = PHY_TYPE_SET_802_11BG;
+	sta.desired_nonht_rate_set = cpu_to_le16(RATE_SET_ERP);
+	sta.bss_basic_rate_set = cpu_to_le16(BASIC_RATE_SET_ERP);
+	sta.sta_state = STA_STATE_3;		/* =2: asociado, Class 1,2&3 -> el FW acepta DATOS */
+	sta.need_resp = 1;			/* el FW responde EVENT_ACTIVATE_STA_REC -> activa la cola TX */
+	wifi_send_cmd(w, CMD_ID_UPDATE_STA_RECORD, 1, &sta, sizeof(sta), 0);
+	dev_info(w->dev, "*** JoinComplete: SET_BSS_INFO(CONNECTED) + STA->STATE_3 ch=%u -> data-path ON ***\n",
 		 w->connect_channel);
 }
 
