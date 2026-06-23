@@ -1,115 +1,157 @@
 # BQ Aquaris E4.5 (`krillin`) — Linux MAINLINE en un MediaTek MT6582 de 2014
 
 Reviviendo el **BQ Aquaris E4.5** (MediaTek MT6582, Cortex-A7 ×4 armv7, Mali-400 MP2, 1 GB RAM,
-540×960; *el primer Ubuntu Phone, 2014*) con **Linux mainline moderno**, escribiendo y portando
-los drivers que upstream nunca tuvo para este SoC.
+540×960; *el primer Ubuntu Phone, 2014*) con **Linux mainline moderno** + **postmarketOS/Alpine**,
+escribiendo y portando los drivers que upstream nunca tuvo para este SoC.
 
-> **Estado (2026-06-19):** un teléfono de 2014 corriendo **Linux mainline 7.0.12 + Alpine** con
-> **Phosh acelerado por GPU**, **dual-boot pmOS(SD)/Android(interna)**, y **Bluetooth funcionando**
-> (escanea y encuentra dispositivos reales) — además de display DRM, táctil, carga, batería y PMIC.
+> **Estado (2026-06-23):** un teléfono de 2014 corriendo **Linux mainline 7.0.12 + Alpine** con
+> **Phosh acelerado por GPU (lima/Mali-400)**, arrancando desde **SD**, con **táctil, carga,
+> batería, Bluetooth (empareja), WiFi (escanea redes reales) y GPS (protocolo decodificado)**.
 
-📍 **Entra por aquí** (este README) y para el detalle por subsistema, [INDICE-GENERAL.md](INDICE-GENERAL.md).
+📍 **Empieza por aquí.** Para el detalle por subsistema y el historial completo:
+[mainline/HITOS.md](mainline/HITOS.md). Para el plan de trabajo: [ROADMAP-FINAL.md](ROADMAP-FINAL.md).
 Repo: [github.com/Sidihidi/bq-aquiaris-postmarketos](https://github.com/Sidihidi/bq-aquiaris-postmarketos).
 
 ---
 
-## ✅ Qué FUNCIONA (Linux 7.0.12 mainline + Alpine 3.24)
+## ✅ Estado por subsistema (Linux 7.0.12 mainline + Alpine)
 
-| Subsistema | Estado | Cómo |
+Honesto sobre lo que funciona vs lo que está en progreso. **✅** = funciona en HW · **🟡** = parcial /
+en progreso · **⬜** = no empezado.
+
+| Subsistema | Estado | Detalle |
 |---|---|---|
-| Arranque kernel (SMP 4 CPUs) | ✅ | boot.img MTK; el LK carga zImage+dtb |
-| **Display DRM** (color OK) | ✅ | `mtk_drm` pinta el panel HX8389 (DSI), card1=mediatek-drm |
-| **GPU acelerada** | ✅ | **lima / Mali-400** (`mt6582-mfg-power.c` enciende el MFG por SPM) |
-| **Phosh** (Wayland, fluido) | ✅ | phoc+phosh+squeekboard, WLR_RENDERER=gles2 |
-| **Dual-boot SD** | ✅ | **pmOS en la SD** (mmcblk1) + **Android intacto** en la interna. [DUAL-BOOT-SD](mainline/DUAL-BOOT-SD.md) |
-| eMMC / USB-SSH / I2C / GPIO | ✅ | `mtk-sd` + `blkdevparts`; `mt6582-musb.c`; `i2c-mt65xx` |
-| Táctil (FT5336) | ✅ | VGP1 (PMIC) + I2C0@0x38 + uinput → `/dev/input/event0` |
-| EINT + botones (vol) | ✅ | `gpio-mt6582-eint.c` (169 EINTs) + `mt6779-keypad` |
-| Carga USB + Batería % | ✅ | FAN5405 (I2C0@0x6a) 4.2V/800mA; VBAT por AUXADC MT6323 |
-| PMIC MT6323 (hub) | ✅ | pwrap + MFD + 31 reguladores. [HITO](mainline/HITO-PMIC-MT6323.md) |
-| **WiFi/BT/GPS/FM — bring-up del CONSYS** | ✅ | **patch + las 4 radios encendidas** (ver abajo) |
-| **Bluetooth** (hci0 + BlueZ) | ✅ | **escanea/visible/vinculable**; Phosh por D-Bus. [HITO](mainline/wifi-consys/m3a/HITO-WIFI-M3A.md) |
-| WiFi-netdev (802.11) · GPS/FM userspace | ⬜ | el CONSYS está vivo; falta el puente a userspace (ver Roadmap) |
-| Audio · Módem 3G | ⬜ | módem = camino Halium |
+| **Boot mainline (SMP 4×A7)** | ✅ | Arranca desde **SD** (`mmcblk1p1`), boot en **sector 83968**. El LK (KitKat) carga zImage+dtb. |
+| **Display DRM** | ✅ | `mediatek-drm` pinta el panel (DSI), `card1` = mediatek-drm. Color OK. |
+| **GPU acelerada** | ✅ | **lima / Mali-400** (`mt6582-mfg-power.c` enciende el MFG por SPM). |
+| **Phosh** (Wayland) | ✅ | phoc + phosh + squeekboard sobre GLES2/lima. |
+| **Táctil FT5336** | ✅ | I2C0@0x38 + EINT117; alimentado por VGP1 (PMIC). |
+| **PMIC MT6323** | ✅ | En el DeviceTree (pwrap + MFD + 31 reguladores) — el "hub" de rails. |
+| **Batería %** | ✅ | VBAT por **AUXADC** del MT6323 (canal BATSNS). |
+| **Carga USB** | ✅ | Cargador FAN5405 (I2C0@0x6a), 4.2 V / 800 mA, con kick del watchdog. |
+| **Bluetooth (hci0)** | ✅ | Empareja (probado con un S24) + **toggle en Phosh**. Vía el CONSYS. |
+| **WiFi — scan** | ✅ | Escanea **redes reales** (`iw dev wlan0 scan` lista decenas de APs). cfg80211/`wlan0` registrados. |
+| **WiFi — connect** | 🟡 | `.connect` **softMAC** implementado (Fase 2: AUTH/ASSOC + STA-record + CH_PRIVILEGE conducidos por el host). **Falta confirmar asociación + WPA2 + data-path.** |
+| **GPS** | 🟡 | Protocolo **`0xAAF0` decodificado**; cadena **gpsd→geoclue→Phosh validada**. Falta el `START_SEQ` de `mnld` (arrancar el motor). |
+| Brillo · botones power/vol · sensores · audio | ⬜ | Fase 3 (Phosh 100%) — ver roadmap. |
+| FM · vibrador · cámara · módem 3G | ⬜ | Fases 4-5 (cámara/módem = propietarios, muy difícil). |
 
-*(También funciona una GUI X11 ligera y el port previo sobre kernel 3.10 — ver
-[README-PMOS-3.10.md](README-PMOS-3.10.md). Phosh+mainline es la vía principal hoy.)*
+> **Estabilidad del boot:** el baseline es **estable**. En ~1/3 de los arranques la GUI tarda o no
+> sube (se afinará con `supervise-daemon` de OpenRC). Recuperación = power-cycle o `reboot -f`.
 
----
-
-## 🚀 Lo gordo de la sesión 2026-06-19 — el CONSYS (WiFi/BT/GPS/FM)
-
-El **CONSYS MT6582** es el combo de radio (WiFi+BT+GPS+FM) que mainline nunca soportó. Lo levantamos
-entero por un driver propio (`mainline/wifi-consys/`):
-
-1. **BTIF-DMA** — transporte AP↔CONSYS en modo DMA/VFF (el bug que lo desbloqueó: el TX-DMA necesita
-   un **FLUSH** para expulsar la cola parcial). El CONSYS **responde** STP/WMT.
-2. **Patch download** — los 2 patches (`mt6572_82_patch_e1_*`, 62 fragmentos) descargados por WMT.
-3. **func_on** — **las 4 radios encendidas** a nivel de chip (BT/FM/GPS/WiFi, status=0).
-4. **Bluetooth completo** — `hci0` real (`hci_register_dev`) → **BlueZ escanea y encuentra dispositivos**.
-
-Guía técnica viva y el blueprint completo: [mainline/wifi-consys/m3a/HITO-WIFI-M3A.md](mainline/wifi-consys/m3a/HITO-WIFI-M3A.md).
+*(El **CONSYS** — combo WiFi/BT/GPS/FM del MT6582, que mainline nunca soportó — se levanta entero por
+un driver propio en `mainline/wifi-consys/`. Es la frontera técnica del proyecto. Bring-up,
+transporte BTIF-DMA, descarga de patches y RF-cal: ver [HITOS.md](mainline/HITOS.md) §19.)*
 
 ---
 
-## 🗺️ Mapa del repo
+## 🗺️ Estructura del repo
 
 ```
-README.md              ← este (punto de entrada)
-INDICE-GENERAL.md      ← índice detallado de todos los docs
-mainline/              ← EL PORT MAINLINE (lo principal)
-  README.md            ← cómo compilar/flashear/depurar el kernel
-  HITO-*.md            ← un doc por subsistema resuelto (PMIC, EINT, táctil, carga, display…)
-  DUAL-BOOT-SD.md      ← pmOS en SD + Android en interna
-  disp-drm/            ← display DRM (mtk_drm) + el DTS del krillin (code/mt6582-bq-krillin.dts)
-  wifi-consys/         ← WiFi/BT/GPS/FM (CONSYS) — la frontera actual
-    m3a/               ← drivers (mt6582-consys.c, mt6582-btif.c) + HITO-WIFI-M3A.md + captura + scripts
-  rootfs/              ← configs de userspace (battery, charge, x11, sshd)
-  pkg/                 ← ensamblado del boot.img (assemble.sh, mtk_hdr.py)
-artifacts/             ← backups golden (BROM) + firmware stock (no en git por privacidad)
-device-bq-krillin/, aports/  ← aports de pmbootstrap (port 3.10)
-legacy/                ← scripts/docs de sesiones tempranas (3.10), archivados
+README.md                       ← este (punto de entrada)
+ROADMAP-FINAL.md                ← roadmap maestro F0–F5 + TODO (documento único de plan)
+CONTINUAR-AQUI.md               ← estado de la última sesión + próximos pasos
+INDICE-GENERAL.md               ← índice navegable de todos los docs
+GUIA-MTKCLIENT.md               ← recuperación por BROM (mtkclient)
+ESTRATEGIA-CUSTOM-BOOTLOADER.md ← notas sobre el LK / bootloader
+PLAN-MAESTRO-IMPLEMENTACION.md  ← plan de implementación de drivers
+README-PMOS-3.10.md             ← el port PREVIO sobre kernel 3.10 (Sxmo/X11), archivado
+
+mainline/                       ← EL PORT MAINLINE (lo principal)
+  HITOS.md                      ← historia unificada del proyecto (1 doc, todos los hitos)
+  README.md                     ← cómo compilar / flashear / depurar el kernel
+  DUAL-BOOT-SD.md               ← pmOS en SD + Android en la interna
+  dts/                          ← el DeviceTree del krillin (mt6582-bq-krillin.dts)
+  drivers/                      ← drivers del kernel (mt6582-*.c: btif, wifi, mfg-power…)
+  disp-drm/                     ← display DRM (mtk_drm) + mapeo de registros
+  wifi-consys/                  ← CONSYS WiFi/BT/GPS/FM — la frontera
+    m3a/                        ← bring-up + transporte BTIF (mt6582-btif.c) + HITO-WIFI-M3A.md
+    wifi/                       ← WiFi 802.11 (mt6582-wifi.c + reg.h) + FASE2-CONNECT.md
+    gps/                        ← bridge GPS (mtk-gps-bridge.c, protocolo 0xAAF0)
+  userspace/                    ← bridges/daemons de userspace (mtkgps_aaf0.c, etc.)
+  rootfs/                       ← configs de userspace (battery, charge, bluetooth, x11, sshd)
+  phosh/ · quickwins/           ← stack Phosh + apps
+  pkg/                          ← ensamblado del boot.img (assemble.sh, mtk_hdr.py)
+  estrategia/ · docs/           ← estrategia de drivers + referencias técnicas únicas
+  golden/                       ← lk.img + seccfg.img golden (los .img no van a git)
+
+legacy/                         ← scripts y docs de sesiones tempranas, archivados
+aports/ · device-bq-krillin/ · linux-bq-krillin/  ← el path ANTIGUO (pmbootstrap, kernel 3.10)
+artifacts/                      ← backups golden (BROM) + firmware stock (no en git)
 ```
+
+> **Limpieza (2026-06-23):** la doc dispersa se unificó. Los antiguos `mainline/HITO-*.md` sueltos
+> ahora viven en un solo **`mainline/HITOS.md`**; los roadmaps dispersos los supersede
+> **`ROADMAP-FINAL.md`**. `mainline/docs/` guarda solo referencias técnicas únicas.
 
 ---
 
 ## 🔧 Cómo se trabaja (para retomar en casa)
 
-- **Raspberry Pi** `ssh cpcd@192.168.0.123` (sudo NOPASSWD) — compila (cross armhf) + habla con el
-  teléfono por USB. Árbol del kernel: `~/mainline/linux-7.0.12` (build dir `O=build-krillin`).
-- **Teléfono** (pmOS mainline, desde la Pi): `ssh root@172.16.42.1`. Red USB: la Pi es
-  `172.16.42.2/24` en `usb0` (`sudo ip addr replace 172.16.42.2/24 dev usb0`).
-- **Ciclo de iteración rápida** (scripts en la Pi, copia en `mainline/wifi-consys/m3a/scripts/`):
-  - `~/wifi-iter.sh` = build zImage + empaqueta + **flashea por dd** (sector 83968 = 0x2900000, la
-    partición boot real) + reinicia. Sin fastboot.
-  - `~/wifi-check.sh` / `~/wifi-bringup.sh` = espera el arranque y dispara/lee el bring-up del CONSYS
-    (`echo 1 > /sys/kernel/debug/mt6582_btif/bringup`).
-- **Imágenes** en `~/mainline/pkg/`: `boot-pmos-sd.img` (pmOS desde SD), `boot-color1.img` (pmOS
-  interna), `boot-btifDMA-sd.img` (el de WiFi/BT actual).
+El flujo es: **editar en la Pi → compilar (cross armhf) → flashear por USB → verificar en HW.**
 
+- **Raspberry Pi de build** — `ssh cpcd@192.168.0.123` (sudo NOPASSWD). Compila el kernel y habla con
+  el teléfono por USB. Árbol del kernel: `~/mainline/linux-7.0.12` (build dir `O=build-krillin`).
+- **Teléfono** (pmOS mainline, desde la Pi) — `ssh root@172.16.42.1`. Red USB gadget: la Pi es
+  `172.16.42.2/24` en `usb0` → reconectar con
+  `sudo ip addr replace 172.16.42.2/24 dev usb0; ssh root@172.16.42.1`.
+- **Build + flash del kernel** (en la Pi):
+  ```sh
+  cd ~/mainline/linux-7.0.12
+  # editar drivers/soc/mediatek/mt6582-*.c (o el dts)
+  make O=build-krillin ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- -j4 zImage dtbs
+  # empaquetar (en ~/mainline/pkg): cat zImage dtb > z; python3 mtk_hdr.py KERNEL z z-mtk;
+  #   abootimg --create boot.img -f <cfg> -k z-mtk -r initrd
+  # flashear: dd a sector 83968 DESDE pmOS viva, o fastboot flash boot boot-*-sd.img
+  ```
+- **Disparar el CONSYS** (BT/WiFi/GPS): `echo 1 > /sys/kernel/debug/mt6582_wifi/bringup`
+  (un mutex serializa el bring-up; sin carrera).
+
+> ⚠️ **El repo (Mac) y la fuente de build (Pi) pueden DIVERGIR** en algunos ficheros — sincronizar con
+> `scp` y comparar `md5` antes de editar.
 > ⚠️ No martillear SSH anidado Pi→teléfono (satura el sshd / el musb). Agrupar comandos.
 
 ---
 
 ## 🛟 Recuperación — difícil de brickear
 
-- **Regla de oro MTK:** NUNCA flashear `preloader`. Lo demás es recuperable.
-- **fastboot** (en la Pi): `fastboot flash boot boot-color1.img` → pmOS de vuelta (p7 intacto).
-- **mtkclient/BROM** (red de seguridad): backup golden en `artifacts/golden/`. Guía:
-  [GUIA-MTKCLIENT.md](GUIA-MTKCLIENT.md) — usar `wo <off> <len> <img>` (offsets hex, boot=0x2900000).
-- **Softbrick** → SP Flash Tool "Download Only" KitKat (NUNCA "Format All": borra IMEI/NVRAM).
+- **Regla de oro MTK:** NUNCA flashear `preloader`. **NUNCA** restaurar el LK de **Lollipop** (verifica
+  firma → bootloop; el bueno es **KitKat 1.5.2**). Lo demás es recuperable.
+- **fastboot** (en la Pi): `fastboot flash boot boot-*-sd.img` → pmOS de vuelta.
+  Entrar en fastboot = manual: Power ~10 s → **Power + Vol↑**. Usar `flash boot`, **nunca** `boot`.
+- **mtkclient / BROM** (red de seguridad): backup golden en `artifacts/golden/`. Usar
+  **`wo <off> <len> <img>`** (offsets en HEX, boot = `0x2900000`), **NUNCA `wf`** (machaca el sector 0).
+  Guía: [GUIA-MTKCLIENT.md](GUIA-MTKCLIENT.md).
+- **Softbrick** → SP Flash Tool **"Download Only"** (KitKat). **NUNCA "Format All"** (borra IMEI/NVRAM).
+- **`/data` (Android) = `mmcblk0p7`.** Con dual-boot, **pmOS vive en la SD**; la interna es Android.
 
 ---
 
-## ▶️ Roadmap (lo que queda)
+## ▶️ Roadmap (resumen)
 
-1. **Bluetooth — pulido**: bdaddr real de NVRAM + auto-bring-up al arranque + el panel de Phosh.
-2. **GPS** (`/dev/stpgps`→gpsd) y **FM** — **mismo patrón que el BT**, casi gratis.
-3. **WiFi de verdad** — el netdev 802.11 (HifAhbProbe + WIFI_RAM_CODE): ~133K líneas, el gigante.
-4. **Menú de boot** (boot/recovery por combo del LK) para elegir pmOS-SD vs Android sin reflashear.
-5. **Audio**; **Módem 3G** (Halium sobre 3.10).
+Plan maestro completo en **[ROADMAP-FINAL.md](ROADMAP-FINAL.md)**. Una fase a la vez, verificando en HW:
+
+- **F0 — Boot estable:** endurecer arranque (sshd/Phosh siempre) con `supervise-daemon`.
+- **F1 — WiFi 100%:** confirmar asociación (red abierta) → data-path RX/TX → WPA2 → navegar.
+- **F2 — GPS 100%:** capturar el `START_SEQ` de `mnld` → fix real → geoclue → Phosh.
+- **F3 — Phosh 100%:** brillo, botones power/vol, sensores + autorrotación, audio, suspend/wake.
+- **F4 — Periféricos:** FM, vibrador (cámara/módem = propietarios, muy difícil).
+- **F5 — (futuro):** estudio de viabilidad de Android 12 (el muro histórico cae al tener drivers mainline).
 
 ---
 
-*Proyecto de aficionado, bring-up en hardware real. El historial completo está en los `HITO-*.md`
-y en [INDICE-GENERAL.md](INDICE-GENERAL.md).*
+## 📚 Índice de docs
+
+- **[INDICE-GENERAL.md](INDICE-GENERAL.md)** — índice navegable de todo (empieza ahí si te pierdes).
+- **[mainline/HITOS.md](mainline/HITOS.md)** — la historia: cada hito, causa raíz, registros y ficheros.
+- **[ROADMAP-FINAL.md](ROADMAP-FINAL.md)** — el plan maestro F0–F5 + recetas clave.
+- **[CONTINUAR-AQUI.md](CONTINUAR-AQUI.md)** — estado de la última sesión + próximos pasos.
+- **[mainline/README.md](mainline/README.md)** — compilar / flashear / depurar el kernel.
+- **[mainline/wifi-consys/m3a/HITO-WIFI-M3A.md](mainline/wifi-consys/m3a/HITO-WIFI-M3A.md)** — el bring-up del CONSYS al detalle.
+- **[GUIA-MTKCLIENT.md](GUIA-MTKCLIENT.md)** · **[ESTRATEGIA-CUSTOM-BOOTLOADER.md](ESTRATEGIA-CUSTOM-BOOTLOADER.md)** — BROM / recuperación / bootloader.
+- **[README-PMOS-3.10.md](README-PMOS-3.10.md)** — el port previo sobre kernel 3.10 (archivado).
+
+---
+
+*Proyecto de aficionado, bring-up en hardware real. El historial completo está en
+[mainline/HITOS.md](mainline/HITOS.md).*
