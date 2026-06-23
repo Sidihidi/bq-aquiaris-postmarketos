@@ -1382,37 +1382,7 @@ static int wifi_bringup(struct mt6582_wifi *w)
 
 	w->started = true;
 
-	/*
-	 * ================= TODO Fase 1: cmd/event + wiphy + netdev =================
-	 * - wifi_send_cmd(CID, set/query, payload): arma struct wifi_cmd (PKT_TYPE=CMD en
-	 *   resource_pkttype_cs bits6-7) + payload, escribe WTDR0; ver nic_tx.c:nicTxCmd.
-	 * - RX dispatcher (kthread o IRQ): poll WHISR.RX0_DONE -> WRPLR -> leer WRDR0 ->
-	 *   struct hif_rx_header; según (packet_type & HIF_RX_PKT_TYPE_MASK):
-	 *     EVENT -> despachar por struct wifi_event.eid
-	 *     MGMT  -> cfg80211_inform_bss_frame (beacons del scan)
-	 *     DATA  -> netif_rx (Fase 3)
-	 * - CMD_ID_GET_NIC_CAPABILITY (query) -> EVENT_ID_NIC_CAPABILITY (lee MAC permanente).
-	 * - CMD_ID_BASIC_CONFIG (fija MAC), CMD_ID_SET_DOMAIN_INFO (canales 1-13).
-	 * - wiphy_new(&mt6582_wifi_cfg80211_ops, ...); banda 2.4G (14 canales); cipher_suites
-	 *   {WEP40,WEP104,TKIP,CCMP,AES_CMAC}; iftype STATION; wiphy_register().
-	 * - alloc_netdev/register_netdev "wlan0" + wireless_dev.
-	 * Ficheros: gl_cfg80211.c, gl_init.c:737-897/2259-2300, nic_cmd_event.h.
-	 *
-	 * ================= TODO Fase 2: cfg80211 ops connect/key =================
-	 * - .scan    -> CMD_ID_SCAN_REQ_V2 (struct CMD_SCAN_REQ_V2) -> SCAN_DONE.
-	 * - .connect -> CMD_ID_INFRASTRUCTURE + CMD_ID_SET_BSS_INFO + activar STA record;
-	 *               coreografía: estudiar mgmt/ais_fsm.c:aisFsmRunEventJoinRequest.
-	 * - .add_key/.del_key/.set_default_key -> CMD_ID_ADD_REMOVE_KEY (CMD_802_11_KEY).
-	 * - eventos CONNECTION_STATUS/ASSOC_INFO -> cfg80211_connect_result/roamed/disconnected.
-	 *
-	 * ================= TODO Fase 3: data path netdev =================
-	 * - ndo_start_xmit: prepend HIF_TX_HEADER_T (PKT_TYPE=DATA) -> WTDR0 (PDMA).
-	 * - PDMA real (0x11000180) para TX y RX; IRQ WF_HIF_IRQ (WHISR) + tasklet/NAPI.
-	 * - control de flujo TX por TC (WTSR0 / EVENT_ID_TX_DONE). Ver nic_tx.c/ahb_pdma.c.
-	 * ===========================================================================
-	 */
-
-	dev_info(w->dev, "*** Fase 0 COMPLETA. cfg80211/netdev = TODO (Fases 1-3) ***\n");
+	dev_info(w->dev, "*** mt6582-wifi listo: cfg80211 (scan/connect/key) + data-path (Fases 0-3) ***\n");
 	return 0;
 }
 

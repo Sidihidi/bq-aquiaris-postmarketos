@@ -30,9 +30,6 @@
 #define WHIER_DEFAULT		0xffffff0fU	/* RX0|RX1|TX|ABNORMAL|D2H_SW (downstream mtreg.h:231); el FW lo necesita p/señalar el boot */
 #define MCR_WASR		0x0018	/* abnormal status */
 #define CONN_MCU_CPUPCR		0x0160	/* PC del MCU CONSYS (bloque w->mcu @0x18070000) — diagnóstico de ejecución */
-#define MCR_D2HRM0R		0x0040	/* device->host mailbox 0 (código de estado/error del FW) */
-#define MCR_D2HRM1R		0x0044
-#define MCR_D2HRM2R		0x0048
 #define MCR_WSICR		0x001c	/* SW int a device */
 #define MCR_WTSR0		0x0020	/* TX status 0 (buffers libres) */
 #define MCR_WTSR1		0x0024
@@ -41,7 +38,7 @@
 #define MCR_WRDR0		0x0030	/* *** puerto de datos RX 0 *** */
 #define MCR_WRDR1		0x0034
 #define MCR_H2DSM0R		0x0038	/* host->device mailbox */
-#define MCR_D2HRM0R		0x0040	/* device->host mailbox */
+#define MCR_D2HRM0R		0x0040	/* device->host mailbox 0 (código de estado/error del FW) */
 #define MCR_D2HRM1R		0x0044
 #define MCR_D2HRM2R		0x0048
 #define MCR_WRPLR		0x0050	/* RX packet length */
