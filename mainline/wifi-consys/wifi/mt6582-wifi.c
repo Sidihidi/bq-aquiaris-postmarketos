@@ -674,7 +674,16 @@ static void wifi_tx_data(struct mt6582_wifi *w, struct sk_buff *skb)
 	h->resource_pkttype_cs = ((bmc ? WIFI_TC_BMCAST : WIFI_TC_DATA) << HIF_TX_RESOURCE_SHIFT) |
 				 (HIF_TX_PKT_TYPE_DATA << HIF_TX_PKT_TYPE_SHIFT);
 	h->wlan_header_len = ETH_HLEN;		/* =14: el FW localiza el ethertype para 802.3->802.11 (NO 0) */
-	h->sta_rec_idx = bmc ? 0xFF : 0;	/* STA_REC_INDEX_BMCAST / el AP. pkt_seq=0 (sin TX-DONE) */
+	h->sta_rec_idx = bmc ? 0xFF : 0;	/* STA_REC_INDEX_BMCAST / el AP */
+	/* HIF_TX_HEADER para datos 802.3 NORMALES (nicTxMsduQueue nic_tx.c:1408-1426, verificado byte a byte):
+	 *   fwd_sess = BURST_END (BIT5) — un pkt suelto = fin de burst (fgIsBurstEnd=TRUE en que_mgt.c); sin esto el FW ENCOLA esperando más
+	 *   pktfmt   = 0 — ucFormatID=0 | net_type(AIS)=0 | fgIs1x=0 (NO EAPOL) | fgIs802_11=0. (FLAG_1X solo en la ruta EAPOL 1635-1644)
+	 *   wlan_hdr = ETH_HLEN(14) ya puesto arriba (ucMacHeaderLen=ETH_HLEN para datos OS, nic_tx.c:2021)
+	 *   pkt_seq  = 0 — datos NO piden TX-DONE (solo mgmt); ack_bip = 0 — el FW elige rate/ACK del STA-record */
+	h->fwd_sess = HIF_TX_BURST_END;
+	h->pktfmt_flags = 0;
+	h->pkt_seq = 0;
+	h->ack_bip_rate = 0;
 	memcpy((u8 *)w->dlm + sizeof(*h), skb->data, frame_len);
 	wifi_port_write_pio(w, w->dlm, total);			/* puerto 0 = WTDR0 */
 	w->ndev->stats.tx_packets++;
@@ -866,6 +875,7 @@ static void wifi_send_join(struct mt6582_wifi *w)
 {
 	struct cmd_set_bss_info bi = {};
 	struct cmd_update_sta_record sta = {};
+	struct cmd_ps_profile ps = {};
 
 	bi.net_type_idx = NETWORK_TYPE_AIS;
 	bi.conn_state = MEDIA_STATE_CONNECTED;	/* =0. ENUM_PARAM_MEDIA_STATE_T (downstream wlan_oid.h:372) = {CONNECTED=0, DISCONNECTED=1}: el 2 estaba FUERA DE RANGO -> el FW ignoraba el SET_BSS_INFO -> nunca entraba en estado de datos (RX=0). Confirmado: reg.h, el EVENT_CONNECTION_STATUS y el enum del downstream coinciden en 0. */
@@ -899,7 +909,15 @@ static void wifi_send_join(struct mt6582_wifi *w)
 	sta.sta_state = STA_STATE_3;		/* =2: asociado, Class 1,2&3 -> el FW acepta DATOS */
 	sta.need_resp = 1;			/* el FW responde EVENT_ACTIVATE_STA_REC -> activa la cola TX */
 	wifi_send_cmd(w, CMD_ID_UPDATE_STA_RECORD, 1, &sta, sizeof(sta), 0);
-	dev_info(w->dev, "*** JoinComplete: SET_BSS_INFO(CONNECTED) + STA->STATE_3 ch=%u -> data-path ON ***\n",
+
+	/* CAM (siempre despierto): sin esto el FW entra en power-save, DUERME, y pierde tanto los beacons del
+	 * AP (EVENT_ID_BSS_BEACON_TIMEOUT 0x1b a los 30s -> desconexión) como la OFFER del DHCP (el AP la
+	 * manda mientras el FW duerme). = nicConfigPowerSaveProfile(AIS, Param_PowerModeCAM) del downstream. */
+	ps.net_type_index = NETWORK_TYPE_AIS;
+	ps.ps_profile = 0;			/* Param_PowerModeCAM = 0 */
+	wifi_send_cmd(w, CMD_ID_POWER_SAVE_MODE, 1, &ps, sizeof(ps), 0);
+
+	dev_info(w->dev, "*** JoinComplete: SET_BSS_INFO + STA->STATE_3 + PS=CAM ch=%u -> data-path ON ***\n",
 		 w->connect_channel);
 }
 

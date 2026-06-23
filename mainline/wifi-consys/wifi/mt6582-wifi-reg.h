@@ -208,6 +208,9 @@ struct wifi_cmd {
 #define HIF_TX_FLAG_802_11	0x80	/* ucPktFormtId_Flags bit7: frame 802.11 crudo */
 #define HIF_TX_NEED_ACK		0x01	/* ucAck_BIP_BasicRate bit0: pedir ACK al peer */
 #define HIF_TX_BASIC_RATE	0x04	/* ucAck_BIP_BasicRate bit2: TX a basic-rate (AUTH/ASSOC lo EXIGEN, si no MPDU_ERROR) */
+/* flags del HIF_TX_HEADER para DATOS 802.3 (de hif_tx.h downstream, nic_tx.c:1638-1648) */
+#define HIF_TX_FLAG_1X_FRAME	0x40	/* ucPktFormtId_Flags bit6: frame de datos (1X) — el FW lo EXIGE para datos */
+#define HIF_TX_BURST_END	0x20	/* ucForwardingType_SessionID bit5: fin de burst — sin esto el FW espera más paquetes */
 struct hif_tx_header {
 	__le16	tx_byte_count_up;	/* bits0-11 = byte count (hdr+frame), UP en 12-15 */
 	u8	ether_type_offset;
@@ -287,6 +290,7 @@ struct cmd_set_domain_info {
 } __packed;
 
 /* ---- Fase 2: CONNECT (structs/CMD_IDs de combo/mt6628, ver FASE2-CONNECT.md) ---- */
+#define CMD_ID_POWER_SAVE_MODE		0x06	/* SET; {net_type,ps_profile,rsv2}. CAM=siempre despierto. Sin esto: BSS_BEACON_TIMEOUT (evt 0x1b) a los 30s + OFFER perdida (FW duerme) */
 #define CMD_ID_ADD_REMOVE_KEY		0x08
 #define CMD_ID_DEFAULT_KEY_ID		0x09
 #define CMD_ID_INFRASTRUCTURE		0x0a
@@ -362,6 +366,12 @@ struct cmd_update_sta_record {		/* CMD_ID_UPDATE_STA_RECORD (0x17) — el regist
 	u8	asel_cap, rcpi, need_resp, uapsd_ac, uapsd_sp;
 	u8	rsv[3];
 } __packed;	/* 40 */
+
+struct cmd_ps_profile {			/* CMD_ID_POWER_SAVE_MODE (0x06) — CMD_PS_PROFILE_T downstream */
+	u8	net_type_index;		/* NETWORK_TYPE_AIS = 0 */
+	u8	ps_profile;		/* Param_PowerModeCAM = 0 (siempre despierto) */
+	u8	rsv[2];
+} __packed;	/* 4 */
 
 struct cmd_802_11_key {			/* instalar PTK/GTK (WPA2) */
 	u8	add_remove, tx_key, key_type, is_auth;
