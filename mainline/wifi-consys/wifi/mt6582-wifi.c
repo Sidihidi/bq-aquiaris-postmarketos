@@ -691,9 +691,9 @@ static void wifi_tx_data(struct mt6582_wifi *w, struct sk_buff *skb)
 	h->pkt_seq = 0;
 	h->ack_bip_rate = 0;
 	memcpy((u8 *)w->dlm + sizeof(*h), skb->data, frame_len);
-	/* dword-cero terminador de TX-aggregation (HAL_WRITE_TX_PORT downstream, hal.h:300): sin él el FW NO
-	 * cierra el frame de DATOS y no lo emite al aire (el DISCOVER sale del host pero no llega al S24).
-	 * SOLO datos — el init/descarga del FW NO lo lleva (corrompería la imagen). */
+	/* dword-cero terminador de TX-aggregation = comportamiento CORRECTO del downstream (HAL_WRITE_TX_PORT, hal.h:300;
+	 * lo añade a CADA TX para cerrar el frame). SOLO datos — el init/descarga del FW NO lo lleva (corrompería la
+	 * imagen). NOTA: el fix del DHCP fue la MAC del netdev, no esto; se mantiene por fidelidad al downstream. */
 	*(__le32 *)((u8 *)w->dlm + ALIGN(total, 4)) = 0;
 	wifi_port_write_pio(w, w->dlm, ALIGN(total, 4) + 4);	/* puerto 0 = WTDR0 (+4 = dword-cero terminador) */
 	w->ndev->stats.tx_packets++;
@@ -937,22 +937,20 @@ static void wifi_send_join(struct mt6582_wifi *w)
 	rxf = cpu_to_le32(0x0000000B);
 	wifi_send_cmd(w, CMD_ID_SET_RX_FILTER, 1, &rxf, sizeof(rxf), 0);
 
-	/* INDICAR BSS CONECTADO al power-management del FW: arma el monitor de conexión (beacon-interval/DTIM/AID).
-	 * Hipótesis fuerte para el EVENT_ID_BSS_BEACON_TIMEOUT (0x1b) que salta a +30s del connect PASE LO QUE PASE
-	 * con CAM/CH_ABORT: el FW espera esta indicación tras el assoc; sin ella su monitor de conexión expira.
-	 * = nicPmIndicateBssConnected (nic.c:2167). beacon=100/DTIM=1 por defecto (CAM => siempre despierto). */
+	/* INDICAR BSS CONECTADO al power-management del FW (beacon-interval/DTIM/AID) = comportamiento CORRECTO del
+	 * downstream (nicPmIndicateBssConnected, nic.c:2167; el stock lo manda tras el assoc). NOTA: NO fue el fix del
+	 * DHCP ni evita el 0x1b (benigno); se mantiene por fidelidad. beacon=100/DTIM=1 por defecto (CAM=siempre despierto). */
 	pm.net_type_idx = NETWORK_TYPE_AIS;
 	pm.dtim_period = 1;
 	pm.assoc_id = cpu_to_le16(w->assoc_id);
 	pm.beacon_interval = cpu_to_le16(100);
 	wifi_send_cmd(w, CMD_ID_INDICATE_PM_BSS_CONNECTED, 1, &pm, sizeof(pm), 0);
 
-	/* *** CAUSA RAÍZ DEL BEACON-TIMEOUT: soltar el privilege del canal tras el join. *** El CH_PRIVILEGE(REQ)
-	 * del .connect es TEMPORAL (max_interval 5s). El downstream, tras el join exitoso (aisFsmRunEventJoinComplete
-	 * -> AIS_STATE_NORMAL_TR -> aisFsmReleaseCh, ais_fsm.c:2632), manda CMD_ID_CH_PRIVILEGE action=ABORT con el
-	 * MISMO token (0) -> el FW suelta el privilege temporal y cae al CANAL-HOME del BSS (fijado por el SET_BSS_INFO
-	 * de arriba) y se queda ahí oyendo beacons + la OFFER. Sin esto: el privilege expira -> radio off-channel ->
-	 * EVENT 0x1b (BSS_BEACON_TIMEOUT) a los ~30s + la OFFER nunca llega. */
+	/* Soltar el privilege del canal tras el join = comportamiento CORRECTO del downstream (aisFsmReleaseCh al
+	 * entrar en AIS_STATE_NORMAL_TR, ais_fsm.c:2632): el CH_PRIVILEGE(REQ) del .connect es TEMPORAL (max_interval
+	 * 5s); al soltarlo el FW cae al CANAL-HOME del BSS (fijado por el SET_BSS_INFO de arriba). action=ABORT, mismo
+	 * token (0). NOTA: NO fue el fix del DHCP (lo fue la MAC del netdev = MAC del FW, ver wifi_register_cfg80211);
+	 * se mantiene por fidelidad al downstream. El EVENT 0x1b a +30s es BENIGNO (la conexión sobrevive; lo ignoramos). */
 	chp.net_type_idx = NETWORK_TYPE_AIS;
 	chp.token_id = 0;			/* = el token del REQ en .connect (zero-init) */
 	chp.action = CMD_CH_ACTION_ABORT;
