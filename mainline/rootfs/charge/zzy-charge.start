@@ -1,4 +1,0 @@
-#!/bin/sh
-# /etc/local.d/zzy-charge.start — arranca el mantenedor de carga FAN5405 al boot (robusto)
-start-stop-daemon --start --background --make-pidfile --pidfile /run/fan5405-charge.pid \
-  --exec /usr/local/bin/fan5405-charge 2>/dev/null
