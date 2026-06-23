@@ -310,8 +310,11 @@ struct cmd_set_domain_info {
 #define OP_MODE_INFRASTRUCTURE		0
 #define MEDIA_STATE_CONNECTED		0
 #define MEDIA_STATE_DISCONNECTED	1
-#define AUTH_MODE_OPEN			0	/* provisional (OPEN primero) */
+#define AUTH_MODE_OPEN			0
+#define AUTH_MODE_WPA2_PSK		7	/* ENUM_PARAM_AUTH_MODE_T: OPEN=0..WPA2_PSK=7 */
 #define ENC_STATUS_DISABLED		0
+#define ENC_STATUS_CCMP_ENABLED		6	/* ENUM_ENCRYPTION3_ENABLED: CCMP con clave */
+#define ENC_STATUS_CCMP_KEY_ABSENT	7	/* ENUM_ENCRYPTION3_KEY_ABSENT: CCMP, clave aún no instalada (SET_BSS_INFO pre-4way-handshake) */
 #define CIPHER_NONE			0
 #define CIPHER_CCMP			4
 /* valores para el STA-record del AP (de wlan_def.h): LEGACY_AP=BIT(0)|BIT(6); STATE_3=2;
