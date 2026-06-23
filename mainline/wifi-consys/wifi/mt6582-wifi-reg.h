@@ -294,6 +294,8 @@ struct cmd_set_domain_info {
 #define CMD_ID_ADD_REMOVE_KEY		0x08
 #define CMD_ID_DEFAULT_KEY_ID		0x09
 #define CMD_ID_INFRASTRUCTURE		0x0a
+#define CMD_ID_SET_RX_FILTER		0x0b	/* SET; payload u32 PARAM_PACKET_FILTER. 0x0B=DIRECTED|MULTICAST|BROADCAST. Sin esto el FW NO entrega broadcast (la OFFER del DHCP) al host */
+#define CMD_ID_INDICATE_PM_BSS_CONNECTED 0x1a	/* SET; tras el join arma el monitor de conexion del FW (beacon-interval/DTIM/AID). nicPmIndicateBssConnected. Sin esto: EVENT 0x1b BSS_BEACON_TIMEOUT a +30s */
 #define CMD_ID_BSS_ACTIVATE_CTRL	0x15
 #define CMD_ID_SET_BSS_INFO		0x16
 #define CMD_ID_UPDATE_STA_RECORD	0x17
@@ -303,6 +305,7 @@ struct cmd_set_domain_info {
 #define EVENT_ID_TX_DONE		0x17	/* TX-status de un mgmt frame: body[0]=seq, body[1]=status (TX_RESULT: 0=OK+ACK, 1=LIFE_TIMEOUT/sin-ACK, 3=MPDU_ERROR) */
 #define EVENT_ID_CH_PRIVILEGE		0x18	/* grant del canal (async) */
 #define CMD_CH_ACTION_REQ		0
+#define CMD_CH_ACTION_ABORT		1	/* soltar el privilege tras el join -> el FW cae al canal-home del BSS (sin esto: off-channel + beacon-timeout 0x1b a los ~30s) */
 #define EVENT_CH_STATUS_GRANT		0
 #define OP_MODE_INFRASTRUCTURE		0
 #define MEDIA_STATE_CONNECTED		0
@@ -341,6 +344,12 @@ struct cmd_set_bss_info {		/* "conectar a este BSS" */
 	u8	wapi_mode, is_ap_mode, rsv[1];
 	struct cmd_set_bss_rlm_param rlm;	/* rBssRlmParam EMBEBIDO (canal) — el real lo lleva dentro */
 } __packed;	/* 80 */
+
+struct cmd_pm_bss_connected {		/* CMD_ID_INDICATE_PM_BSS_CONNECTED (0x1a): arma el monitor de conexion del FW */
+	u8	net_type_idx, dtim_period;
+	__le16	assoc_id, beacon_interval, atim_window;
+	u8	is_uapsd, bmp_delivery_ac, bmp_trigger_ac, rsv;
+} __packed;	/* 12 (= CMD_INDICATE_PM_BSS_CONNECTED_T del downstream, byte a byte) */
 
 struct cmd_ch_privilege {		/* CMD_ID_CH_PRIVILEGE (0x20) — pide el canal antes del TX auth/assoc */
 	u8	net_type_idx, token_id, action, primary_channel;
