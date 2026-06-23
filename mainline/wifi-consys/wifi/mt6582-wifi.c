@@ -94,6 +94,9 @@ struct mt6582_wifi {
 	struct cfg80211_bss	*connect_bss;	/* BSS retenido del .connect -> cfg80211_connect_bss (evita WARN sme.c:845) */
 	u8			connect_channel;	/* canal guardado para el SET_BSS_INFO del JoinComplete */
 	u16			assoc_id;		/* AID del ASSOC-RESP -> CMD_INDICATE_PM_BSS_CONNECTED */
+	bool			connect_wpa2;		/* WPA2-CCMP pedido en .connect (vs red abierta) */
+	u8			assoc_ie[256];		/* IEs de wpa_supplicant (incluye el IE RSN) para el ASSOC-REQ */
+	u16			assoc_ie_len;
 	struct delayed_work	auto_bringup;	/* auto-levanta wlan0 al boot, con reintento (WLAN_READY flaky) */
 	u8			bringup_tries;
 };
@@ -687,7 +690,9 @@ static void wifi_tx_data(struct mt6582_wifi *w, struct sk_buff *skb)
 	 *   wlan_hdr = ETH_HLEN(14) ya puesto arriba (ucMacHeaderLen=ETH_HLEN para datos OS, nic_tx.c:2021)
 	 *   pkt_seq  = 0 — datos NO piden TX-DONE (solo mgmt); ack_bip = 0 — el FW elige rate/ACK del STA-record */
 	h->fwd_sess = HIF_TX_BURST_END;
-	h->pktfmt_flags = 0;
+	/* EAPOL (4-way handshake WPA2) = frame "1X": el FW lo emite SIN CIFRAR aunque el BSS sea WPA2.
+	 * Sin el flag, el FW intentaría cifrarlo con la clave que aún no existe -> handshake roto. */
+	h->pktfmt_flags = (((struct ethhdr *)skb->data)->h_proto == htons(ETH_P_PAE)) ? HIF_TX_FLAG_1X_FRAME : 0;
 	h->pkt_seq = 0;
 	h->ack_bip_rate = 0;
 	memcpy((u8 *)w->dlm + sizeof(*h), skb->data, frame_len);
@@ -853,7 +858,7 @@ static void wifi_send_auth(struct mt6582_wifi *w, const u8 *bssid, u16 seq)
 /* construir y enviar el ASSOC-REQ (paso 2 del SAA, tras recibir el AUTH seq=2). IEs: SSID + tasas. */
 static void wifi_send_assoc(struct mt6582_wifi *w, const u8 *bssid)
 {
-	u8 buf[128];
+	u8 buf[384];
 	struct {
 		__le16	fc, dur;
 		u8	da[6], sa[6], bssid[6];
@@ -866,7 +871,8 @@ static void wifi_send_assoc(struct mt6582_wifi *w, const u8 *bssid)
 	memcpy(h->da, bssid, ETH_ALEN);
 	memcpy(h->sa, w->mac, ETH_ALEN);
 	memcpy(h->bssid, bssid, ETH_ALEN);
-	h->cap = cpu_to_le16(WLAN_CAPABILITY_ESS);	/* red abierta: solo ESS */
+	h->cap = cpu_to_le16(WLAN_CAPABILITY_ESS |
+			     (w->connect_wpa2 ? WLAN_CAPABILITY_PRIVACY : 0));	/* WPA2 -> bit Privacy */
 	h->listen_int = cpu_to_le16(1);
 	*ie++ = WLAN_EID_SSID;       *ie++ = w->connect_ssid_len;
 	memcpy(ie, w->connect_ssid, w->connect_ssid_len); ie += w->connect_ssid_len;
@@ -874,6 +880,11 @@ static void wifi_send_assoc(struct mt6582_wifi *w, const u8 *bssid)
 	memcpy(ie, "\x82\x84\x8b\x96\x0c\x12\x18\x24", 8); ie += 8;	/* 1,2,5.5,11(b),6,9,12,18 */
 	*ie++ = WLAN_EID_EXT_SUPP_RATES; *ie++ = 4;
 	memcpy(ie, "\x30\x48\x60\x6c", 4); ie += 4;			/* 24,36,48,54 */
+	/* IEs de wpa_supplicant (el IE RSN para WPA2). Vacío en redes abiertas. */
+	if (w->assoc_ie_len) {
+		memcpy(ie, w->assoc_ie, w->assoc_ie_len);
+		ie += w->assoc_ie_len;
+	}
 	wifi_send_mgmt(w, buf, ie - buf, 0);
 	dev_info(w->dev, "*** mgmt-TX: ASSOC-REQ -> %pM ***\n", bssid);
 }
@@ -899,8 +910,13 @@ static void wifi_send_join(struct mt6582_wifi *w)
 	bi.op_rate_set = cpu_to_le16(RATE_SET_ERP);
 	bi.basic_rate_set = cpu_to_le16(BASIC_RATE_SET_ERP);
 	bi.sta_rec_idx_of_ap = 0;	/* STA-record del AP (idx 0, creado en .connect) */
-	bi.auth_mode = AUTH_MODE_OPEN;
-	bi.enc_status = ENC_STATUS_DISABLED;
+	if (w->connect_wpa2) {				/* WPA2-CCMP: clave aún ausente (se instala tras el 4-way handshake) */
+		bi.auth_mode = AUTH_MODE_WPA2_PSK;
+		bi.enc_status = ENC_STATUS_CCMP_KEY_ABSENT;
+	} else {
+		bi.auth_mode = AUTH_MODE_OPEN;
+		bi.enc_status = ENC_STATUS_DISABLED;
+	}
 	bi.phy_type_set = PHY_TYPE_SET_802_11BG;
 	memcpy(bi.own_mac, w->mac, ETH_ALEN);
 	bi.rlm.net_type_idx = NETWORK_TYPE_AIS;
@@ -1043,6 +1059,13 @@ static int wifi_cfg_connect(struct wiphy *wiphy, struct net_device *ndev,
 	w->connect_ssid_len = min_t(u8, sme->ssid_len, sizeof(w->connect_ssid));
 	memcpy(w->connect_ssid, sme->ssid, w->connect_ssid_len);
 
+	/* WPA2-CCMP: guardar el IE RSN (sme->ie, que wpa_supplicant rellena) para meterlo en el ASSOC-REQ,
+	 * y marcar el modo cifrado para el SET_BSS_INFO. Red abierta => cipher_group=0 => connect_wpa2=false. */
+	w->connect_wpa2 = (sme->crypto.cipher_group == WLAN_CIPHER_SUITE_CCMP);
+	w->assoc_ie_len = sme->ie_len ? min_t(u16, sme->ie_len, sizeof(w->assoc_ie)) : 0;
+	if (w->assoc_ie_len)
+		memcpy(w->assoc_ie, sme->ie, w->assoc_ie_len);
+
 	/* 1) activar la red/BSS AIS (active=1) — ANTES del CH_PRIVILEGE (el downstream lo hace en SEARCH) */
 	wifi_send_cmd(w, CMD_ID_BSS_ACTIVATE_CTRL, 1, &act, sizeof(act), 0);
 
@@ -1125,12 +1148,15 @@ static int wifi_cfg_add_key(struct wiphy *wiphy, struct net_device *ndev, int li
 	k.add_remove = 1;
 	k.tx_key = 1;
 	k.key_type = pairwise ? 1 : 0;
+	k.net_type = NETWORK_TYPE_AIS;		/* el FW necesita saber el BSS (faltaba -> la clave no se aplicaba) */
 	if (mac_addr)
 		memcpy(k.peer_addr, mac_addr, ETH_ALEN);
 	k.algorithm_id = (params->cipher == WLAN_CIPHER_SUITE_CCMP) ? CIPHER_CCMP : CIPHER_NONE;
 	k.key_id = key_idx;
 	k.key_len = params->key_len;
 	memcpy(k.key_material, params->key, params->key_len);
+	if (params->seq_len && params->seq_len <= sizeof(k.key_rsc))
+		memcpy(k.key_rsc, params->seq, params->seq_len);	/* RSC/PN inicial (GTK) */
 	wifi_send_cmd(w, CMD_ID_ADD_REMOVE_KEY, 1, &k, sizeof(k), 0);
 	mutex_unlock(&w->hif_lock);
 	return 0;
@@ -1186,6 +1212,13 @@ static const struct net_device_ops wifi_netdev_ops = {
 	.ndo_start_xmit = wifi_ndo_xmit,
 };
 
+/* ciphers soportados — wpa_supplicant los consulta para saber que el driver hace WPA2/CCMP. Sin esto:
+ * "nl80211: Driver does not support authentication/association or connect commands" y no asocia a redes cifradas. */
+static const u32 wifi_cipher_suites[] = {
+	WLAN_CIPHER_SUITE_CCMP,
+	WLAN_CIPHER_SUITE_TKIP,
+};
+
 /* registrar wiphy + wlan0 + arrancar el kthread RX. Llamado tras WLAN_READY + phase1. */
 static int wifi_register_cfg80211(struct mt6582_wifi *w)
 {
@@ -1203,6 +1236,8 @@ static int wifi_register_cfg80211(struct mt6582_wifi *w)
 	wiphy->bands[NL80211_BAND_2GHZ] = &wifi_band_2ghz;
 	wiphy->max_scan_ssids = 1;
 	wiphy->max_scan_ie_len = 512;
+	wiphy->cipher_suites = wifi_cipher_suites;		/* CCMP/TKIP -> wpa_supplicant habilita WPA2 */
+	wiphy->n_cipher_suites = ARRAY_SIZE(wifi_cipher_suites);
 	wiphy->signal_type = CFG80211_SIGNAL_TYPE_MBM;
 	wiphy->regulatory_flags = REGULATORY_CUSTOM_REG;
 	ret = wiphy_register(wiphy);
