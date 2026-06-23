@@ -34,6 +34,7 @@
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/kthread.h>
+#include <linux/workqueue.h>
 #include <net/cfg80211.h>
 
 #include "mt6582-wifi-reg.h"
@@ -92,6 +93,8 @@ struct mt6582_wifi {
 	u8			connect_ssid_len;
 	struct cfg80211_bss	*connect_bss;	/* BSS retenido del .connect -> cfg80211_connect_bss (evita WARN sme.c:845) */
 	u8			connect_channel;	/* canal guardado para el SET_BSS_INFO del JoinComplete */
+	struct delayed_work	auto_bringup;	/* auto-levanta wlan0 al boot, con reintento (WLAN_READY flaky) */
+	u8			bringup_tries;
 };
 
 static struct mt6582_wifi *g_wifi;
@@ -1434,6 +1437,29 @@ static const struct file_operations bringup_fops = {
 	.owner = THIS_MODULE,
 };
 
+/* auto-bring-up con REINTENTO: levanta wlan0 solo al boot. El WLAN_READY del FW es flaky cerca del
+ * boot (afirma sólo cuando el sistema lleva un rato arriba), así que si falla se reintenta cada 20s
+ * hasta 15 veces (~5min). Elimina los reboots y el echo manual. wifi_bringup deja started=false en
+ * fallo, por lo que cada reintento re-dispara func_on + descarga del FW limpiamente. */
+static void wifi_auto_bringup_work(struct work_struct *work)
+{
+	struct mt6582_wifi *w = container_of(work, struct mt6582_wifi, auto_bringup.work);
+
+	if (w->started)
+		return;
+	w->bringup_tries++;
+	wifi_bringup(w);
+	if (w->started)
+		dev_info(w->dev, "auto-bringup: wlan0 ARRIBA al intento %u\n", w->bringup_tries);
+	else if (w->bringup_tries < 15) {
+		dev_info(w->dev, "auto-bringup: WLAN_READY aún no (intento %u/15), reintento en 20s\n",
+			 w->bringup_tries);
+		schedule_delayed_work(&w->auto_bringup, msecs_to_jiffies(20000));
+	} else {
+		dev_err(w->dev, "auto-bringup: agotados 15 intentos — echo 1 > debugfs/bringup a mano\n");
+	}
+}
+
 /* ======================================================================
  *  probe / remove del platform_driver.
  * ====================================================================== */
@@ -1469,15 +1495,20 @@ static int mt6582_wifi_probe(struct platform_device *pdev)
 	debugfs_create_file("bringup", 0200, w->dbg, w, &bringup_fops);
 	platform_set_drvdata(pdev, w);
 
-	dev_info(dev, "mapeado HIF@0x%x PDMA@0x%x — echo 1 > /sys/kernel/debug/mt6582_wifi/bringup\n",
+	dev_info(dev, "mapeado HIF@0x%x PDMA@0x%x — auto-bringup en 30s (o echo 1 > debugfs/bringup)\n",
 		 WIFI_HIF_PHYS, WIFI_PDMA_PHYS);
-	dev_info(dev, "(Fase 0: func_on(WIFI) + descarga de WIFI_RAM_CODE. cfg80211 = TODO.)\n");
+
+	/* auto-levantar wlan0 al boot, con reintento contra la flakiness del WLAN_READY */
+	INIT_DELAYED_WORK(&w->auto_bringup, wifi_auto_bringup_work);
+	schedule_delayed_work(&w->auto_bringup, msecs_to_jiffies(30000));
 	return 0;
 }
 
 static void mt6582_wifi_remove(struct platform_device *pdev)	/* kernel 7.0.12: remove devuelve void */
 {
 	struct mt6582_wifi *w = platform_get_drvdata(pdev);
+
+	cancel_delayed_work_sync(&w->auto_bringup);
 
 	/* TODO(Fase 1+): unregister_netdev / wiphy_unregister / parar RX-thread o IRQ. */
 	if (w->started) {
