@@ -27,7 +27,6 @@
 #define MCR_WHCR		0x000c	/* HIF control */
 #define MCR_WHISR		0x0010	/* int status (read) */
 #define MCR_WHIER		0x0014	/* int enable */
-#define WHIER_DEFAULT		0xffffff0fU	/* RX0|RX1|TX|ABNORMAL|D2H_SW (downstream mtreg.h:231); el FW lo necesita p/señalar el boot */
 #define MCR_WASR		0x0018	/* abnormal status */
 #define CONN_MCU_CPUPCR		0x0160	/* PC del MCU CONSYS (bloque w->mcu @0x18070000) — diagnóstico de ejecución */
 #define MCR_WSICR		0x001c	/* SW int a device */
@@ -84,6 +83,7 @@
 #define HIF_TARGET_RXD0		2
 #define HIF_TARGET_TXD1		1	/* comandos runtime (TC4 -> WTDR1) */
 #define HIF_TARGET_RXD1		3	/* eventos runtime (WRDR1) */
+/* RX0|RX1|TX|ABNORMAL|D2H_SW (=0xffffff0f, downstream mtreg.h:231); el FW lo necesita p/señalar el boot */
 #define WHIER_DEFAULT		(WHISR_RX0_DONE_INT | WHISR_RX1_DONE_INT | \
 				 WHISR_TX_DONE_INT  | WHISR_ABNORMAL_INT  | \
 				 WHISR_D2H_SW_INT)
