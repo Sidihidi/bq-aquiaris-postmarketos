@@ -1,0 +1,59 @@
+#!/bin/sh
+# /etc/local.d/wifi-hola.start
+# Auto-conecta wlan0 a la red ABIERTA "hola" + DHCP, y reconecta si se cae.
+# Usa el flujo `iw connect <ssid> <freq> <bssid>` (rama segura del driver; wpa_supplicant
+# cuelga el driver por el NULL-deref del .connect sin-bssid -> NO usar wpa_supplicant aun).
+# Se lanza en segundo plano para no bloquear el arranque (local.d es sincrono).
+
+LOG=/var/log/wifi-hola.log
+
+wifi_hola_daemon() {
+    echo "[wifi-hola] arranque $(date 2>/dev/null)" >> "$LOG"
+
+    # 1) esperar a que wlan0 exista (el driver lo crea en el auto-bringup, ~34s tras boot)
+    i=0
+    while [ ! -d /sys/class/net/wlan0 ] && [ "$i" -lt 50 ]; do sleep 3; i=$((i + 1)); done
+    if [ ! -d /sys/class/net/wlan0 ]; then
+        echo "[wifi-hola] wlan0 nunca aparecio -> abandono" >> "$LOG"
+        return 1
+    fi
+
+    # 2) bucle de conexion + vigilancia
+    while true; do
+        if iw dev wlan0 link 2>/dev/null | grep -qi "Connected to" \
+           && ip -4 addr show wlan0 2>/dev/null | grep -q "inet "; then
+            # conectado con IP -> asegurar udhcpc vivo (renueva el lease ~cada 1h) y vigilar
+            pgrep -f "udhcpc -i wlan0" >/dev/null 2>&1 || udhcpc -i wlan0 -b -t 8 >> "$LOG" 2>&1
+            sleep 20
+            continue
+        fi
+
+        pkill -f "udhcpc -i wlan0" 2>/dev/null   # caido: matar udhcpc viejo antes de reconectar
+        ip link set wlan0 up 2>/dev/null         # el auto-bringup registra wlan0 pero no lo sube
+        SC=$(iw dev wlan0 scan 2>/dev/null)
+        BF=$(echo "$SC" | awk '
+            /^BSS /      { b = $2; sub(/\(.*/, "", b); f = "" }
+            /freq:/      { f = $2; sub(/\..*/, "", f) }   # iw nuevo da "2462.0"; iw connect quiere "2462"
+            /SSID:/      { if ($2 == "hola" && b != "" && f != "") { print b, f; exit } }')
+
+        if [ -n "$BF" ]; then
+            BSSID=$(echo "$BF" | cut -d' ' -f1)
+            FREQ=$(echo "$BF" | cut -d' ' -f2)
+            echo "[wifi-hola] connect hola $FREQ $BSSID" >> "$LOG"
+            iw dev wlan0 connect hola "$FREQ" "$BSSID" >> "$LOG" 2>&1
+            sleep 3
+            iw dev wlan0 link 2>/dev/null | head -2 >> "$LOG"
+            udhcpc -i wlan0 -b -t 8 >> "$LOG" 2>&1   # -b: obtiene lease, va a 2o plano y RENUEVA
+            sleep 2
+            if ip -4 addr show wlan0 2>/dev/null | grep -q "inet "; then
+                echo "[wifi-hola] OK: $(ip -4 addr show wlan0 | grep -o 'inet [0-9.]*')" >> "$LOG"
+            fi
+        else
+            echo "[wifi-hola] 'hola' no esta en el scan, reintento" >> "$LOG"
+        fi
+        sleep 10
+    done
+}
+
+wifi_hola_daemon &
+exit 0
