@@ -206,6 +206,26 @@ struct wifi_cmd {
 	/* sigue el payload del comando */
 } __packed;
 
+/* HIF_TX_HEADER completo (16B) para frames de GESTIÓN 802.11 (AUTH/ASSOC); el cmd usa solo 8B.
+ * hif_tx.h:158-171. Van por TC4 -> PUERTO 1 igual que el cmd, pero con PKT_TYPE=MGMT(3). */
+#define HIF_TX_FLAG_802_11	0x80	/* ucPktFormtId_Flags bit7: frame 802.11 crudo */
+#define HIF_TX_NEED_ACK		0x01	/* ucAck_BIP_BasicRate bit0: pedir ACK al peer */
+#define HIF_TX_BASIC_RATE	0x04	/* ucAck_BIP_BasicRate bit2: TX a basic-rate (AUTH/ASSOC lo EXIGEN, si no MPDU_ERROR) */
+struct hif_tx_header {
+	__le16	tx_byte_count_up;	/* bits0-11 = byte count (hdr+frame), UP en 12-15 */
+	u8	ether_type_offset;
+	u8	resource_pkttype_cs;	/* (TC<<2) | (PKT_TYPE<<6) */
+	u8	wlan_header_len;	/* bits0-5: longitud cabecera 802.11 (24 mgmt) */
+	u8	pktfmt_flags;		/* bit7 = 802.11 crudo, bits4-5 = net_type, bit6 = 1x */
+	__le16	llh;			/* BOW (0) */
+	__le16	seq_no;			/* BOW (0) */
+	u8	sta_rec_idx;		/* índice del STA-record del AP */
+	u8	fwd_sess;
+	u8	pkt_seq;
+	u8	ack_bip_rate;		/* bit0 = need_ack */
+	u8	reserved[2];
+} __packed;	/* 16B */
+
 /* cabecera HIF de RX (12B) + cabecera de evento (cuando pkt_type==EVENT) */
 struct hif_rx_header {
 	__le16	packet_len;
@@ -277,6 +297,7 @@ struct cmd_set_domain_info {
 #define CMD_ID_SET_BSS_RLM_PARAM	0x1d	/* canal (REAL=0x1d; 0x18 era REMOVE_STA_RECORD!). Va EMBEBIDO en SET_BSS_INFO */
 #define CMD_ID_CH_PRIVILEGE		0x20	/* conceder el canal ANTES del TX auth/assoc */
 #define EVENT_ID_CONNECTION_STATUS	0x03
+#define EVENT_ID_TX_DONE		0x17	/* TX-status de un mgmt frame: body[0]=seq, body[1]=status (TX_RESULT: 0=OK+ACK, 1=LIFE_TIMEOUT/sin-ACK, 3=MPDU_ERROR) */
 #define EVENT_ID_CH_PRIVILEGE		0x18	/* grant del canal (async) */
 #define CMD_CH_ACTION_REQ		0
 #define EVENT_CH_STATUS_GRANT		0
@@ -290,10 +311,11 @@ struct cmd_set_domain_info {
 /* valores para el STA-record del AP (de wlan_def.h): LEGACY_AP=BIT(0)|BIT(6); STATE_3=2;
  * BG=HR_DSSS(0)|ERP(1); RATE_SET_ERP=1..54M; BASIC_RATE_SET_ERP=1/2/5.5/11M */
 #define STA_TYPE_LEGACY_AP		0x41
+#define STA_STATE_1			0	/* recién creado: auth pendiente (el host manda AUTH) */
 #define STA_STATE_3			2
 #define PHY_TYPE_SET_802_11BG		0x03
-#define RATE_SET_ERP			0x0fff
-#define BASIC_RATE_SET_ERP		0x000f
+#define RATE_SET_ERP			0x3fff	/* bits0-13 = 1..54M (el FW exige 0x3fff, NO 0x0fff) */
+#define BASIC_RATE_SET_ERP		0x0003	/* 1M/2M CCK = subset del desired; el FW manda el MMPDU a tasa básica baja */
 
 struct cmd_bss_activate { u8 net_type_idx, active, rsv[2]; } __packed;	/* 4 */
 
