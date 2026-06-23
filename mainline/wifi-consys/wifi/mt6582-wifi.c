@@ -79,15 +79,19 @@ struct mt6582_wifi {
 	struct cfg80211_scan_request *scan_req;	/* scan en curso (NULL = idle) */
 	unsigned long		scan_deadline;	/* jiffies: forzar scan_done si el FW no manda SCAN_DONE */
 	struct task_struct	*rx_thread;	/* sondea el RX (beacons MGMT + eventos) */
+	struct sk_buff_head	tx_queue;	/* Fase 3: cola TX de datos (ndo_xmit encola; el rx_thread escribe bajo hif_lock) */
 	u8			scan_seq;
 	u8			mgmt_seq;	/* tx-seq de frames mgmt: !=0 => el FW manda EVENT_ID_TX_DONE */
 	bool			cfg_registered;
 	/* Fase 2: connect */
 	u8			mac[ETH_ALEN];		/* MAC permanente (de phase1) */
 	bool			connecting;
+	bool			connected;	/* Fase 3: asociado L2 -> permite el TX de datos (connecting solo dura el handshake) */
 	u8			connect_bssid[ETH_ALEN];
 	u8			connect_ssid[32];	/* para el IE SSID del ASSOC-REQ */
 	u8			connect_ssid_len;
+	struct cfg80211_bss	*connect_bss;	/* BSS retenido del .connect -> cfg80211_connect_bss (evita WARN sme.c:845) */
+	u8			connect_channel;	/* canal guardado para el SET_BSS_INFO del JoinComplete */
 };
 
 static struct mt6582_wifi *g_wifi;
@@ -552,6 +556,7 @@ static const struct ieee80211_regdomain wifi_regd = {
 
 /* indicar un beacon/probe-resp a cfg80211 (recibido por el puerto 0 = MGMT). */
 static void wifi_send_assoc(struct mt6582_wifi *w, const u8 *bssid);
+static void wifi_send_join(struct mt6582_wifi *w);
 
 static void wifi_rx_mgmt(struct mt6582_wifi *w, u8 *rx, u32 plen)
 {
@@ -577,8 +582,10 @@ static void wifi_rx_mgmt(struct mt6582_wifi *w, u8 *rx, u32 plen)
 			dev_info(w->dev, "*** AUTH-2 OK (status=0) -> ASSOC-REQ ***\n");
 			wifi_send_assoc(w, w->connect_bssid);
 		} else {
-			cfg80211_connect_result(w->ndev, w->connect_bssid, NULL, 0, NULL, 0,
-						WLAN_STATUS_UNSPECIFIED_FAILURE, GFP_ATOMIC);
+			cfg80211_connect_bss(w->ndev, w->connect_bssid, w->connect_bss, NULL, 0, NULL, 0,
+					     WLAN_STATUS_UNSPECIFIED_FAILURE, GFP_ATOMIC,
+					     NL80211_TIMEOUT_UNSPECIFIED);
+			w->connect_bss = NULL;
 			w->connecting = false;
 		}
 		return;
@@ -586,10 +593,14 @@ static void wifi_rx_mgmt(struct mt6582_wifi *w, u8 *rx, u32 plen)
 	if (w->connecting && subtype == 1 && flen >= 28) {		/* ASSOC-RESP */
 		u16 st = le16_to_cpu(*(__le16 *)(frame + 26));
 
-		cfg80211_connect_result(w->ndev, w->connect_bssid, NULL, 0, NULL, 0,
-					st == 0 ? WLAN_STATUS_SUCCESS : WLAN_STATUS_UNSPECIFIED_FAILURE,
-					GFP_ATOMIC);
+		if (st == 0)
+			wifi_send_join(w);	/* JoinComplete: SET_BSS_INFO(CONNECTED) -> el FW enruta datos */
+		cfg80211_connect_bss(w->ndev, w->connect_bssid, w->connect_bss, NULL, 0, NULL, 0,
+				     st == 0 ? WLAN_STATUS_SUCCESS : WLAN_STATUS_UNSPECIFIED_FAILURE,
+				     GFP_ATOMIC, NL80211_TIMEOUT_UNSPECIFIED);
+		w->connect_bss = NULL;
 		w->connecting = false;
+		w->connected = (st == 0);	/* habilita el TX de datos (ndo_xmit) */
 		dev_info(w->dev, "*** ASSOC-RESP status=%u (%s) ***\n",
 			 st, st == 0 ? "CONNECTED" : "rechazado");
 		return;
@@ -644,6 +655,53 @@ static void wifi_handle_event(struct mt6582_wifi *w, u8 *rx, u32 len)
 	}
 }
 
+/* Fase 3 TX: enviar un paquete de DATOS (skb Ethernet) por WTDR0 (puerto 0, TC1, PKT_TYPE=DATA).
+ * El FW full-MAC encapsula 802.3 -> 802.11. Caller con hif_lock (lo llama el rx_thread). */
+static void wifi_tx_data(struct mt6582_wifi *w, struct sk_buff *skb)
+{
+	struct hif_tx_header *h = (void *)w->dlm;
+	u16 frame_len = skb->len;
+	u16 total = sizeof(*h) + frame_len;
+
+	if (frame_len > 1600 || !w->ndev)
+		return;
+	memset(h, 0, sizeof(*h));
+	h->tx_byte_count_up = cpu_to_le16(total & 0x0fff);	/* incluye los 16B de cabecera HIF */
+	h->ether_type_offset = 14;				/* ((ETH_HLEN-2)+16)>>1 palabras, incl. HIF */
+	h->resource_pkttype_cs = (WIFI_TC_DATA << HIF_TX_RESOURCE_SHIFT) |
+				 (HIF_TX_PKT_TYPE_DATA << HIF_TX_PKT_TYPE_SHIFT);	/* TC1|DATA = 0x04 */
+	/* wlan_header_len=0, pktfmt_flags=0 (802.3, el FW encapsula), sta_rec_idx=0 (el AP), sin TX-DONE */
+	memcpy((u8 *)w->dlm + sizeof(*h), skb->data, frame_len);
+	wifi_port_write_pio(w, w->dlm, total);			/* puerto 0 = WTDR0 */
+	w->ndev->stats.tx_packets++;
+	w->ndev->stats.tx_bytes += frame_len;
+}
+
+/* Fase 3 RX: paquete de DATOS -> quitar la cabecera HIF (12B + offset) -> Ethernet directo -> netif_rx.
+ * El FW ya convirtió 802.11 -> 802.3 (SIN LLC/SNAP). Caller con hif_lock. */
+static void wifi_rx_data(struct mt6582_wifi *w, u8 *rx, u32 plen)
+{
+	struct hif_rx_header *h = (void *)rx;
+	u32 off = sizeof(*h) + (h->header_len_offset & HIF_RX_HDR_OFFSET_MASK);	/* 12 + padding(0-3) */
+	u32 eth_len;
+	struct sk_buff *skb;
+
+	if (!w->ndev || plen <= off)
+		return;
+	eth_len = plen - off;
+	if (eth_len > 1600)
+		return;
+	skb = netdev_alloc_skb(w->ndev, eth_len + 2);
+	if (!skb)
+		return;
+	skb_reserve(skb, 2);					/* alinea la IP a 4 */
+	memcpy(skb_put(skb, eth_len), rx + off, eth_len);
+	skb->protocol = eth_type_trans(skb, w->ndev);		/* la trama YA es Ethernet II */
+	w->ndev->stats.rx_packets++;
+	w->ndev->stats.rx_bytes += eth_len;
+	netif_rx(skb);
+}
+
 /* drenar AMBOS puertos RX una vez: port0 (MGMT->inform_bss + EVENT->handle) + port1 (EVENT). hif_lock. */
 static void wifi_rx_drain(struct mt6582_wifi *w)
 {
@@ -661,6 +719,8 @@ static void wifi_rx_drain(struct mt6582_wifi *w)
 			wifi_rx_mgmt(w, rx, l0);
 		else if (pt == HIF_RX_PKT_TYPE_EVENT)	/* *** los EVENTOS del FW llegan por aquí *** */
 			wifi_handle_event(w, rx, l0);
+		else if (pt == HIF_RX_PKT_TYPE_DATA)	/* *** Fase 3: paquetes de DATOS -> netif_rx *** */
+			wifi_rx_data(w, rx, l0);
 	}
 	if (l1 && ALIGN(l1, 4) <= sizeof(rx)) {
 		struct wifi_event *ev = (void *)rx;
@@ -675,10 +735,15 @@ static void wifi_rx_drain(struct mt6582_wifi *w)
 static int wifi_rx_thread(void *data)
 {
 	struct mt6582_wifi *w = data;
+	struct sk_buff *skb;
 
 	while (!kthread_should_stop()) {
 		mutex_lock(&w->hif_lock);
 		wifi_rx_drain(w);
+		while ((skb = skb_dequeue(&w->tx_queue)) != NULL) {	/* Fase 3: TX de datos encolados */
+			wifi_tx_data(w, skb);
+			dev_kfree_skb(skb);
+		}
 		if (w->scan_req && time_after(jiffies, w->scan_deadline)) {
 			struct cfg80211_scan_info info = { .aborted = false };
 
@@ -790,6 +855,35 @@ static void wifi_send_assoc(struct mt6582_wifi *w, const u8 *bssid)
 	dev_info(w->dev, "*** mgmt-TX: ASSOC-REQ -> %pM ***\n", bssid);
 }
 
+/* JoinComplete (tras ASSOC-RESP status=0): SET_BSS_INFO con conn_state=CONNECTED -> el FW entra en
+ * estado de DATOS y enruta TX/RX. Sin esto queda asociado pero NO reenvía datos (DHCP falla, RX=0).
+ * Paso 5 de aisFsmRunEventJoinRequest. Caller bajo hif_lock (lo llama wifi_rx_mgmt). */
+static void wifi_send_join(struct mt6582_wifi *w)
+{
+	struct cmd_set_bss_info bi = {};
+
+	bi.net_type_idx = NETWORK_TYPE_AIS;
+	bi.conn_state = 2;	/* PARAM_MEDIA_STATE_CONNECTED (FASE2-CONNECT.md; reg.h dice 0 -> probamos 2) */
+	bi.op_mode = OP_MODE_INFRASTRUCTURE;
+	bi.ssid_len = w->connect_ssid_len;
+	memcpy(bi.ssid, w->connect_ssid, w->connect_ssid_len);
+	memcpy(bi.bssid, w->connect_bssid, ETH_ALEN);
+	bi.op_rate_set = cpu_to_le16(RATE_SET_ERP);
+	bi.basic_rate_set = cpu_to_le16(BASIC_RATE_SET_ERP);
+	bi.sta_rec_idx_of_ap = 0;	/* STA-record del AP (idx 0, creado en .connect) */
+	bi.auth_mode = AUTH_MODE_OPEN;
+	bi.enc_status = ENC_STATUS_DISABLED;
+	bi.phy_type_set = PHY_TYPE_SET_802_11BG;
+	memcpy(bi.own_mac, w->mac, ETH_ALEN);
+	bi.rlm.net_type_idx = NETWORK_TYPE_AIS;
+	bi.rlm.rf_band = 1;		/* BAND_2G4 */
+	bi.rlm.primary_channel = w->connect_channel;
+	bi.rlm.check_id = 0x72;
+	wifi_send_cmd(w, CMD_ID_SET_BSS_INFO, 1, &bi, sizeof(bi), 0);
+	dev_info(w->dev, "*** JoinComplete: SET_BSS_INFO(CONNECTED) ch=%u -> FW a estado de datos ***\n",
+		 w->connect_channel);
+}
+
 /* esperar el grant del canal (EVENT_ID_CH_PRIVILEGE, 0x18) por el puerto 0; ignora beacons/heartbeats.
  * El downstream BLOQUEA aquí antes del JOIN — sin el grant el BSS queda off-channel (BSS-ABSENCE 0x19)
  * y el AUTH se descarta (TX FLUSHED). Caller con hif_lock (el kthread no compite). */
@@ -855,8 +949,18 @@ static int wifi_cfg_connect(struct wiphy *wiphy, struct net_device *ndev,
 		cfg80211_put_bss(wiphy, cbss);
 	}
 
+	/* Retener el BSS para devolverlo en cfg80211_connect_bss al reportar el resultado: si NO lo
+	 * pasamos, cfg80211 hace un lookup por BSSID que FALLA si el BSS expiró de su caché durante el
+	 * handshake -> WARN_ON(bss_not_found) en sme.c:845 + connect abortado ("Not connected").
+	 * (Doc del kernel en cfg80211.h: "hold a reference ... to avoid a warning if the bss is expired".) */
+	if (w->connect_bss)
+		cfg80211_put_bss(wiphy, w->connect_bss);
+	w->connect_bss = cfg80211_get_bss(wiphy, sme->channel, bssid, sme->ssid, sme->ssid_len,
+					  IEEE80211_BSS_TYPE_ESS, IEEE80211_PRIVACY_ANY);
+
 	mutex_lock(&w->hif_lock);
 	memcpy(w->connect_bssid, bssid, ETH_ALEN);
+	w->connect_channel = ch;
 	w->connect_ssid_len = min_t(u8, sme->ssid_len, sizeof(w->connect_ssid));
 	memcpy(w->connect_ssid, sme->ssid, w->connect_ssid_len);
 
@@ -917,6 +1021,11 @@ static int wifi_cfg_disconnect(struct wiphy *wiphy, struct net_device *ndev, u16
 	memcpy(bss.own_mac, w->mac, ETH_ALEN);
 	wifi_send_cmd(w, CMD_ID_SET_BSS_INFO, 1, &bss, sizeof(bss), 0);
 	w->connecting = false;
+	w->connected = false;
+	if (w->connect_bss) {
+		cfg80211_put_bss(wiphy, w->connect_bss);
+		w->connect_bss = NULL;
+	}
 	mutex_unlock(&w->hif_lock);
 	cfg80211_disconnected(ndev, reason, NULL, 0, true, GFP_KERNEL);
 	dev_info(w->dev, "*** .disconnect enviado ***\n");
@@ -980,8 +1089,16 @@ static int wifi_ndo_stop(struct net_device *ndev)
 }
 static netdev_tx_t wifi_ndo_xmit(struct sk_buff *skb, struct net_device *ndev)
 {
-	dev_kfree_skb(skb);		/* TX = Fase 3 */
-	ndev->stats.tx_dropped++;
+	struct mt6582_wifi *w = g_wifi;
+
+	/* ndo_start_xmit corre en softirq (no puede dormir): ENCOLAR; el rx_thread lo escribe
+	 * por WTDR0 bajo hif_lock. Solo TX cuando hay asociación (connecting). Flow-control simple. */
+	if (!w || !w->connected || skb->len > 1600 || skb_queue_len(&w->tx_queue) > 128) {
+		dev_kfree_skb(skb);
+		ndev->stats.tx_dropped++;
+		return NETDEV_TX_OK;
+	}
+	skb_queue_tail(&w->tx_queue, skb);
 	return NETDEV_TX_OK;
 }
 static const struct net_device_ops wifi_netdev_ops = {
@@ -1041,6 +1158,7 @@ static int wifi_register_cfg80211(struct mt6582_wifi *w)
 		return ret;
 	}
 
+	skb_queue_head_init(&w->tx_queue);
 	w->rx_thread = kthread_run(wifi_rx_thread, w, "mt6582-wifi-rx");
 	w->cfg_registered = true;
 	dev_info(w->dev, "*** cfg80211: wiphy + wlan0 registrados, RX-thread vivo ***\n");
@@ -1210,16 +1328,15 @@ static int wifi_bringup(struct mt6582_wifi *w)
 	dev_info(w->dev, "func_on(WIFI) OK\n");
 
 	/*
-	 * 1b. encender VCN33_WIFI AHORA (flanco fresco off->on), imitando HifAhbProbe del OEM.
-	 * El consys ya NO lo enciende al boot; el MAC WiFi necesita este flanco coincidente con el
-	 * arranque del firmware o nunca afirma WLAN_READY (D2HRM0R=0). Es el FIX del bring-up.
+	 * 1b. VCN33_WIFI: lo dejamos SIEMPRE ON (sin auto-apagado a los ~31s) para PRESERVAR la cal RF
+	 * que hace bring_up_chip al boot con VCN33 on. NO conmutar off->on aquí: ese flanco TIRA la cal
+	 * (probado: la cal RF NO es re-emitible en runtime -> da timeout). Con VCN33 ya on este enable es
+	 * no-op (refcount++) y WLAN_READY afirma igual; el rail se mantiene on vía regulator-always-on.
 	 */
 	ret = mt6582_consys_wifi_vcn33(true);
 	if (ret)
 		dev_warn(w->dev, "VCN33_WIFI enable=%d (sigo de todas formas)\n", ret);
-	else
-		dev_info(w->dev, "VCN33_WIFI ON (flanco off->on para reset del MAC)\n");
-	usleep_range(2000, 3000);	/* asentar el rail RF antes de tocar el HIF */
+	usleep_range(2000, 3000);	/* asentar antes de tocar el HIF */
 
 	/* 2. ganar driver-own para poder tocar los puertos de datos */
 	ret = wifi_set_driver_own(w);

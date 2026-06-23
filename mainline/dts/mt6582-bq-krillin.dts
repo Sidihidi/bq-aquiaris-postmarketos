@@ -397,6 +397,7 @@
 		regulator-name = "vcn33_wifi";
 		regulator-min-microvolt = <3300000>;
 		regulator-max-microvolt = <3300000>;
+		regulator-always-on;	/* RF WiFi: el flanco off->on tira la cal RF del boot (0 beacons) -> mantener ON */
 	};
 
 	/* power de la ranura SD (dual-boot): VMCH = VDD tarjeta, VMC = I/O */
