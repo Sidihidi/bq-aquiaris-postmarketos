@@ -1,3 +1,5 @@
+> 🎯 **2026-06-23 (Opus): el `MPDU_ERROR` del connect WiFi era el CANAL EQUIVOCADO, NO el firmware. El AUTH funciona con el canal real del scan (TX-DONE status=0 + el AP responde AUTH seq=2). ASSOC ya implementado (commit 1a5fb6d2). Handoff completo: [`mainline/wifi-consys/CONTINUAR-AQUI-wifi-0623.md`](mainline/wifi-consys/CONTINUAR-AQUI-wifi-0623.md). Freno actual = flakiness WLAN_READY.**
+
 # Progreso y roadmap — mainline Linux + WiFi/GPS en el BQ Aquaris E4.5 "krillin" (MT6582)
 
 _Última actualización: **2026-06-22** (sesión nocturna 21→22 jun). Repo: **Sidihidi/bq-aquiaris-postmarketos**._
