@@ -863,7 +863,7 @@ static void wifi_send_join(struct mt6582_wifi *w)
 	struct cmd_set_bss_info bi = {};
 
 	bi.net_type_idx = NETWORK_TYPE_AIS;
-	bi.conn_state = 2;	/* PARAM_MEDIA_STATE_CONNECTED (FASE2-CONNECT.md; reg.h dice 0 -> probamos 2) */
+	bi.conn_state = MEDIA_STATE_CONNECTED;	/* =0. ENUM_PARAM_MEDIA_STATE_T (downstream wlan_oid.h:372) = {CONNECTED=0, DISCONNECTED=1}: el 2 estaba FUERA DE RANGO -> el FW ignoraba el SET_BSS_INFO -> nunca entraba en estado de datos (RX=0). Confirmado: reg.h, el EVENT_CONNECTION_STATUS y el enum del downstream coinciden en 0. */
 	bi.op_mode = OP_MODE_INFRASTRUCTURE;
 	bi.ssid_len = w->connect_ssid_len;
 	memcpy(bi.ssid, w->connect_ssid, w->connect_ssid_len);
