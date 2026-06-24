@@ -189,8 +189,19 @@ static void wifi_port_read_pio(struct mt6582_wifi *w, void *buf, u32 len)
 	u32 i, words = (len + 3) / 4;
 
 	wifi_hstcr(w, HIF_TARGET_RXD0, len);
-	for (i = 0; i < words; i++)
+	for (i = 0; i < words; i++) {
+		/* audit 0624: si el data-port se atasca a mitad de burst, el readl de WRDR0 cuelga el bus AHB
+		 * (hard-lockup -> WDT). El guard de entrada (wifi_hif_alive, lee WCIR) NO basta: solo mira UNA vez.
+		 * Re-sondear WCIR ANTES de cada palabra (registro estatico, no toca el FIFO): si el core murio a
+		 * mitad de burst, abortar en vez de colgar el CPU. Mata el brick-on-scan SI el FW muere (WCIR!=6582).
+		 * (Si WCIR sigue vivo con WRDR0 colgado, esto no salva -> ese caso solo lo cierra PDMA+IRQ.) */
+		if ((rd(w->hif, MCR_WCIR) & WCIR_CHIP_ID) != WIFI_CHIP_ID_6582) {
+			w->started = false;
+			memset(&p[i], 0, (words - i) * 4);
+			return;
+		}
 		p[i] = rd(w->hif, MCR_WRDR0);
+	}
 }
 
 /* esperar un evento init en RX0 y devolver su 'status' (CMD_RESULT). Versión POLLING simple. */
@@ -348,8 +359,16 @@ static void wifi_port1_read_pio(struct mt6582_wifi *w, void *buf, u32 len)
 	u32 i, words = (len + 3) / 4;
 
 	wifi_hstcr(w, HIF_TARGET_RXD1, len);
-	for (i = 0; i < words; i++)
+	for (i = 0; i < words; i++) {
+		/* audit 0624: mismo guard por-palabra que wifi_port_read_pio (abortar si el core murio a mitad
+		 * de burst en vez de colgar el bus AHB). */
+		if ((rd(w->hif, MCR_WCIR) & WCIR_CHIP_ID) != WIFI_CHIP_ID_6582) {
+			w->started = false;
+			memset(&p[i], 0, (words - i) * 4);
+			return;
+		}
 		p[i] = rd(w->hif, MCR_WRDR1);
+	}
 }
 
 /* enviar un comando runtime (QUERY/SET) por TC4/puerto-1. 'resp_reserve' = tamaño del evento
@@ -764,6 +783,8 @@ static void wifi_rx_drain(struct mt6582_wifi *w)
 
 		wifi_port_read_pio(w, rx, ALIGN(l0, 4));
 		pt = le16_to_cpu(h->packet_type) & HIF_RX_PKT_TYPE_MASK;
+		if (pt == HIF_RX_PKT_TYPE_DATA)
+			dev_info(w->dev, "RX0 DATA l0=%u %16ph\n", l0, rx);	/* DIAG DHCP: ¿llega la OFFER (data) al HIF? */
 		if (pt == HIF_RX_PKT_TYPE_MGMT)
 			wifi_rx_mgmt(w, rx, l0);
 		else if (pt == HIF_RX_PKT_TYPE_EVENT)	/* *** los EVENTOS del FW llegan por aquí *** */
@@ -940,12 +961,13 @@ static void wifi_send_join(struct mt6582_wifi *w)
 	bi.op_rate_set = cpu_to_le16(RATE_SET_ERP);
 	bi.basic_rate_set = cpu_to_le16(BASIC_RATE_SET_ERP);
 	bi.sta_rec_idx_of_ap = 0;	/* STA-record del AP (idx 0, creado en .connect) */
-	if (w->connect_wpa2) {				/* WPA2-CCMP: el FW sabe que el BSS es CCMP pero las claves aun NO estan
-								 * (llegan tras el 4-way por .add_key). Con KEY_ABSENT(7) el FW NO descarta
-								 * los frames no cifrados (beacons, EAPOL) y transiciona SOLO a descifrar al
-								 * recibir las claves. Con ENABLED(6) activa el descifrado SIN claves -> descarta
-								 * beacons -> 0x1b a los 30s -> FW fragil -> rx_thread cuelga -> iw scan crashea.
-								 * Downstream nic.c:2000 usa KEY_ABSENT(7) en el join. */
+	if (w->connect_wpa2) {				/* WPA2-CCMP, enc_status=KEY_ABSENT(7). NOTA 06-24: probado ENABLED(6)
+								 * (gl_cfg80211.c:726 mapea CCMP->ENABLED) en HW con subnet/gateway REALES -> NO
+								 * arregla el DHCP (rx=2, 0 datos cifrados uni/bcast) Y ADEMÁS causa eid=0x1b (beacon
+								 * timeout) a +30s (el FW descarta beacons no cifrados). El CCMP está roto a un nivel
+								 * FW más profundo: claves CCMP instaladas OK (cipher 0xfac04, PTK tx_key=1, GTK
+								 * peer=bcast), StaRec activada (eid=0x13), pero el FW no cifra/descifra data.
+								 * KEY_ABSENT(7) es el valor más seguro (no provoca el 0x1b). */
 		bi.auth_mode = AUTH_MODE_WPA2_PSK;
 		bi.enc_status = ENC_STATUS_CCMP_KEY_ABSENT;
 	} else {
@@ -1206,6 +1228,10 @@ static int wifi_cfg_add_key(struct wiphy *wiphy, struct net_device *ndev, int li
 	if (params->seq_len && params->seq_len <= sizeof(k.key_rsc))
 		memcpy(k.key_rsc, params->seq, params->seq_len);	/* RSC/PN inicial (GTK) */
 	wifi_send_cmd(w, CMD_ID_ADD_REMOVE_KEY, 1, &k, sizeof(k), 0);
+	dev_info(w->dev, "add_key: %s idx=%d cipher=0x%x peer=%pM len=%d tx_key=%d\n",
+		 pairwise ? "PTK" : "GTK", key_idx, params->cipher, k.peer_addr, params->key_len, k.tx_key);
+	/* NOTA 0624: el enc_status=ENABLED(6) se manda UNA vez en el JOIN (wifi_send_join) = lo correcto p/CCMP.
+	 * Reenviar SET_BSS_INFO a mitad de conexión (tras la PTK) CRASHEA el FW (WDT). El .add_key solo instala claves. */
 	mutex_unlock(&w->hif_lock);
 	return 0;
 }
@@ -1244,6 +1270,7 @@ static int wifi_cfg_set_default_key(struct wiphy *wiphy, struct net_device *ndev
 	if (!wifi_hif_alive(w)) { mutex_unlock(&w->hif_lock); return -ENODEV; }	/* audit 0624: guard PIO */
 	dk.net_type_idx = NETWORK_TYPE_AIS;
 	dk.key_id = key_idx;
+	dev_info(w->dev, "set_default_key: idx=%d uni=%d multi=%d\n", key_idx, unicast, multicast);
 	wifi_send_cmd(w, CMD_ID_DEFAULT_KEY_ID, 1, &dk, sizeof(dk), 0);
 	mutex_unlock(&w->hif_lock);
 	return 0;
