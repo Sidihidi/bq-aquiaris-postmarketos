@@ -13,9 +13,10 @@
 ## ✅ Lo que YA funciona
 - Mainline **7.0.12 + Alpine**, arranca desde SD.
 - **Display**: `mediatek-drm` + **lima** (Mali-400) + **Phosh** (Wayland).
-- **Táctil** FT5336 · **PMIC** MT6323 en DT · **Batería %** (AUXADC/VBAT) · **Carga**.
+- **Táctil** FT5336 · **PMIC** MT6323 en DT · **Carga** · **Batería %** (AUXADC/VBAT) + **indicador en Phosh** (% + cargando/descargando, vía `test_power`→UPower).
+- **Stack Phosh** (06-24/25): **17 plugins** (toggles del panel + widgets de lockscreen) · **sesión elogind activa** (base de suspend/power) · brillo por comando **`bl`**.
 - **Bluetooth** (hci0): emparejado + toggle en Phosh. ✓
-- **WiFi**: escanea redes reales; `.connect` softMAC implementado (asociación sin confirmar).
+- **WiFi**: escanea redes reales; **red ABIERTA navega** (lease+ping); WPA2 asocia pero el CCMP de datos es hueso del FW.
 - **GPS**: protocolo `0xAAF0` decodificado; cadena gpsd→geoclue→Phosh validada (falta arrancar el motor).
 
 ---
@@ -42,12 +43,13 @@
 - [ ] **2.2** Implementar la secuencia en el bridge/driver
 - [ ] **2.3** Verificar: **fix real** (lat/lon) → geoclue → Phosh/Mapas
 
-## 🖥️ FASE 3 — Phosh 100%
-- [ ] **3.1** **Brillo**: exponer `/sys/class/backlight/.../brightness` + permisos → **slider** funcional
-- [ ] **3.2** **Botones** power/volumen: DT `mt6323-keys` + `gpio-keys` + mapeo
+## 🖥️ FASE 3 — Phosh 100%  *(MUY avanzada — 06-24/25)*
+- [x] **3.0** **Plugins de Phosh** (17: toggles del panel + widgets de lockscreen) ✓ · **batería en la UI** (% + cargando/descargando) ✓ · **sesión elogind activa** ✓ (base de suspend/power)
+- [~] **3.1** **Brillo**: por comando **`bl`** ✓; el **slider** NO va — gsd-power delega a `org.gnome.Shell.Brightness` (ausente en Phosh) → no expone `.Screen`. **Falta: debug del source de Phosh** (o un gsd-power que controle el backlight directo).
+- [ ] **3.2** **Botones** power/volumen: DT `mt6323-keys` + `gpio-keys` + mapeo (Vol↓ ya OK, hito 17)
 - [ ] **3.3** **Sensores + autorrotación**: LSM330 (accel) → iio → Phosh rota
 - [ ] **3.4** **Audio**: codec MT6582 (altavoz/auricular/micro) → ALSA
-- [ ] **3.5** **Suspensión/wake** (power → suspend-to-RAM) + **toggles** WiFi/BT/GPS en la UI
+- [ ] **3.5** **Suspensión/wake** (power → suspend-to-RAM) — la **sesión elogind activa** (3.0) es el groundwork
 
 ## 🔌 FASE 4 — Periféricos restantes
 - [ ] **4.1** **Radio FM** (función del CONSYS, como WiFi/BT) → driver V4L2
