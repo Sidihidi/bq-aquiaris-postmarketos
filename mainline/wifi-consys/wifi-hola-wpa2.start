@@ -1,0 +1,50 @@
+#!/bin/sh
+# /etc/local.d/wifi-hola-wpa2.start — auto-conectar a la WiFi "hola" (WPA2-CCMP) al boot.
+# Sustituye al wifi-hola.start (que era OPEN vía `iw connect`). Requiere el driver con el fix
+# enc_status=ENABLED(6) para CCMP (si no, asocia pero el DHCP no coge lease).
+#
+# ⚠️ La PSK va en claro aquí. NO subir este fichero con la pass real a GitHub: sanitizar
+#    (poner psk="XXXX") antes de commit, o leerla de un fichero aparte no versionado.
+
+IF=wlan0
+
+# 1) esperar a que exista wlan0 (el driver lo registra unos segundos tras el boot)
+for i in $(seq 1 25); do
+	[ -d /sys/class/net/$IF ] && break
+	sleep 1
+done
+ip link set $IF up 2>/dev/null
+
+# 2) escribir la config de wpa_supplicant (CCMP/RSN)
+mkdir -p /etc/wpa_supplicant
+cat > /etc/wpa_supplicant/hola.conf <<'EOF'
+ctrl_interface=/var/run/wpa_supplicant
+network={
+	ssid="hola"
+	psk="PON-TU-PSK-AQUI"
+	key_mgmt=WPA-PSK
+	proto=RSN
+	pairwise=CCMP
+	group=CCMP
+	scan_ssid=1
+}
+EOF
+chmod 600 /etc/wpa_supplicant/hola.conf
+
+# 3) arrancar wpa_supplicant + esperar COMPLETED + DHCP. Reintenta si el scan flaky no asocia.
+pkill -9 wpa_supplicant 2>/dev/null; sleep 1
+for try in 1 2 3; do
+	ip link set $IF up 2>/dev/null
+	wpa_supplicant -i $IF -c /etc/wpa_supplicant/hola.conf -D nl80211 -B
+	ok=
+	for i in $(seq 1 12); do
+		if wpa_cli -i $IF status 2>/dev/null | grep -q wpa_state=COMPLETED; then ok=1; break; fi
+		sleep 2
+	done
+	if [ -n "$ok" ]; then
+		udhcpc -i $IF -b -t 8 -T 2   # -b: a background tras el primer intento; renueva el lease solo
+		exit 0
+	fi
+	pkill -9 wpa_supplicant 2>/dev/null; sleep 2   # reintentar (scan flaky)
+done
+exit 0
