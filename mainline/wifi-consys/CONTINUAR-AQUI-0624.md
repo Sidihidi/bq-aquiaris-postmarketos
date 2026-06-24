@@ -54,7 +54,12 @@ NL80211_CMD_DEL_BEACON = NL80211_CMD_STOP_AP,    /* restaurar el alias */
    ```
    luego `wpa_supplicant -i wlan0 -c /tmp/wpa.conf -D nl80211 -dd -t -f /tmp/wpa.log -B` + vigilar `wpa_cli -i wlan0 status` (debe llegar a `COMPLETED`) → `udhcpc -i wlan0`. Si conecta → 4-way handshake → `.add_key` → DHCP cifrado. (Harness completo: `test_wpa2.py` en la máquina Windows — tiene la pass de la Pi, no está en GitHub.)
 4. **CAVEAT:** el `iw` del móvil quizá está compilado contra los headers ROTOS (el `iw connect` del auto-connect OPEN funcionaba = usa 48). Tras el fix, ese `iw connect` puede romperse. Plan: migrar el auto-connect OPEN a wpa_supplicant (`key_mgmt=NONE`) o recompilar iw. El auto-connect OPEN está en `/etc/local.d/wifi-hola.start`.
-5. Posible siguiente escollo (ya fichado): tras instalar la clave, puede que el FW necesite `enc_status`→`ENC_STATUS_CCMP_ENABLED(6)` (ahora va KEY_ABSENT) vía un SET_BSS_INFO de refresco.
+5. **PROBADO (sesión Mac 0624) y NO sirve — CRASHEA**: re-enviar `SET_BSS_INFO` con `enc_status=CCMP_ENABLED` tras `.add_key` cuelga el FW. El JoinComplete ya manda un `SET_BSS_INFO`; un **segundo seguido = hang → reset por watchdog** (confirmado en console-ramoops: el refresh es la última línea antes del reset; no hay `dmesg-ramoops` = no panic, es hang). REVERTIDO. **No re-mandar SET_BSS_INFO.**
+
+### ★ ESTADO REAL DEL WPA2 (sesión Mac 0624)
+- **AUTENTICA**: `wpa_state=COMPLETED`, `[PTK=CCMP GTK=CCMP]`, `EAPOL SUCCESS`. **El "bug del enum nl80211" NO existe** en el kernel actual (`nl80211.h` ya tiene los alias `NEW_BEACON=START_AP`; `iw list` muestra ciphers `CCMP/TKIP`). `wpa_supplicant 2.11`, `iw 6.17`. Ojo: `wpa_supplicant` **NO tiene `-f`** (build sin `CONFIG_DEBUG_FILE`) → usar `> log 2>&1 &`, no `-f log -B`.
+- **DATA-PATH cifrado FALLA**: DHCP sin lease (`tx>0 rx=3` = solo EAPOL, cero datos). **La causa NO es el enc_status.** En el log: `WPA: EAPOL-Key Replay Counter did not increase - dropping packet` en el **group-key handshake** → la **GTK (clave de grupo) se descarta** → el RX cifrado/broadcast no funciona (la OFFER del DHCP no se descifra).
+- **A ATACAR (siguiente)**: el handshake de la **GTK** (por qué wpa_supplicant la descarta — replay counter) y/o el **filtro/path de RX de datos cifrados** (`wifi_rx_data` con CCMP). NO el `SET_BSS_INFO`.
 
 (Detalle completo: memoria `reference_mt6582_wifi_wpa2`.)
 
