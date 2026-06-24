@@ -1021,8 +1021,12 @@ static bool wifi_wait_grant(struct mt6582_wifi *w, u32 ms)
 	u32 t;
 
 	for (t = 0; t < ms; t += 5) {
-		u32 wrplr = rd(w->hif, MCR_WRPLR);
-		u32 l0 = WRPLR_RX0_LEN(wrplr);
+		u32 wrplr, l0;
+
+		if (!wifi_hif_alive(w))		/* audit 0624: no busy-read un HIF muerto durante el connect (cuelga el bus) */
+			return false;
+		wrplr = rd(w->hif, MCR_WRPLR);
+		l0 = WRPLR_RX0_LEN(wrplr);
 
 		if (l0 && ALIGN(l0, 4) <= sizeof(rx)) {
 			struct wifi_event *ev = (void *)rx;
@@ -1189,6 +1193,10 @@ static int wifi_cfg_add_key(struct wiphy *wiphy, struct net_device *ndev, int li
 	k.net_type = NETWORK_TYPE_AIS;		/* el FW necesita saber el BSS (faltaba -> la clave no se aplicaba) */
 	if (mac_addr)
 		memcpy(k.peer_addr, mac_addr, ETH_ALEN);
+	else
+		memset(k.peer_addr, 0xff, ETH_ALEN);	/* *** GTK *** (mac_addr NULL = clave de grupo): peer = broadcast
+						 * FF:FF:FF:FF:FF:FF. Sin esto el FW liga la GTK a 00:00:00:00:00:00 -> NO descifra
+						 * broadcast/multicast (ARP, DHCP OFFER) -> rx=2, no navega. (audit vs gl_cfg80211.c:196) */
 	k.algorithm_id = (params->cipher == WLAN_CIPHER_SUITE_CCMP) ? CIPHER_CCMP : CIPHER_NONE;
 	k.key_id = key_idx;
 	k.key_len = params->key_len;
