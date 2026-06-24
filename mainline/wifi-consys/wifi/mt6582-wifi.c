@@ -910,9 +910,12 @@ static void wifi_send_join(struct mt6582_wifi *w)
 	bi.op_rate_set = cpu_to_le16(RATE_SET_ERP);
 	bi.basic_rate_set = cpu_to_le16(BASIC_RATE_SET_ERP);
 	bi.sta_rec_idx_of_ap = 0;	/* STA-record del AP (idx 0, creado en .connect) */
-	if (w->connect_wpa2) {				/* WPA2-CCMP: clave aún ausente (se instala tras el 4-way handshake) */
+	if (w->connect_wpa2) {				/* WPA2-CCMP: el FW ACTIVA el cifrado ya en el join (espera la clave del 4-way) */
 		bi.auth_mode = AUTH_MODE_WPA2_PSK;
-		bi.enc_status = ENC_STATUS_CCMP_KEY_ABSENT;
+		bi.enc_status = ENC_STATUS_CCMP_ENABLED;	/* 6, NO KEY_ABSENT(7). El downstream (nic.c:2000)
+								 * manda 6 en el join -> el FW transiciona a cifrar; con 7 NO transiciona ->
+								 * datos sin cifrar -> DHCP sin OFFER (el bloqueo real del WPA2). UN solo
+								 * SET_BSS_INFO en el join (no el refresh re-entrant que crasheaba). */
 	} else {
 		bi.auth_mode = AUTH_MODE_OPEN;
 		bi.enc_status = ENC_STATUS_DISABLED;
