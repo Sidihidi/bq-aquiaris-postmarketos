@@ -4,9 +4,10 @@ Reviviendo el **BQ Aquaris E4.5** (MediaTek MT6582, Cortex-A7 ×4 armv7, Mali-40
 540×960; *el primer Ubuntu Phone, 2014*) con **Linux mainline moderno** + **postmarketOS/Alpine**,
 escribiendo y portando los drivers que upstream nunca tuvo para este SoC.
 
-> **Estado (2026-06-23):** un teléfono de 2014 corriendo **Linux mainline 7.0.12 + Alpine** con
+> **Estado (2026-06-25):** un teléfono de 2014 corriendo **Linux mainline 7.0.12 + Alpine** con
 > **Phosh acelerado por GPU (lima/Mali-400)**, arrancando desde **SD**, con **táctil, carga,
-> batería, Bluetooth (empareja), WiFi (escanea redes reales) y GPS (protocolo decodificado)**.
+> batería en la UI (% + cargando/descargando), Bluetooth (empareja), WiFi (red abierta navega) y
+> GPS (protocolo decodificado)** — más **17 plugins de Phosh** y **sesión elogind activa**.
 
 📍 **Empieza por aquí.** Para el detalle por subsistema y el historial completo:
 [mainline/HITOS.md](mainline/HITOS.md). Para el plan de trabajo: [ROADMAP-FINAL.md](ROADMAP-FINAL.md).
@@ -27,13 +28,15 @@ en progreso · **⬜** = no empezado.
 | **Phosh** (Wayland) | ✅ | phoc + phosh + squeekboard sobre GLES2/lima. |
 | **Táctil FT5336** | ✅ | I2C0@0x38 + EINT117; alimentado por VGP1 (PMIC). |
 | **PMIC MT6323** | ✅ | En el DeviceTree (pwrap + MFD + 31 reguladores) — el "hub" de rails. |
-| **Batería %** | ✅ | VBAT por **AUXADC** del MT6323 (canal BATSNS). |
+| **Batería %** | ✅ | VBAT por **AUXADC** del MT6323 (canal BATSNS) + **indicador en Phosh**: % real + **cargando/descargando** (rayo) vía `test_power`→UPower. |
 | **Carga USB** | ✅ | Cargador FAN5405 (I2C0@0x6a), 4.2 V / 800 mA, con kick del watchdog. |
 | **Bluetooth (hci0)** | ✅ | Empareja (probado con un S24) + **toggle en Phosh**. Vía el CONSYS. |
 | **WiFi — scan** | ✅ | Escanea **redes reales** (`iw dev wlan0 scan` lista decenas de APs). cfg80211/`wlan0` registrados. |
 | **WiFi — connect** | 🟡 | `.connect` **softMAC** implementado (Fase 2: AUTH/ASSOC + STA-record + CH_PRIVILEGE conducidos por el host). **Falta confirmar asociación + WPA2 + data-path.** |
 | **GPS** | 🟡 | Protocolo **`0xAAF0` decodificado**; cadena **gpsd→geoclue→Phosh validada**. Falta el `START_SEQ` de `mnld` (arrancar el motor). |
-| Brillo · botones power/vol · sensores · audio | ⬜ | Fase 3 (Phosh 100%) — ver roadmap. |
+| **Stack Phosh** (plugins + sesión) | 🟡 | **17 plugins** (toggles del panel: datos/hotspot/dark-mode/etc. + widgets de lockscreen); **sesión elogind activa** (base de suspend/power). |
+| Brillo | 🟡 | Por comando **`bl 0-100`** (PWM_DUTY). El *slider* = problema del source de Phosh (gsd-power delega a `org.gnome.Shell.Brightness`, ausente). |
+| Botones power/vol · sensores · audio | ⬜ | Fase 3 (Phosh 100%) — ver roadmap. |
 | FM · vibrador · cámara · módem 3G | ⬜ | Fases 4-5 (cámara/módem = propietarios, muy difícil). |
 
 > **Estabilidad del boot:** el baseline es **estable**. En ~1/3 de los arranques la GUI tarda o no
