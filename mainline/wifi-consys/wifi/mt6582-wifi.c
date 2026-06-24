@@ -822,6 +822,7 @@ static int wifi_cfg_scan(struct wiphy *wiphy, struct cfg80211_scan_request *requ
 	if (!w || !w->started)
 		return -ENODEV;
 	mutex_lock(&w->hif_lock);
+	if (!wifi_hif_alive(w)) { mutex_unlock(&w->hif_lock); return -ENODEV; }	/* audit 0624: guard PIO en los callbacks cfg80211. Las ops de userspace (iw scan, wpa_supplicant) iban al HIF sin proteger -> si el FW esta fragil, el rd(MCR_WHIER) de wifi_hstcr cuelga el bus AHB al instante -> hard-lockup. El A+B solo cubria el rx_thread. */
 	if (w->scan_req) {
 		mutex_unlock(&w->hif_lock);
 		return -EBUSY;
@@ -1086,6 +1087,7 @@ static int wifi_cfg_connect(struct wiphy *wiphy, struct net_device *ndev,
 					  IEEE80211_BSS_TYPE_ESS, IEEE80211_PRIVACY_ANY);
 
 	mutex_lock(&w->hif_lock);
+	if (!wifi_hif_alive(w)) { mutex_unlock(&w->hif_lock); return -ENODEV; }	/* audit 0624: guard PIO */
 	memcpy(w->connect_bssid, bssid, ETH_ALEN);
 	w->connect_channel = ch;
 	w->connect_ssid_len = min_t(u8, sme->ssid_len, sizeof(w->connect_ssid));
@@ -1149,6 +1151,7 @@ static int wifi_cfg_disconnect(struct wiphy *wiphy, struct net_device *ndev, u16
 	if (!w || !w->started)
 		return -ENODEV;
 	mutex_lock(&w->hif_lock);
+	if (!wifi_hif_alive(w)) { mutex_unlock(&w->hif_lock); return -ENODEV; }	/* audit 0624: guard PIO */
 	bss.net_type_idx = NETWORK_TYPE_AIS;
 	bss.conn_state = MEDIA_STATE_DISCONNECTED;
 	bss.op_mode = OP_MODE_INFRASTRUCTURE;
@@ -1177,6 +1180,7 @@ static int wifi_cfg_add_key(struct wiphy *wiphy, struct net_device *ndev, int li
 	if (!w || !w->started || !params || params->key_len > 32)
 		return -EINVAL;
 	mutex_lock(&w->hif_lock);
+	if (!wifi_hif_alive(w)) { mutex_unlock(&w->hif_lock); return -ENODEV; }	/* audit 0624: guard PIO */
 	k.add_remove = 1;
 	k.tx_key = pairwise ? 1 : 0;	/* SOLO la PTK es TX-key (IS_TRANSMIT_KEY=BIT31 del downstream); la GTK NO.
 					 * Marcar la GTK como tx_key=1 hace que el FW use la GTK para el TX unicast
@@ -1205,6 +1209,7 @@ static int wifi_cfg_del_key(struct wiphy *wiphy, struct net_device *ndev, int li
 	if (!w || !w->started)
 		return -EINVAL;
 	mutex_lock(&w->hif_lock);
+	if (!wifi_hif_alive(w)) { mutex_unlock(&w->hif_lock); return -ENODEV; }	/* audit 0624: guard PIO */
 	k.add_remove = 0;			/* 0 = quitar la clave */
 	k.key_type = pairwise ? 1 : 0;
 	k.net_type = NETWORK_TYPE_AIS;
@@ -1226,6 +1231,7 @@ static int wifi_cfg_set_default_key(struct wiphy *wiphy, struct net_device *ndev
 	/* wpa_supplicant lo llama tras instalar la PTK; el FW necesita saber qué idx es TX-default
 	 * para cifrar/descifrar en la direccion del AP. Sin esto algunos FW MTK no transmiten cifrado. */
 	mutex_lock(&w->hif_lock);
+	if (!wifi_hif_alive(w)) { mutex_unlock(&w->hif_lock); return -ENODEV; }	/* audit 0624: guard PIO */
 	dk.net_type_idx = NETWORK_TYPE_AIS;
 	dk.key_id = key_idx;
 	wifi_send_cmd(w, CMD_ID_DEFAULT_KEY_ID, 1, &dk, sizeof(dk), 0);
