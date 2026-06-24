@@ -680,8 +680,8 @@ charge-status (FAN5405 — hito 11) ──────┼─► battery-upower (
 **Persistencia:** `/etc/local.d/zzv-battery.start` (insmod `test_power.ko` + `start-stop-daemon`).
 Sobrevive reinicios.
 
-**Ficheros:** `/usr/local/lib/test_power.ko`, `mainline/rootfs/battery/battery-upower`,
-`mainline/rootfs/battery/zzv-battery.start` (+ reutiliza `battery`/`charge-status` de hitos 11-12).
+**Ficheros:** `/usr/local/lib/test_power.ko`, `mainline/rootfs/battery-upower`,
+`mainline/rootfs/zzv-battery.start` (+ reutiliza `battery`/`charge-status` de hitos 11-12).
 Memoria `.claude`: `reference_mt6582_battery_upower`.
 
 ---
