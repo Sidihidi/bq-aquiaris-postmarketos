@@ -1,0 +1,53 @@
+#!/usr/bin/python3
+# battery-upower — puente batería real -> test_power -> UPower -> Phosh (krillin / MT6582).
+#
+# No hay driver mainline que lea VBAT en el MT6582, así que leemos VBAT por pwrap
+# (/usr/local/bin/battery, AUXADC del PMIC MT6323) y el estado de carga del FAN5405
+# (/usr/local/bin/charge-status), y alimentamos un power_supply de pega (test_power.ko)
+# cuyos params expone UPower -> Phosh.
+#
+# ★ CLAVE: UPower decide cargando/descargando por el SIGNO de current_now, NO por el
+#   string 'status'. Por eso escribimos battery_current POSITIVO al cargar / NEGATIVO al
+#   descargar (con eso UPower da state=charging + el icono con rayo).
+#
+# Arranca al boot vía /etc/local.d/zzv-battery.start (insmod test_power.ko + start-stop-daemon).
+import time, re, subprocess
+
+P = "/sys/module/test_power/parameters/"
+
+def w(f, v):
+    try:
+        with open(P + f, "w") as fp:
+            fp.write(str(v))
+    except Exception:
+        pass
+
+def sh(cmd):
+    try:
+        return subprocess.check_output(cmd, text=True, timeout=10, stderr=subprocess.STDOUT)
+    except Exception:
+        return ""
+
+while True:
+    try:
+        b = sh(["/usr/local/bin/battery"]); pct = None
+        m = re.search(r'VBAT:\s*(\d+)\s*mV.*?(\d+)\s*%', b)
+        if m:
+            mv = int(m.group(1)); pct = max(0, min(100, int(m.group(2))))
+            w("battery_voltage", mv * 1000)   # uV
+            w("battery_capacity", pct)
+        cs = sh(["/usr/local/bin/charge-status"]).upper()
+        charging = ("CARGANDO" in cs) or ("CHARGING" in cs)
+        if charging:
+            if pct is not None and pct >= 100:
+                w("battery_status", "full"); w("battery_current", 0)
+            else:
+                w("battery_status", "charging"); w("battery_current", 500000)   # +uA = cargando
+            w("ac_online", 1); w("usb_online", 1)
+        else:
+            w("battery_status", "discharging"); w("battery_current", -300000)   # -uA = descargando
+            w("ac_online", 0); w("usb_online", 0)
+        w("battery_present", 1); w("battery_health", "good"); w("battery_technology", "Li-ion")
+    except Exception:
+        pass
+    time.sleep(15)
