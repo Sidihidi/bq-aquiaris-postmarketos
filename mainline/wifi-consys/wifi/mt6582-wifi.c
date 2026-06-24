@@ -106,6 +106,27 @@ static struct mt6582_wifi *g_wifi;
 static inline u32 rd(void __iomem *b, u32 o) { return readl(b + o); }
 static inline void wr(void __iomem *b, u32 o, u32 v) { writel(v, b + o); }
 
+/* Guard anti-cuelgue (audit 0624). Causa raiz del reboot ciclico: si el FW/HIF del WiFi muere
+ * (p.ej. tras un connect fallido en bucle), el siguiente readl/writel PIO al bus AHB se cuelga
+ * PARA SIEMPRE -> hard-lockup mudo del CPU -> el kernel deja de alimentar el WDT -> reset a los
+ * 31s (sin panic; pstore con el log cortado limpio). Antes de tocar el puerto de datos, leer WCIR
+ * (chip-id, registro estatico): si NO devuelve 0x6582 (da 0x0000/0xffffffff con el bus caido),
+ * abandonar el acceso y marcar el WiFi muerto en vez de colgar el CPU. Cubre el caso
+ * "control-reg responde mientras el data-port (WRDR0) cuelga". Si cuelga TODO el HIF este readl
+ * tambien colgaria — pero entonces no hay defensa software posible (haria falta PDMA+IRQ, fix C). */
+static bool wifi_hif_alive(struct mt6582_wifi *w)
+{
+	u32 wcir = rd(w->hif, MCR_WCIR);
+
+	if ((wcir & WCIR_CHIP_ID) != WIFI_CHIP_ID_6582) {
+		if (w->started)
+			dev_err(w->dev, "HIF caido (WCIR=0x%08x) -> abandono PIO, marco WiFi muerto\n", wcir);
+		w->started = false;
+		return false;
+	}
+	return true;
+}
+
 /* ======================================================================
  *  Capa HIF: propiedad driver-own y (Fase 0) escritura/lectura PIO del puerto.
  *  En Fase 3 esto pasa a PDMA (0x11000180) + IRQ (WHISR). Ver ahb_pdma.c.
@@ -766,20 +787,28 @@ static int wifi_rx_thread(void *data)
 	struct sk_buff *skb;
 
 	while (!kthread_should_stop()) {
-		mutex_lock(&w->hif_lock);
-		wifi_rx_drain(w);
-		while ((skb = skb_dequeue(&w->tx_queue)) != NULL) {	/* Fase 3: TX de datos encolados */
-			wifi_tx_data(w, skb);
-			dev_kfree_skb(skb);
-		}
-		if (w->scan_req && time_after(jiffies, w->scan_deadline)) {
-			struct cfg80211_scan_info info = { .aborted = false };
+		bool idle;
 
-			cfg80211_scan_done(w->scan_req, &info);
-			w->scan_req = NULL;
+		mutex_lock(&w->hif_lock);
+		if (wifi_hif_alive(w)) {	/* audit 0624 fix A: no tocar un HIF muerto (evita el hard-lockup) */
+			wifi_rx_drain(w);
+			while ((skb = skb_dequeue(&w->tx_queue)) != NULL) {	/* Fase 3: TX de datos encolados */
+				wifi_tx_data(w, skb);
+				dev_kfree_skb(skb);
+			}
+			if (w->scan_req && time_after(jiffies, w->scan_deadline)) {
+				struct cfg80211_scan_info info = { .aborted = false };
+
+				cfg80211_scan_done(w->scan_req, &info);
+				w->scan_req = NULL;
+			}
 		}
+		/* audit 0624 fix B: si nadie usa el WiFi (o esta muerto), sondear lento (200ms) en vez de
+		 * 20ms. Menos trafico PIO al HIF = menos ventanas para pegar un bus-hang. */
+		idle = !w->started ||
+		       (!w->scan_req && !w->connecting && !w->connected && skb_queue_empty(&w->tx_queue));
 		mutex_unlock(&w->hif_lock);
-		msleep(20);
+		msleep(idle ? 200 : 20);
 	}
 	return 0;
 }
@@ -1189,7 +1218,19 @@ static int wifi_cfg_del_key(struct wiphy *wiphy, struct net_device *ndev, int li
 static int wifi_cfg_set_default_key(struct wiphy *wiphy, struct net_device *ndev, int link_id,
 				    u8 key_idx, bool unicast, bool multicast)
 {
-	return 0;	/* TODO: CMD_ID_DEFAULT_KEY_ID */
+	struct mt6582_wifi *w = g_wifi;
+	struct cmd_default_key_id dk = {};
+
+	if (!w || !w->started)
+		return -EINVAL;
+	/* wpa_supplicant lo llama tras instalar la PTK; el FW necesita saber qué idx es TX-default
+	 * para cifrar/descifrar en la direccion del AP. Sin esto algunos FW MTK no transmiten cifrado. */
+	mutex_lock(&w->hif_lock);
+	dk.net_type_idx = NETWORK_TYPE_AIS;
+	dk.key_id = key_idx;
+	wifi_send_cmd(w, CMD_ID_DEFAULT_KEY_ID, 1, &dk, sizeof(dk), 0);
+	mutex_unlock(&w->hif_lock);
+	return 0;
 }
 
 static struct cfg80211_ops wifi_cfg_ops = {

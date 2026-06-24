@@ -328,6 +328,9 @@ struct cmd_set_domain_info {
 
 struct cmd_bss_activate { u8 net_type_idx, active, rsv[2]; } __packed;	/* 4 */
 
+/* CMD_ID_DEFAULT_KEY_ID (0x09) — cual clave (idx) es la TX-default. {net_type, key_id, rsv[2]}. */
+struct cmd_default_key_id { u8 net_type_idx, key_id, rsv[2]; } __packed;	/* 4 */
+
 struct cmd_set_bss_rlm_param {		/* fija el canal del BSS */
 	u8	net_type_idx, rf_band, primary_channel, rf_sco;
 	u8	erp_prot, ht_prot, gf_mode, tx_rifs;
