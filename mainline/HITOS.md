@@ -36,10 +36,20 @@ táctil Focaltech FT5336, PMIC MT6323, cargador FAN5405, GPU Mali-400 MP2, combo
 | 17 | Keypad (volumen) MT6582 | 🟡 PARCIAL (Vol↓ OK) | 2026-06-17 |
 | 18 | lima / Mali-400 (GPU) | 🟡 PARCIAL → ✅ (ver nota) | 2026-06-18 |
 | 19 | CONSYS WiFi/BT/GPS/FM — la saga | 🟡 EN CURSO (gran avance) | 2026-06-18→22 |
+| 20 | Plugins de Phosh (quick-settings + lockscreen, 17) | ✅ RESUELTO | 2026-06-24 |
+| 21 | Batería en Phosh — indicador % + cargando/descargando | ✅ RESUELTO | 2026-06-25 |
+| 22 | Sesión elogind activa + diagnóstico del slider de brillo | 🟡 (sesión ✅, slider ⬜) | 2026-06-24 |
+| 23 | WiFi WPA2 — scan-crash resuelto + CCMP diagnosticado | 🟡 (host OK, CCMP = hueso FW) | 2026-06-24 |
 
 Estado global a **2026-06-22**: Display DRM nativo + Phosh con GPU lima; táctil end-to-end;
 carga + batería; **WiFi escanea 16 redes reales vía `iw dev wlan0 scan`** (falta connect/WPA2);
 **GPS protocolo `0xAAF0` decodificado** (falta 1 recaptura); **BT emparejado con un S24**.
+
+Actualización **2026-06-25**: **stack Phosh muy avanzado** — 17 plugins compilados (toggles del
+panel), **batería completa en la UI** (% real + icono de carga con rayo), **sesión elogind activa**
+conseguida (base para suspend/power). WiFi: red **ABIERTA navega** (lease+ping); WPA2 asocia pero el
+**CCMP de datos es hueso del FW** (host verificado byte-a-byte). Brillo por comando `bl` (el slider
+es problema del source de Phosh, no del HW).
 
 ---
 
@@ -612,6 +622,113 @@ scan + cfg80211, ~1059 líneas, `1b47c5b0`), `mt6582-wifi-reg.h` (`488fd6c1`),
 - Build+flash: `~/wifi-iter.sh` (build zImage + boot.img + `dd` sector **83968** + reboot).
 - Flash mainline (SD): `fastboot flash boot ~/mainline/pkg/boot-btifDMA-sd.img`. **mtkclient: `wo
   <off> <len> <img>` NUNCA `wf`; fastboot `flash boot` NUNCA `boot`; NUNCA restaurar el LK Lollipop.**
+
+---
+
+## 20. Plugins de Phosh (quick-settings + lockscreen) ✅ (2026-06-24)
+
+Los **toggles del panel rápido** de Phosh (datos móviles, hotspot WiFi, caffeine, modo oscuro,
+night-light, ubicación, escalado, pomodoro, syncthing) + los **widgets del lockscreen** (calendario,
+próximos eventos, reproductores, info de emergencia, launcher, ticket-box). **17 plugins compilados.**
+
+**Logrado:** Alpine armhf NO empaqueta `phosh` ni sus plugins → **build NATIVA en el propio móvil**
+(fuente en `/root/build/phosh`, Phosh 0.55, con meson 1.11 + ninja + gcc; sin WSL ni cross-compile).
+
+**Detalle clave:**
+- Los plugins NO son `-Dplugins` sino **3 opciones meson**: `quick-setting-plugins`,
+  `lockscreen-plugins`, `status-icon-plugins` (todas `false` por defecto).
+- Deps que faltaban: `apk add qrcodegen-dev` (wifi-hotspot) + `evince-dev` (ticket-box del lockscreen).
+- `meson configure _build -Dquick-setting-plugins=true -Dlockscreen-plugins=true -Dstatus-icon-plugins=true`
+  → `ninja -C _build install` → `/usr/local/lib/phosh/plugins/*.so`.
+- **HABILITAR (trampa crítica):** `gsettings set sm.puri.phosh.plugins quick-settings "[ids]"` (+ `lock-screen`).
+  El `Id` = basename del `.plugin`. **Hay que usar el bus D-Bus REAL de phosh** (de
+  `/proc/$(pgrep phosh)/environ`, `DBUS_SESSION_BUS_ADDRESS`), NO `/run/user/1000/bus` o `dconf` falla.
+
+**Ficheros:** `/usr/local/lib/phosh/plugins/*.so` (17). Memoria `.claude`: `reference_phosh_quicksetting_plugins`.
+
+---
+
+## 21. Batería en Phosh — indicador % + cargando/descargando ✅ (2026-06-25)
+
+El **indicador de batería en la UI de Phosh**: porcentaje real + distinción **cargando (icono con
+rayo) vs descargando**. (El hito 12 logró LEER el VBAT; este lo lleva hasta UPower → Phosh.)
+
+**Logrado:** como **no hay driver mainline que lea VBAT en el MT6582** (el AUXADC del SoC
+`mt6577-auxadc` no soporta mt6582 y el AUXADC del PMIC MT6323 no tiene driver IIO), se hace un
+**puente userspace** que no recompila el kernel base ni reflashea:
+
+```
+battery (pwrap, VBAT MT6323 — hito 12) ─┐
+charge-status (FAN5405 — hito 11) ──────┼─► battery-upower (daemon) ─► test_power.ko ─► UPower ─► Phosh
+                                        ┘
+```
+
+**Detalle clave:**
+- **`test_power.ko`**: el driver de power_supply de pega ya existe en el source
+  (`drivers/power/supply/test_power.c`). `CONFIG_TEST_POWER=m` + `make O=build-krillin ARCH=arm
+  CROSS_COMPILE=arm-linux-gnueabihf- drivers/power/supply/test_power.ko`. **vermagic `7.0.12 SMP
+  mod_unload ARMv7 p2v8` = el del móvil** → `insmod` SIN reflashear (como uinput, hito 9). Crea
+  `/sys/class/power_supply/{test_battery,test_ac,test_usb}` con params escribibles en runtime.
+- El daemon `battery-upower` (cada 15 s) lee VBAT + carga y escribe
+  `/sys/module/test_power/parameters/{battery_capacity,battery_voltage,battery_status,battery_current,ac_online,usb_online}`.
+- **★ CLAVE (lo que costó): UPower decide cargando/descargando por el SIGNO de `current_now`, NO por el
+  string `status`.** Con `status=charging` pero corriente negativa (default -1600), UPower mostraba
+  `discharging`. **Fix: `battery_current` POSITIVO (+500000) al cargar, NEGATIVO (-300000) al
+  descargar** → `state=charging` + icono `battery-full-charging-symbolic` (rayo).
+- Resultado en `upower -i .../DisplayDevice`: `percentage=92%`, `state=charging`. Probado en HW.
+
+**Persistencia:** `/etc/local.d/zzv-battery.start` (insmod `test_power.ko` + `start-stop-daemon`).
+Sobrevive reinicios.
+
+**Ficheros:** `/usr/local/lib/test_power.ko`, `mainline/rootfs/battery/battery-upower`,
+`mainline/rootfs/battery/zzv-battery.start` (+ reutiliza `battery`/`charge-status` de hitos 11-12).
+Memoria `.claude`: `reference_mt6582_battery_upower`.
+
+---
+
+## 22. Sesión elogind activa + diagnóstico del slider de brillo (2026-06-24)
+
+**Sesión elogind ACTIVA para `sxmo` ✅** (crackeó el "BANCADO" del hito 15) — base para
+batería/suspend/power UI. **Slider de brillo: diagnosticado, es problema del source de Phosh ⬜.**
+
+**La sesión activa (logrado):** `su`=busybox no tiene PAM, pero `pam_elogind.so` sí existe →
+- Mini-helper en C `/usr/local/bin/phosh-pam-session`: `pam_start("phosh-session","sxmo")` + `pam_putenv`
+  de **`XDG_VTNR=1` (¡el que faltaba! sin él `pam_open_session` da `rc=14`, con él `rc=0`)** +
+  `XDG_SEAT=seat0` + type/class + `pam_open_session` + **`pam_getenvlist`→`putenv` (propaga
+  `XDG_SESSION_ID` a phoc)** + setuid sxmo + exec launch_phosh.
+- `/etc/pam.d/phosh-session` con `session required pam_elogind.so`.
+- `launch_phosh.sh`: **`LIBSEAT_BACKEND=logind`** (phoc usa la sesión elogind como asiento).
+- Resultado: `loginctl` da sesión `sxmo seat0 **Active=yes**`; phoc arranca heredando `XDG_SESSION_ID`.
+
+**El slider (diagnóstico):** aun con la sesión activa, sigue inerte. Con `G_MESSAGES_DEBUG=all`,
+gsd-power dice **`No org.gnome.Shell.Brightness support`** → en este build **gsd-power DELEGA el brillo
+de pantalla al compositor (`org.gnome.Shell.Brightness`), que Phosh no provee** → no expone `.Screen`.
+**No es la sesión ni el HW; es el source de Phosh.** Brillo usable hoy: **comando `bl 0-100`** (hito 15).
+
+**Ficheros:** `/usr/local/bin/phosh-pam-session` (+ `/root/phosh-pam-session.c`),
+`/etc/pam.d/phosh-session`. Memoria `.claude`: `reference_mt6582_backlight` (sección 06-24).
+
+---
+
+## 23. WiFi WPA2 — scan-crash resuelto + CCMP diagnosticado 🟡 (2026-06-24)
+
+Complementa la saga WiFi (hito 19). **Scan-crash RESUELTO**; **WPA2 asocia + handshake**, pero el
+**CCMP de datos resulta ser hueso del FW**.
+
+**Scan-crash (resuelto):** estando conectado, un `iw scan` colgaba el móvil (hard-lockup + WDT). Causa:
+`wifi_port_read_pio` leía el FIFO sin guard. **Fix: guard WCIR por-palabra** en `wifi_port_read_pio` y
+`wifi_port1_read_pio` (re-sondea `MCR_WCIR`, registro estático, antes de cada lectura del FIFO; si
+`!= WIFI_CHIP_ID_6582` aborta limpio). Probado: el móvil **sobrevive `iw scan` conectado**.
+
+**WPA2/CCMP (diagnosticado):** el **host hace TODO bien** (verificado byte-a-byte vs downstream):
+claves CCMP (`cipher=0xfac04`, PTK `tx_key=1`, GTK), struct `cmd_802_11_key`, `CIPHER_CCMP=4`, StaRec
+STATE_3 + `EVENT_ACTIVATE_STA_REC`, `wpa_cli COMPLETED`. **Pero el FW no cifra/descifra DATOS**:
+`tx=55 rx=2`, 0 respuestas (la red **ABIERTA sí navega**). `enc_status=ENABLED` probado → no arregla +
+causa `eid=0x1b` → revertido. ⚠️ Falso positivo típico: un `ping 8.8.8.8` que "funciona" sale por
+`usb0` (NAT de la Pi), no por wlan0.
+
+**Ficheros:** `mainline/wifi-consys/wifi/mt6582-wifi.c` (guard scan). Memorias `.claude`:
+`reference_mt6582_wifi_wpa2`, `reference_mt6582_wifi_channel_bug`.
 
 ---
 
