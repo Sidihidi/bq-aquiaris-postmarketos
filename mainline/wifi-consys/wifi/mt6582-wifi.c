@@ -1146,7 +1146,9 @@ static int wifi_cfg_add_key(struct wiphy *wiphy, struct net_device *ndev, int li
 		return -EINVAL;
 	mutex_lock(&w->hif_lock);
 	k.add_remove = 1;
-	k.tx_key = 1;
+	k.tx_key = pairwise ? 1 : 0;	/* SOLO la PTK es TX-key (IS_TRANSMIT_KEY=BIT31 del downstream); la GTK NO.
+					 * Marcar la GTK como tx_key=1 hace que el FW use la GTK para el TX unicast
+					 * -> el AP no descifra -> sin OFFER -> DHCP falla. (vs wlanoidSetAddKey:3016) */
 	k.key_type = pairwise ? 1 : 0;
 	k.net_type = NETWORK_TYPE_AIS;		/* el FW necesita saber el BSS (faltaba -> la clave no se aplicaba) */
 	if (mac_addr)
@@ -1165,7 +1167,21 @@ static int wifi_cfg_add_key(struct wiphy *wiphy, struct net_device *ndev, int li
 static int wifi_cfg_del_key(struct wiphy *wiphy, struct net_device *ndev, int link_id,
 			    u8 key_idx, bool pairwise, const u8 *mac_addr)
 {
-	return 0;	/* TODO: CMD_802_11_KEY add_remove=0 */
+	struct mt6582_wifi *w = g_wifi;
+	struct cmd_802_11_key k = {};
+
+	if (!w || !w->started)
+		return -EINVAL;
+	mutex_lock(&w->hif_lock);
+	k.add_remove = 0;			/* 0 = quitar la clave */
+	k.key_type = pairwise ? 1 : 0;
+	k.net_type = NETWORK_TYPE_AIS;
+	if (mac_addr)
+		memcpy(k.peer_addr, mac_addr, ETH_ALEN);
+	k.key_id = key_idx;
+	wifi_send_cmd(w, CMD_ID_ADD_REMOVE_KEY, 1, &k, sizeof(k), 0);
+	mutex_unlock(&w->hif_lock);
+	return 0;
 }
 static int wifi_cfg_set_default_key(struct wiphy *wiphy, struct net_device *ndev, int link_id,
 				    u8 key_idx, bool unicast, bool multicast)

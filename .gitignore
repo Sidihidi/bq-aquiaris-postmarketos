@@ -5,3 +5,8 @@ artifacts/*.img
 .claude/
 .DS_Store
 *.bin
+
+# backups de la Pi (no commitear)
+*.bak
+*.bak-*
+*.bak.*

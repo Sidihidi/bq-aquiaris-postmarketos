@@ -652,6 +652,35 @@ static int mt6582_btif_probe(struct platform_device *pdev)
 	return 0;
 }
 
+static void mt6582_btif_remove(struct platform_device *pdev)
+{
+	struct mt6582_btif *b = platform_get_drvdata(pdev);
+
+	if (!b)
+		return;
+	/* parar kthread RX */
+	if (b->rx_task) {
+		kthread_stop(b->rx_task);
+		b->rx_task = NULL;
+	}
+	/* desregistrar HCI */
+	if (b->hdev) {
+		hci_unregister_dev(b->hdev);
+		hci_free_dev(b->hdev);
+		b->hdev = NULL;
+	}
+	/* desregistrar /dev/stpgps */
+	misc_deregister(&gps_miscdev);
+	debugfs_remove_recursive(b->dbg);
+	kfifo_free(&b->gps_fifo);
+	if (b->tx_ring) dma_free_coherent(b->dev, TX_RING, b->tx_ring, b->tx_phys);
+	if (b->rx_ring) dma_free_coherent(b->dev, RX_RING, b->rx_ring, b->rx_phys);
+	if (b->base)   iounmap(b->base);
+	if (b->txdma)  iounmap(b->txdma);
+	if (b->rxdma)  iounmap(b->rxdma);
+	g_btif = NULL;
+}
+
 static const struct of_device_id mt6582_btif_of_ids[] = {
 	{ .compatible = "mediatek,mt6582-btif" },
 	{ }
@@ -660,6 +689,7 @@ MODULE_DEVICE_TABLE(of, mt6582_btif_of_ids);
 
 static struct platform_driver mt6582_btif_driver = {
 	.probe = mt6582_btif_probe,
+	.remove = mt6582_btif_remove,
 	.driver = { .name = "mt6582-btif", .of_match_table = mt6582_btif_of_ids },
 };
 module_platform_driver(mt6582_btif_driver);
