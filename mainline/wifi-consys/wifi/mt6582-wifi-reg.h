@@ -83,6 +83,7 @@
 #define HIF_TARGET_RXD0		2
 #define HIF_TARGET_TXD1		1	/* comandos runtime (TC4 -> WTDR1) */
 #define HIF_TARGET_RXD1		3	/* eventos runtime (WRDR1) */
+#define HIF_TARGET_WHISR	4	/* TRANS_TARGET_WHISR: leer el bloque enhance (handshake RX) */
 /* RX0|RX1|TX|ABNORMAL|D2H_SW (=0xffffff0f, downstream mtreg.h:231); el FW lo necesita p/señalar el boot */
 #define WHIER_DEFAULT		(WHISR_RX0_DONE_INT | WHISR_RX1_DONE_INT | \
 				 WHISR_TX_DONE_INT  | WHISR_ABNORMAL_INT  | \
@@ -91,6 +92,25 @@
 /* WRPLR 0x50 */
 #define WRPLR_RX0_LEN(v)	((v) & 0xffff)
 #define WRPLR_RX1_LEN(v)	(((v) >> 16) & 0xffff)
+
+/* Bloque "enhance" de interrupción (CFG_SDIO_INTR_ENHANCE=1, ON por defecto en el downstream):
+ * el FW lo entrega por el puerto WHISR (HSTCR target #4) y trae el nº de tramas RX + la longitud de
+ * cada una. LEER este bloque es el read-clear que re-arma RX0_DONE en el FW = el HANDSHAKE que antes
+ * NO hacíamos (sondeábamos WRPLR crudo + W1C). Layout EXACTO = ENHANCE_MODE_DATA_STRUCT_T
+ * (downstream mtreg.h:149-174), verificado: 88 bytes. whisr=dword[0], num_valid=dword[3],
+ * rx0_len=dword[4..11], rx1_len=dword[12..19]. */
+#define HIF_RX_HW_APPENDED_LEN	4	/* DW de status que el HW añade tras CADA trama (nicRxEnhanceReadBuffer) */
+struct enhance_mode_data {
+	__le32	whisr;			/* dword[0]  RX0_DONE=BIT1, RX1_DONE=BIT2, TX_DONE=BIT0... */
+	u8	tq_cnt[6];		/* dword[1..2] créditos TX por TC (rTxInfo.u.ucTQ0..5Cnt) */
+	__le16	tx_rsrv;
+	__le16	num_valid_rx0;		/* dword[3].lo  nº de tramas válidas en RX0 (WRDR0) */
+	__le16	num_valid_rx1;		/* dword[3].hi  nº de tramas válidas en RX1 (WRDR1) */
+	__le16	rx0_len[16];		/* dword[4..11]  longitud de cada trama RX0 */
+	__le16	rx1_len[16];		/* dword[12..19] longitud de cada trama RX1 */
+	__le32	rcv_mailbox0;		/* dword[20]  D2HRM0 */
+	__le32	rcv_mailbox1;		/* dword[21]  D2HRM1 */
+} __packed;	/* 4+8+68+8 = 88 = sizeof(ENHANCE_MODE_DATA_STRUCT_T) */
 
 /* ===== canal PDMA dedicado al HIF del WiFi ===== hif_pdma.h:62-113
  * (es OTRO canal del mismo AP-DMA; el BTIF usa 0x11000780/0x800, NO colisiona) */

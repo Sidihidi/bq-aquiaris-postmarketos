@@ -409,6 +409,37 @@ static void wifi_port1_read_pio(struct mt6582_wifi *w, void *buf, u32 len)
 	}
 }
 
+/* Exp A (0625): leer el bloque ENHANCE_MODE_DATA_STRUCT_T (88B) desde el puerto WHISR (HSTCR target #4).
+ * ESTA lectura es el read-clear que re-arma RX0_DONE en el FW = el HANDSHAKE que faltaba: antes
+ * sondeábamos MCR_WRPLR crudo (registro de longitud, 0x50, distinto de WHISR 0x10) y limpiábamos por
+ * W1C, lo que NO completa el protocolo read-clear del puerto WHISR -> tras los 1ºs paquetes el FW deja
+ * de entregar RX (bug A) y leer WRDR0 a ciegas cuelga el AHB (bug B). Clon de wifi_port_read_pio con
+ * HIF_TARGET_WHISR. Replica nicSDIOReadIntStatus (downstream nic.c:1065). Requiere Exp B (read-clear).
+ * Caller con hif_lock. */
+static bool wifi_read_enhance(struct mt6582_wifi *w, struct enhance_mode_data *e)
+{
+	u32 *p = (u32 *)e;
+	u32 i, words = sizeof(*e) / 4;
+
+	BUILD_BUG_ON(sizeof(struct enhance_mode_data) != 88);	/* layout EXACTO o el handshake falla */
+
+	if (!wifi_hif_alive(w)) {
+		memset(e, 0, sizeof(*e));
+		return false;
+	}
+	wifi_hstcr(w, HIF_TARGET_WHISR, sizeof(*e));
+	for (i = 0; i < words; i++) {
+		/* mismo guard por-palabra que wifi_port_read_pio: abortar si el core murió a mitad de burst */
+		if ((rd(w->hif, MCR_WCIR) & WCIR_CHIP_ID) != WIFI_CHIP_ID_6582) {
+			w->started = false;
+			memset(&p[i], 0, (words - i) * 4);
+			return false;
+		}
+		p[i] = rd(w->hif, MCR_WHISR);	/* puerto WHISR (no el registro suelto): stream del bloque */
+	}
+	return true;
+}
+
 /* enviar un comando runtime (QUERY/SET) por TC4/puerto-1. 'resp_reserve' = tamaño del evento
  * de respuesta (el FW dimensiona TxByteCount para incluirlo). El caller debe tener hif_lock. */
 static int wifi_send_cmd(struct mt6582_wifi *w, u8 cid, u8 set_query,
@@ -808,27 +839,43 @@ static void wifi_rx_data(struct mt6582_wifi *w, u8 *rx, u32 plen)
 	netif_rx(skb);
 }
 
-/* drenar AMBOS puertos RX una vez: port0 (MGMT->inform_bss + EVENT->handle) + port1 (EVENT). hif_lock. */
+/* drenar AMBOS puertos RX vía el bloque enhance de WHISR (el handshake). hif_lock.
+ * Exp A (0625): sustituye el sondeo crudo de WRPLR por la lectura del bloque enhance (que re-arma
+ * RX0_DONE en el FW) e itera u2NumValidRxN tramas por puerto usando rxN_len[] del bloque. ANTES
+ * drenábamos como mucho UNA trama por puerto -> se perdían las OFFER/EVENT encoladas (parte del bug A).
+ * Cada trama se lee ALIGN(len + HIF_RX_HW_APPENDED_LEN, 4) (incluye el DW de status que el HW añade),
+ * igual que nicRxEnhanceReadBuffer (downstream nic_rx.c:2674), para no desalinear la siguiente. */
 static void wifi_rx_drain(struct mt6582_wifi *w)
 {
-	u32 wrplr, l0, l1;
+	struct enhance_mode_data e;
 	u8 rx[1600];
+	u32 i, n0, n1;
 
 	if (w->dbg_disc > 0) { w->dbg_disc--;
-		dev_info(w->dev, "DIAG rx_drain post-disc: WHLPCR=0x%08x, voy a leer WRPLR\n",
+		dev_info(w->dev, "DIAG rx_drain post-disc: WHLPCR=0x%08x, leo bloque enhance WHISR\n",
 			 rd(w->hif, MCR_WHLPCR)); }
-	wrplr = rd(w->hif, MCR_WRPLR);
-	l0 = WRPLR_RX0_LEN(wrplr);
-	l1 = WRPLR_RX1_LEN(wrplr);
 
-	if (l0 && ALIGN(l0, 4) <= sizeof(rx)) {
+	/* HANDSHAKE: leer el bloque desde WHISR re-arma RX0_DONE en el FW (read-clear, requiere Exp B). */
+	if (!wifi_read_enhance(w, &e))
+		return;
+
+	n0 = le16_to_cpu(e.num_valid_rx0);
+	n1 = le16_to_cpu(e.num_valid_rx1);
+
+	/* ---- RX0 (WRDR0): n0 tramas; longitud de cada una en rx0_len[] ---- */
+	for (i = 0; i < n0 && i < 16; i++) {
+		u32 l0 = le16_to_cpu(e.rx0_len[i]);
 		struct hif_rx_header *h = (void *)rx;
 		u16 pt;
 
-		wifi_port_read_pio(w, rx, ALIGN(l0, 4));
+		if (!l0)					/* == el if(!u2RxLength) break del original */
+			break;
+		if (ALIGN(l0 + HIF_RX_HW_APPENDED_LEN, 4) > sizeof(rx))
+			break;
+		wifi_port_read_pio(w, rx, ALIGN(l0 + HIF_RX_HW_APPENDED_LEN, 4));
 		pt = le16_to_cpu(h->packet_type) & HIF_RX_PKT_TYPE_MASK;
 		if (pt == HIF_RX_PKT_TYPE_DATA)
-			dev_info(w->dev, "RX0 DATA l0=%u %16ph\n", l0, rx);	/* DIAG DHCP: ¿llega la OFFER (data) al HIF? */
+			dev_info(w->dev, "RX0 DATA l0=%u %16ph\n", l0, rx);	/* DIAG DHCP: ¿llega la OFFER? */
 		if (pt == HIF_RX_PKT_TYPE_MGMT)
 			wifi_rx_mgmt(w, rx, l0);
 		else if (pt == HIF_RX_PKT_TYPE_EVENT)	/* *** los EVENTOS del FW llegan por aquí *** */
@@ -836,12 +883,19 @@ static void wifi_rx_drain(struct mt6582_wifi *w)
 		else if (pt == HIF_RX_PKT_TYPE_DATA)	/* *** Fase 3: paquetes de DATOS -> netif_rx *** */
 			wifi_rx_data(w, rx, l0);
 	}
-	if (l1 && ALIGN(l1, 4) <= sizeof(rx)) {
+
+	/* ---- RX1 (WRDR1): n1 tramas (eventos); longitud en rx1_len[] ---- */
+	for (i = 0; i < n1 && i < 16; i++) {
+		u32 l1 = le16_to_cpu(e.rx1_len[i]);
 		struct wifi_event *ev = (void *)rx;
 
-		wifi_port1_read_pio(w, rx, ALIGN(l1, 4));
+		if (!l1)
+			break;
+		if (ALIGN(l1 + HIF_RX_HW_APPENDED_LEN, 4) > sizeof(rx))
+			break;
+		wifi_port1_read_pio(w, rx, ALIGN(l1 + HIF_RX_HW_APPENDED_LEN, 4));
 		if ((le16_to_cpu(ev->packet_type) & HIF_RX_PKT_TYPE_MASK) == HIF_RX_PKT_TYPE_EVENT)
-			wifi_handle_event(w, rx, l1);	/* por si algún evento llegara también por aquí */
+			wifi_handle_event(w, rx, l1);
 	}
 }
 
@@ -1684,9 +1738,17 @@ static int wifi_bringup(struct mt6582_wifi *w)
 
 		whcr &= ~WHCR_MAX_HIF_RX_LEN_NUM;	/* bits 4-7 = SDIO_MAXIMUM_RX_LEN_NUM (0) */
 		whcr &= ~WHCR_RX_ENHANCE_MODE_EN;	/* bit 16 off (CFG_SDIO_RX_ENHANCE=0) */
+		/* Exp B (0625): INT en modo READ-CLEAR (= default HW; HAL_SET_INTR_STATUS_READ_CLEAR,
+		 * downstream wlan_lib.c:1824 = WHCR &= ~W_INT_CLR_CTRL). Con read-clear, LEER el bloque
+		 * enhance de WHISR (Exp A, wifi_read_enhance) borra los flags y re-arma RX0_DONE = el
+		 * handshake que faltaba. Sin esto la lectura del bloque no ack-ea y el FW deja de entregar
+		 * RX tras los primeros paquetes (bug A). Crítico: poner el bit ANTES de empezar a drenar. */
+		whcr &= ~WHCR_W_INT_CLR_CTRL;		/* bit 1 = 0 -> read-clear (NO W1C) */
 		wr(w->hif, MCR_WHCR, whcr);
 	}
-	wr(w->hif, MCR_WHISR, rd(w->hif, MCR_WHISR));	/* limpiar status pendiente (W1C) */
+	/* Exp B: NO W1C. Con read-clear una lectura ciega deja el status inicial a cero (el ack en
+	 * runtime lo da la lectura del bloque de 88B en wifi_read_enhance). */
+	(void)rd(w->hif, MCR_WHISR);
 	wr(w->hif, MCR_WHIER, WHIER_DEFAULT);
 
 	/* nicDisableInterrupt (downstream nic.c:936, llamado en wlan_lib.c:1309 ANTES de descargar):
