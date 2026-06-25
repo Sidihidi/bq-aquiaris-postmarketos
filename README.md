@@ -7,7 +7,7 @@ escribiendo y portando los drivers que upstream nunca tuvo para este SoC.
 > **Estado (2026-06-25):** un teléfono de 2014 corriendo **Linux mainline 7.0.12 + Alpine** con
 > **Phosh acelerado por GPU (lima/Mali-400)**, arrancando desde **SD**, con **táctil, carga,
 > batería en la UI (% + cargando/descargando), Bluetooth (empareja), WiFi (red abierta navega) y
-> GPS (protocolo decodificado)** — más **17 plugins de Phosh** y **sesión elogind activa**.
+> GPS (protocolo decodificado)** — más **17 plugins de Phosh**, **sesión elogind activa** y **slider de brillo**.
 
 📍 **Empieza por aquí.** Para el detalle por subsistema y el historial completo:
 [mainline/HITOS.md](mainline/HITOS.md). Para el plan de trabajo: [ROADMAP-FINAL.md](ROADMAP-FINAL.md).
@@ -35,7 +35,7 @@ en progreso · **⬜** = no empezado.
 | **WiFi — connect** | 🟡 | `.connect` **softMAC** implementado (Fase 2: AUTH/ASSOC + STA-record + CH_PRIVILEGE conducidos por el host). **Falta confirmar asociación + WPA2 + data-path.** |
 | **GPS** | 🟡 | Protocolo **`0xAAF0` decodificado**; cadena **gpsd→geoclue→Phosh validada**. Falta el `START_SEQ` de `mnld` (arrancar el motor). |
 | **Stack Phosh** (plugins + sesión) | 🟡 | **17 plugins** (toggles del panel: datos/hotspot/dark-mode/etc. + widgets de lockscreen); **sesión elogind activa** (base de suspend/power). |
-| Brillo | 🟡 | Por comando **`bl 0-100`** (PWM_DUTY). El *slider* = problema del source de Phosh (gsd-power delega a `org.gnome.Shell.Brightness`, ausente). |
+| **Brillo (slider)** | ✅ | **El slider de Phosh funciona** → Phosh `backlight-sysfs.c` → `logind SetBrightness` → `/sys/class/backlight` → daemon `+0xa0` (remapeo 10-100%; usa la sesión elogind activa). + comando `bl`. |
 | Botones power/vol · sensores · audio | ⬜ | Fase 3 (Phosh 100%) — ver roadmap. |
 | FM · vibrador · cámara · módem 3G | ⬜ | Fases 4-5 (cámara/módem = propietarios, muy difícil). |
 
