@@ -14,7 +14,7 @@
 - Mainline **7.0.12 + Alpine**, arranca desde SD.
 - **Display**: `mediatek-drm` + **lima** (Mali-400) + **Phosh** (Wayland).
 - **Táctil** FT5336 · **PMIC** MT6323 en DT · **Carga** · **Batería %** (AUXADC/VBAT) + **indicador en Phosh** (% + cargando/descargando, vía `test_power`→UPower).
-- **Stack Phosh** (06-24/25): **17 plugins** (toggles del panel + widgets de lockscreen) · **sesión elogind activa** (base de suspend/power) · brillo por comando **`bl`**.
+- **Stack Phosh** (06-24/25): **17 plugins** (toggles del panel + widgets de lockscreen) · **sesión elogind activa** (base de suspend/power) · **slider de brillo funciona** (+ comando `bl`).
 - **Bluetooth** (hci0): emparejado + toggle en Phosh. ✓
 - **WiFi**: escanea redes reales; **red ABIERTA navega** (lease+ping); WPA2 asocia pero el CCMP de datos es hueso del FW.
 - **GPS**: protocolo `0xAAF0` decodificado; cadena gpsd→geoclue→Phosh validada (falta arrancar el motor).
@@ -45,7 +45,7 @@
 
 ## 🖥️ FASE 3 — Phosh 100%  *(MUY avanzada — 06-24/25)*
 - [x] **3.0** **Plugins de Phosh** (17: toggles del panel + widgets de lockscreen) ✓ · **batería en la UI** (% + cargando/descargando) ✓ · **sesión elogind activa** ✓ (base de suspend/power)
-- [~] **3.1** **Brillo**: por comando **`bl`** ✓; el **slider** NO va — gsd-power delega a `org.gnome.Shell.Brightness` (ausente en Phosh) → no expone `.Screen`. **Falta: debug del source de Phosh** (o un gsd-power que controle el backlight directo).
+- [x] **3.1** **Brillo (slider)** ✅: el slider de Phosh **funciona** — `backlight-sysfs.c` → `logind SetBrightness` → `/sys/class/backlight` → daemon `+0xa0` (usa la sesión elogind activa de 3.0; remapeo 10-100% para que el mínimo no quede negro). + comando `bl`. **(Phosh NO usa gsd-power ni el shim — su propio backlight-sysfs vía logind.)**
 - [ ] **3.2** **Botones** power/volumen: DT `mt6323-keys` + `gpio-keys` + mapeo (Vol↓ ya OK, hito 17)
 - [ ] **3.3** **Sensores + autorrotación**: LSM330 (accel) → iio → Phosh rota
 - [ ] **3.4** **Audio**: codec MT6582 (altavoz/auricular/micro) → ALSA
