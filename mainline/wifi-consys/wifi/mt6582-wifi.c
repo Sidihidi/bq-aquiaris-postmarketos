@@ -71,6 +71,8 @@ struct mt6582_wifi {
 	bool			started;	/* firmware corriendo + WLAN_READY */
 	u8			cmd_seq;	/* secuencia de comandos init/runtime */
 	int			dbg_evt;	/* limita el log de depuración de eventos init */
+	int			dbg_own;	/* limita el log del wake driver-own (diagnóstico FW power-save) */
+	int			dbg_disc;	/* DIAG 0624e: traza los primeros rx_drain tras un disconnect */
 	u8			*dlm;		/* buffer de descarga (DMA-able) */
 	dma_addr_t		dlm_phys;
 	/* Fase 1: cfg80211 full-MAC */
@@ -79,6 +81,9 @@ struct mt6582_wifi {
 	struct wireless_dev	wdev;
 	struct cfg80211_scan_request *scan_req;	/* scan en curso (NULL = idle) */
 	unsigned long		scan_deadline;	/* jiffies: forzar scan_done si el FW no manda SCAN_DONE */
+	unsigned long		last_scan_jiffies;	/* gate 0624b: throttle de scans HW (NM escanea cada pocos seg) */
+	unsigned long		last_op_jiffies;	/* gate 0624b: cooldown de scans tras connect/disconnect (HIF frágil) */
+	unsigned long		disc_settle_until;	/* 0624d: ventana post-disconnect sin tocar el HIF (FW teardownea el MAC -> WRPLR cuelga) */
 	struct task_struct	*rx_thread;	/* sondea el RX (beacons MGMT + eventos) */
 	struct sk_buff_head	tx_queue;	/* Fase 3: cola TX de datos (ndo_xmit encola; el rx_thread escribe bajo hif_lock) */
 	u8			scan_seq;
@@ -99,6 +104,8 @@ struct mt6582_wifi {
 	u16			assoc_ie_len;
 	struct delayed_work	auto_bringup;	/* auto-levanta wlan0 al boot, con reintento (WLAN_READY flaky) */
 	u8			bringup_tries;
+	struct cmd_set_bss_info	saved_bi;	/* copia del SET_BSS_INFO del join, para reenviarlo con enc_status=ENABLED tras la PTK */
+	bool			enc_enabled;	/* SET_BSS_INFO(ENABLED) ya enviado en esta conexión (1 sola vez) */
 };
 
 static struct mt6582_wifi *g_wifi;
@@ -106,25 +113,44 @@ static struct mt6582_wifi *g_wifi;
 static inline u32 rd(void __iomem *b, u32 o) { return readl(b + o); }
 static inline void wr(void __iomem *b, u32 o, u32 v) { writel(v, b + o); }
 
-/* Guard anti-cuelgue (audit 0624). Causa raiz del reboot ciclico: si el FW/HIF del WiFi muere
- * (p.ej. tras un connect fallido en bucle), el siguiente readl/writel PIO al bus AHB se cuelga
- * PARA SIEMPRE -> hard-lockup mudo del CPU -> el kernel deja de alimentar el WDT -> reset a los
- * 31s (sin panic; pstore con el log cortado limpio). Antes de tocar el puerto de datos, leer WCIR
- * (chip-id, registro estatico): si NO devuelve 0x6582 (da 0x0000/0xffffffff con el bus caido),
- * abandonar el acceso y marcar el WiFi muerto en vez de colgar el CPU. Cubre el caso
- * "control-reg responde mientras el data-port (WRDR0) cuelga". Si cuelga TODO el HIF este readl
- * tambien colgaria — pero entonces no hay defensa software posible (haria falta PDMA+IRQ, fix C). */
+/* Guard anti-cuelgue — CAUSA RAÍZ (sesión 0624c). El reboot cíclico NO era un cuelgue del bus a secas:
+ * el FW del WiFi puede TOMAR LA PROPIEDAD del HIF (FW_OWN / power-save / cambios de canal del connect).
+ * Mientras el FW es dueño, leer/escribir un registro NORMAL (WCIR/WHIER/WRDR0/WTDR0/WRPLR) NO completa
+ * en el bus AHB -> hard-lockup mudo del CPU -> el WDT resetea a los 31s. El guard viejo leía WCIR -> tambien
+ * colgaba. La SOLUCIÓN (igual que el downstream: ACQUIRE_POWER_CONTROL_FROM_PM + nicpmSetDriverOwn, ahb.c:1222)
+ * es usar WHLPCR, que está en el dominio ALWAYS-ON: leerlo/escribirlo NUNCA cuelga aunque el FW duerma.
+ * Comprobar IS_DRIVER_OWN; si el FW tiene la propiedad, pedirla de vuelta (FW_OWN_REQ_CLR) y poll. Si no la
+ * devuelve (dormido sin despertar / muerto) -> marcar el HIF muerto y ABORTAR el acceso en vez de colgar el
+ * CPU. Devuelve true = es SEGURO tocar los registros/puertos normales (tenemos driver-own). */
 static bool wifi_hif_alive(struct mt6582_wifi *w)
 {
-	u32 wcir = rd(w->hif, MCR_WCIR);
+	int t;
 
-	if ((wcir & WCIR_CHIP_ID) != WIFI_CHIP_ID_6582) {
-		if (w->started)
-			dev_err(w->dev, "HIF caido (WCIR=0x%08x) -> abandono PIO, marco WiFi muerto\n", wcir);
-		w->started = false;
+	/* 0624d: tras un .disconnect el FW REINICIA/teardownea el MAC durante ~1s. Leer un registro NORMAL
+	 * (WRPLR/WRDR/puerto) en esa ventana NO completa en el bus AHB -> hard-lockup (observado SIEMPRE justo
+	 * tras ".disconnect enviado", en silencio = el rx_thread leyendo WRPLR). WHLPCR sigue driver-own pero
+	 * el data-port no responde. Solución: NO tocar el HIF hasta que el FW asiente. Cubre rx_thread + todo. */
+	if (time_before(jiffies, w->disc_settle_until))
 		return false;
+	/* OJO: NO comprobar w->started aquí — esta función también protege la descarga de firmware del
+	 * bring-up (started aún false). El check de started lo hacen los callers de runtime (scan/connect). */
+	if (rd(w->hif, MCR_WHLPCR) & WHLPCR_IS_DRIVER_OWN)
+		return true;			/* caso normal: ya somos driver-own */
+	/* el FW había tomado la propiedad -> despertarlo. El log confirma EMPÍRICAMENTE la causa raíz:
+	 * si esto aparece durante el connect, el FW SÍ se duerme/toma el HIF en la conexión. */
+	wr(w->hif, MCR_WHLPCR, WHLPCR_FW_OWN_REQ_CLR);
+	for (t = 0; t < DRIVER_OWN_POLL; t++) {
+		if (rd(w->hif, MCR_WHLPCR) & WHLPCR_IS_DRIVER_OWN) {
+			if (w->dbg_own < 30) { w->dbg_own++;
+				dev_info(w->dev, "HIF: el FW tenía la propiedad -> driver-own recuperado (%d iters)\n", t); }
+			return true;
+		}
+		udelay(50);
 	}
-	return true;
+	dev_err(w->dev, "HIF: driver-own NO recuperado (WHLPCR=0x%08x) -> FW dormido/muerto, abandono PIO\n",
+		rd(w->hif, MCR_WHLPCR));
+	w->started = false;
+	return false;
 }
 
 /* ======================================================================
@@ -176,6 +202,8 @@ static void wifi_port_write_pio(struct mt6582_wifi *w, const void *buf, u32 len)
 	const u32 *p = buf;
 	u32 i, words = (len + 3) / 4;
 
+	if (!wifi_hif_alive(w))		/* 0624c: asegurar driver-own (WHLPCR) antes de tocar WHIER/WTDR0 */
+		return;
 	wifi_hstcr(w, HIF_TARGET_TXD0, len);
 	for (i = 0; i < words; i++)
 		wr(w->hif, MCR_WTDR0, p[i]);
@@ -188,6 +216,10 @@ static void wifi_port_read_pio(struct mt6582_wifi *w, void *buf, u32 len)
 	u32 *p = buf;
 	u32 i, words = (len + 3) / 4;
 
+	if (!wifi_hif_alive(w)) {	/* 0624c: asegurar driver-own (WHLPCR) antes de tocar WHIER/WRDR0 */
+		memset(buf, 0, len);
+		return;
+	}
 	wifi_hstcr(w, HIF_TARGET_RXD0, len);
 	for (i = 0; i < words; i++) {
 		/* audit 0624: si el data-port se atasca a mitad de burst, el readl de WRDR0 cuelga el bus AHB
@@ -347,6 +379,8 @@ static void wifi_port1_write_pio(struct mt6582_wifi *w, const void *buf, u32 len
 	const u32 *p = buf;
 	u32 i, words = (len + 3) / 4;
 
+	if (!wifi_hif_alive(w))		/* 0624c: asegurar driver-own (WHLPCR) antes de WHIER/WTDR1 */
+		return;
 	wifi_hstcr(w, HIF_TARGET_TXD1, len);
 	for (i = 0; i < words; i++)
 		wr(w->hif, MCR_WTDR1, p[i]);
@@ -358,6 +392,10 @@ static void wifi_port1_read_pio(struct mt6582_wifi *w, void *buf, u32 len)
 	u32 *p = buf;
 	u32 i, words = (len + 3) / 4;
 
+	if (!wifi_hif_alive(w)) {	/* 0624c: asegurar driver-own (WHLPCR) antes de WHIER/WRDR1 */
+		memset(buf, 0, len);
+		return;
+	}
 	wifi_hstcr(w, HIF_TARGET_RXD1, len);
 	for (i = 0; i < words; i++) {
 		/* audit 0624: mismo guard por-palabra que wifi_port_read_pio (abortar si el core murio a mitad
@@ -773,9 +811,15 @@ static void wifi_rx_data(struct mt6582_wifi *w, u8 *rx, u32 plen)
 /* drenar AMBOS puertos RX una vez: port0 (MGMT->inform_bss + EVENT->handle) + port1 (EVENT). hif_lock. */
 static void wifi_rx_drain(struct mt6582_wifi *w)
 {
-	u32 wrplr = rd(w->hif, MCR_WRPLR);
-	u32 l0 = WRPLR_RX0_LEN(wrplr), l1 = WRPLR_RX1_LEN(wrplr);
+	u32 wrplr, l0, l1;
 	u8 rx[1600];
+
+	if (w->dbg_disc > 0) { w->dbg_disc--;
+		dev_info(w->dev, "DIAG rx_drain post-disc: WHLPCR=0x%08x, voy a leer WRPLR\n",
+			 rd(w->hif, MCR_WHLPCR)); }
+	wrplr = rd(w->hif, MCR_WRPLR);
+	l0 = WRPLR_RX0_LEN(wrplr);
+	l1 = WRPLR_RX1_LEN(wrplr);
 
 	if (l0 && ALIGN(l0, 4) <= sizeof(rx)) {
 		struct hif_rx_header *h = (void *)rx;
@@ -811,25 +855,29 @@ static int wifi_rx_thread(void *data)
 		bool idle;
 
 		mutex_lock(&w->hif_lock);
-		if (wifi_hif_alive(w)) {	/* audit 0624 fix A: no tocar un HIF muerto (evita el hard-lockup) */
+		/* completar un scan vencido (incl. los GATED, deadline=jiffies) SIN tocar el data-port */
+		if (w->scan_req && time_after(jiffies, w->scan_deadline)) {
+			struct cfg80211_scan_info info = { .aborted = false };
+
+			cfg80211_scan_done(w->scan_req, &info);
+			w->scan_req = NULL;
+		}
+		/* 0624h — CAUSA RAÍZ del crash POST-DISCONNECT: tras desconectar, el FW deja el DATA-PORT (WRPLR/
+		 * WRDR) en un estado donde leerlo CUELGA el bus (WHLPCR sigue driver-own, pero el puerto no responde
+		 * = el caso "data-port cuelga, control vivo"). El rx_thread sondeaba WRPLR SIEMPRE, también en IDLE
+		 * (sin scan/connect/datos) -> a los ~5s del disconnect pegaba el cuelgue (visto con la miga DIAG).
+		 * FIX: drenar el data-port SOLO cuando de verdad esperamos RX (scan activo/connect/conectado/TX). */
+		idle = !w->started ||
+		       (!w->scan_req && !w->connecting && !w->connected && skb_queue_empty(&w->tx_queue));
+		if (!idle && wifi_hif_alive(w)) {	/* audit 0624 fix A: no tocar un HIF muerto (evita el hard-lockup) */
 			wifi_rx_drain(w);
 			while ((skb = skb_dequeue(&w->tx_queue)) != NULL) {	/* Fase 3: TX de datos encolados */
 				wifi_tx_data(w, skb);
 				dev_kfree_skb(skb);
 			}
-			if (w->scan_req && time_after(jiffies, w->scan_deadline)) {
-				struct cfg80211_scan_info info = { .aborted = false };
-
-				cfg80211_scan_done(w->scan_req, &info);
-				w->scan_req = NULL;
-			}
 		}
-		/* audit 0624 fix B: si nadie usa el WiFi (o esta muerto), sondear lento (200ms) en vez de
-		 * 20ms. Menos trafico PIO al HIF = menos ventanas para pegar un bus-hang. */
-		idle = !w->started ||
-		       (!w->scan_req && !w->connecting && !w->connected && skb_queue_empty(&w->tx_queue));
 		mutex_unlock(&w->hif_lock);
-		msleep(idle ? 200 : 20);
+		msleep(idle ? 200 : 20);	/* fix B: idle -> sondeo lento (200ms) */
 	}
 	return 0;
 }
@@ -848,6 +896,21 @@ static int wifi_cfg_scan(struct wiphy *wiphy, struct cfg80211_scan_request *requ
 		mutex_unlock(&w->hif_lock);
 		return -EBUSY;
 	}
+	/* GATE anti-cuelgue (0624b): un scan por HIF mientras la conexión está activa o en transición
+	 * cuelga el bus AHB -> el churn scan<->connect<->disconnect de NetworkManager hard-lockea el CPU
+	 * (WDT, ramoops cortado en .disconnect). Solo el scan DESCONECTADO+idle es seguro (probado en HW).
+	 * En el resto: cerrar el scan con los BSS YA cacheados por cfg80211 (SIN tocar el HIF); el rx_thread
+	 * llama cfg80211_scan_done en su próximo tick. Tradeoff aceptado: la lista no se refresca conectado. */
+	if (w->connecting || w->connected ||
+	    time_before(jiffies, w->last_op_jiffies + msecs_to_jiffies(3000)) ||
+	    time_before(jiffies, w->last_scan_jiffies + msecs_to_jiffies(1500))) {
+		w->scan_req = request;
+		w->scan_deadline = jiffies;	/* completar en el próximo tick del rx_thread, sin scan HW */
+		mutex_unlock(&w->hif_lock);
+		dev_info(w->dev, "scan: GATED (conn=%d connected=%d) -> cacheados, sin HIF\n",
+			 w->connecting, w->connected);
+		return 0;
+	}
 	memset(&sc, 0, sizeof(sc));
 	sc.seq_num = ++w->scan_seq;
 	sc.network_type = NETWORK_TYPE_AIS;
@@ -857,6 +920,7 @@ static int wifi_cfg_scan(struct wiphy *wiphy, struct cfg80211_scan_request *requ
 		      offsetof(struct cmd_scan_req_v2, ie), 0);
 	w->scan_req = request;
 	w->scan_deadline = jiffies + msecs_to_jiffies(8000);
+	w->last_scan_jiffies = jiffies;	/* gate 0624b: marca para el throttle */
 	mutex_unlock(&w->hif_lock);
 	dev_info(w->dev, "scan: pasivo 2.4G lanzado\n");
 	return 0;
@@ -961,15 +1025,16 @@ static void wifi_send_join(struct mt6582_wifi *w)
 	bi.op_rate_set = cpu_to_le16(RATE_SET_ERP);
 	bi.basic_rate_set = cpu_to_le16(BASIC_RATE_SET_ERP);
 	bi.sta_rec_idx_of_ap = 0;	/* STA-record del AP (idx 0, creado en .connect) */
-	if (w->connect_wpa2) {				/* WPA2-CCMP, enc_status=KEY_ABSENT(7). NOTA 06-24: probado ENABLED(6)
-								 * (gl_cfg80211.c:726 mapea CCMP->ENABLED) en HW con subnet/gateway REALES -> NO
-								 * arregla el DHCP (rx=2, 0 datos cifrados uni/bcast) Y ADEMÁS causa eid=0x1b (beacon
-								 * timeout) a +30s (el FW descarta beacons no cifrados). El CCMP está roto a un nivel
-								 * FW más profundo: claves CCMP instaladas OK (cipher 0xfac04, PTK tx_key=1, GTK
-								 * peer=bcast), StaRec activada (eid=0x13), pero el FW no cifra/descifra data.
-								 * KEY_ABSENT(7) es el valor más seguro (no provoca el 0x1b). */
+	if (w->connect_wpa2) {				/* WPA2-CCMP. ★★ FIX 06-24: el downstream cfg80211 (gl_cfg80211.c:726)
+								 * mapea CCMP -> eEncStatus = ENUM_ENCRYPTION3_ENABLED(6), y nic.c:2034 lo manda
+								 * TAL CUAL en SET_BSS_INFO para infra-AIS. Mandábamos KEY_ABSENT(7) -> el FW NUNCA
+								 * activaba el descifrado/cifrado CCMP -> TODO el dato cifrado (OFFER del DHCP, ARP,
+								 * ICMP) se descartaba; solo el EAPOL pasaba (por su flag 1x). Test concluyente con
+								 * subnet real: tx=55 rx=2, 0 respuestas uni/broadcast. -> ENABLED(6) activa el CCMP.
+								 * El miedo previo ("ENABLED sin claves descarta beacons -> 0x1b -> rx_thread cuelga")
+								 * NO aplica: el 0x1b es benigno y el rx_thread ya tiene el guard wifi_hif_alive. */
 		bi.auth_mode = AUTH_MODE_WPA2_PSK;
-		bi.enc_status = ENC_STATUS_CCMP_KEY_ABSENT;
+		bi.enc_status = ENC_STATUS_CCMP_ENABLED;
 	} else {
 		bi.auth_mode = AUTH_MODE_OPEN;
 		bi.enc_status = ENC_STATUS_DISABLED;
@@ -981,6 +1046,8 @@ static void wifi_send_join(struct mt6582_wifi *w)
 	bi.rlm.primary_channel = w->connect_channel;
 	bi.rlm.check_id = 0x72;
 	wifi_send_cmd(w, CMD_ID_SET_BSS_INFO, 1, &bi, sizeof(bi), 0);
+	w->saved_bi = bi;		/* guardar para reenviar con enc_status=ENABLED(6) tras instalar la PTK (.add_key) */
+	w->enc_enabled = false;		/* nueva conexión: aún en KEY_ABSENT */
 
 	/* promover el STA a STATE_3 (asociado/data-ready). SIN esto el FW descarta TODO dato del STA:
 	 * secCheckClassError() (privacy.c) tira cada RX de datos como Class-3-error Y manda DEAUTH al AP,
@@ -1165,6 +1232,7 @@ static int wifi_cfg_connect(struct wiphy *wiphy, struct net_device *ndev,
 	wifi_send_auth(w, bssid, 1);
 
 	w->connecting = true;
+	w->last_op_jiffies = jiffies;	/* gate 0624b: arranca el cooldown de scans (cubre el handshake) */
 	mutex_unlock(&w->hif_lock);
 	dev_info(w->dev, "*** .connect: SSID='%.*s' ch=%u BSSID=%pM (OPEN+CHPRIV+STA-rec) enviado ***\n",
 		 sme->ssid_len, sme->ssid, ch, bssid);
@@ -1174,26 +1242,51 @@ static int wifi_cfg_connect(struct wiphy *wiphy, struct net_device *ndev,
 static int wifi_cfg_disconnect(struct wiphy *wiphy, struct net_device *ndev, u16 reason)
 {
 	struct mt6582_wifi *w = g_wifi;
-	struct cmd_set_bss_info bss = {};
+	struct cmd_update_sta_record sta = {};
+	struct cmd_bss_activate deact = { .net_type_idx = NETWORK_TYPE_AIS, .active = 0 };
 
 	if (!w || !w->started)
 		return -ENODEV;
 	mutex_lock(&w->hif_lock);
 	if (!wifi_hif_alive(w)) { mutex_unlock(&w->hif_lock); return -ENODEV; }	/* audit 0624: guard PIO */
-	bss.net_type_idx = NETWORK_TYPE_AIS;
-	bss.conn_state = MEDIA_STATE_DISCONNECTED;
-	bss.op_mode = OP_MODE_INFRASTRUCTURE;
-	memcpy(bss.own_mac, w->mac, ETH_ALEN);
-	wifi_send_cmd(w, CMD_ID_SET_BSS_INFO, 1, &bss, sizeof(bss), 0);
+	/* 0624f — TEARDOWN CORRECTO (causa raíz del hard-lockup del disconnect, FW-side, PROBADA con la miga DIAG:
+	 * el rx_thread no tocaba el HIF y aun así colgaba -> lo cuelga el FW). El .disconnect viejo mandaba un
+	 * SET_BSS_INFO casi todo a CERO (rlm.primary_channel=0, sin BSSID/rates) -> el FW fault-eaba procesando
+	 * un BSS MALFORMADO y colgaba el bus AHB/CONSYS. Fix: INVERTIR el JoinComplete con comandos BIEN FORMADOS
+	 * (los mismos que el connect usa sin fault-ear): (1) SET_BSS_INFO(DISCONNECTED) reusando saved_bi (canal/
+	 * BSSID/rlm correctos), (2) demover el STA a STATE_1, (3) desactivar el BSS. = nicUpdateBss +
+	 * cnmStaRecChangeState + bss-deactivate del downstream (ais_fsm.c). */
+	/* 0624g — CAUSA RAÍZ DEFINITIVA del hard-lockup del disconnect: el comando SET_BSS_INFO(conn_state=
+	 * DISCONNECTED) CUELGA el FW (probado con la miga DIAG: se mandaba y el siguiente acceso colgaba,
+	 * incluso con saved_bi BIEN FORMADO -> el FW fault-ea procesando el DISCONNECTED y arrastra el bus
+	 * AHB/CONSYS). Solución: NO mandarlo. Teardown solo con los comandos que el connect ya usa sin colgar:
+	 * demover el STA del AP a STATE_1 + desactivar el BSS (BSS_ACTIVATE active=0). El próximo .connect
+	 * re-activa el BSS y manda SET_BSS_INFO(CONNECTED) desde cero. */
+	dev_info(w->dev, "DIAG disc A: ENTER -> UPDATE_STA(STATE_1)\n");
+	sta.index = 0;				/* el STA del AP (idx 0) */
+	sta.sta_type = STA_TYPE_LEGACY_AP;
+	memcpy(sta.mac_addr, w->connect_bssid, ETH_ALEN);
+	sta.net_type_index = NETWORK_TYPE_AIS;
+	sta.desired_phy_type_set = PHY_TYPE_SET_802_11BG;
+	sta.desired_nonht_rate_set = cpu_to_le16(RATE_SET_ERP);
+	sta.bss_basic_rate_set = cpu_to_le16(BASIC_RATE_SET_ERP);
+	sta.sta_state = STA_STATE_1;		/* demover de STATE_3 -> el FW deja de aceptar/enviar datos */
+	wifi_send_cmd(w, CMD_ID_UPDATE_STA_RECORD, 1, &sta, sizeof(sta), 0);
+
+	dev_info(w->dev, "DIAG disc C: STA ok -> BSS_ACTIVATE(deact)\n");
+	wifi_send_cmd(w, CMD_ID_BSS_ACTIVATE_CTRL, 1, &deact, sizeof(deact), 0);	/* desactivar el BSS AIS (reverso del .connect) */
 	w->connecting = false;
 	w->connected = false;
+	w->last_op_jiffies = jiffies;	/* gate 0624b: cooldown de scans tras disconnect (HIF en transición) */
+	w->disc_settle_until = jiffies + msecs_to_jiffies(3000);	/* 0624e: subido a 3s (1s no bastó) -> NADIE toca el HIF mientras el FW teardownea */
+	w->dbg_disc = 15;	/* DIAG: trazar los primeros rx_drain tras el disconnect (host-side vs FW-side) */
 	if (w->connect_bss) {
 		cfg80211_put_bss(wiphy, w->connect_bss);
 		w->connect_bss = NULL;
 	}
 	mutex_unlock(&w->hif_lock);
 	cfg80211_disconnected(ndev, reason, NULL, 0, true, GFP_KERNEL);
-	dev_info(w->dev, "*** .disconnect enviado ***\n");
+	dev_info(w->dev, "*** .disconnect: SET_BSS_INFO(DISC,saved_bi) + STA->STATE_1 + BSS-deact (teardown 0624f) ***\n");
 	return 0;
 }
 
@@ -1230,8 +1323,9 @@ static int wifi_cfg_add_key(struct wiphy *wiphy, struct net_device *ndev, int li
 	wifi_send_cmd(w, CMD_ID_ADD_REMOVE_KEY, 1, &k, sizeof(k), 0);
 	dev_info(w->dev, "add_key: %s idx=%d cipher=0x%x peer=%pM len=%d tx_key=%d\n",
 		 pairwise ? "PTK" : "GTK", key_idx, params->cipher, k.peer_addr, params->key_len, k.tx_key);
-	/* NOTA 0624: el enc_status=ENABLED(6) se manda UNA vez en el JOIN (wifi_send_join) = lo correcto p/CCMP.
-	 * Reenviar SET_BSS_INFO a mitad de conexión (tras la PTK) CRASHEA el FW (WDT). El .add_key solo instala claves. */
+	/* NOTA 0624: reenviar SET_BSS_INFO con enc_status=ENABLED a mitad de conexión (tras la PTK) CRASHEA
+	 * el FW (WDT, pstore corta justo tras el GTK add_key). Y la sesión Mac ya probó enc_status 6 y 7 en
+	 * el JOIN: el DHCP falla idéntico -> enc_status NO es la causa del DHCP cifrado. Revertido. */
 	mutex_unlock(&w->hif_lock);
 	return 0;
 }
@@ -1661,6 +1755,12 @@ static int mt6582_wifi_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	w->dev = dev;
 	mutex_init(&w->hif_lock);
+	/* gate 0624b: NO dejar last_*_jiffies en 0 -> jiffies arranca ~5 min "negativo" (INITIAL_JIFFIES),
+	 * y time_before(jiffies, 0 + cooldown) daría TRUE -> gatearía TODOS los scans los primeros 5 min
+	 * (lista de redes vacía tras el boot). Inicializar al jiffies actual los deja correctos. */
+	w->last_op_jiffies = jiffies;
+	w->last_scan_jiffies = jiffies;
+	w->disc_settle_until = jiffies;		/* 0624d: init != 0 (ver nota de jiffies arriba) */
 	dma_coerce_mask_and_coherent(dev, DMA_BIT_MASK(32));
 
 	w->hif = ioremap(WIFI_HIF_PHYS, WIFI_HIF_LEN);
