@@ -38,7 +38,7 @@ táctil Focaltech FT5336, PMIC MT6323, cargador FAN5405, GPU Mali-400 MP2, combo
 | 19 | CONSYS WiFi/BT/GPS/FM — la saga | 🟡 EN CURSO (gran avance) | 2026-06-18→22 |
 | 20 | Plugins de Phosh (quick-settings + lockscreen, 17) | ✅ RESUELTO | 2026-06-24 |
 | 21 | Batería en Phosh — indicador % + cargando/descargando | ✅ RESUELTO | 2026-06-25 |
-| 22 | Sesión elogind activa + diagnóstico del slider de brillo | 🟡 (sesión ✅, slider ⬜) | 2026-06-24 |
+| 22 | Sesión elogind activa + **slider de brillo (RESUELTO)** | ✅ RESUELTO | 2026-06-24/25 |
 | 23 | WiFi WPA2 — scan-crash resuelto + CCMP diagnosticado | 🟡 (host OK, CCMP = hueso FW) | 2026-06-24 |
 
 Estado global a **2026-06-22**: Display DRM nativo + Phosh con GPU lima; táctil end-to-end;
@@ -686,10 +686,10 @@ Memoria `.claude`: `reference_mt6582_battery_upower`.
 
 ---
 
-## 22. Sesión elogind activa + diagnóstico del slider de brillo (2026-06-24)
+## 22. Sesión elogind activa + slider de brillo RESUELTO ✅ (2026-06-24/25)
 
 **Sesión elogind ACTIVA para `sxmo` ✅** (crackeó el "BANCADO" del hito 15) — base para
-batería/suspend/power UI. **Slider de brillo: diagnosticado, es problema del source de Phosh ⬜.**
+batería/suspend/power UI. **Slider de brillo: RESUELTO ✅ (06-25) — ver abajo.**
 
 **La sesión activa (logrado):** `su`=busybox no tiene PAM, pero `pam_elogind.so` sí existe →
 - Mini-helper en C `/usr/local/bin/phosh-pam-session`: `pam_start("phosh-session","sxmo")` + `pam_putenv`
@@ -700,13 +700,19 @@ batería/suspend/power UI. **Slider de brillo: diagnosticado, es problema del so
 - `launch_phosh.sh`: **`LIBSEAT_BACKEND=logind`** (phoc usa la sesión elogind como asiento).
 - Resultado: `loginctl` da sesión `sxmo seat0 **Active=yes**`; phoc arranca heredando `XDG_SESSION_ID`.
 
-**El slider (diagnóstico):** aun con la sesión activa, sigue inerte. Con `G_MESSAGES_DEBUG=all`,
-gsd-power dice **`No org.gnome.Shell.Brightness support`** → en este build **gsd-power DELEGA el brillo
-de pantalla al compositor (`org.gnome.Shell.Brightness`), que Phosh no provee** → no expone `.Screen`.
-**No es la sesión ni el HW; es el source de Phosh.** Brillo usable hoy: **comando `bl 0-100`** (hito 15).
+**El slider (RESUELTO 06-25):** la pista del 06-24 (gsd-power/`.Screen`) era **FALSA** — Phosh **NO usa
+gsd-power ni el shim**. Leyendo el source: `brightness-manager.c` posee `org.gnome.Shell.Brightness` y
+delega en **`backlight-sysfs.c`, que escribe vía `login1.Session.SetBrightness` (logind)** (`g_debug
+"Setting brightness via logind"`). Con (1) la **sesión elogind ACTIVA** (el `session_proxy`, `Active=yes`)
++ (2) el **daemon `mt6582-backlight` leyendo `/sys/class/backlight/backlight/brightness`** (donde logind
+escribe) → `+0xa0`, **el slider controla el brillo**. Phosh ACEPTA el backlight raw max=10
+(`backlight-sysfs.c::get_udev_info`: `max<99 && raw → min=0`, `min>=max` falso). **Remapeo 0-100%→10-100%**
+(mínimo no deja la pantalla negra; petición del usuario). **Persistente:** `zzzz-phosh.start` lanza el
+helper PAM, `phosh-session.sh` limpio (sin shim ni gsd-power). Brillo también por comando `bl`.
 
-**Ficheros:** `/usr/local/bin/phosh-pam-session` (+ `/root/phosh-pam-session.c`),
-`/etc/pam.d/phosh-session`. Memoria `.claude`: `reference_mt6582_backlight` (sección 06-24).
+**Ficheros:** `/usr/local/bin/phosh-pam-session` (+ `/root/phosh-pam-session.c`), `/etc/pam.d/phosh-session`,
+`mainline/rootfs/mt6582-backlight.py` (lee /sys+/run + remapeo), `launch_phosh.sh`(=logind),
+`phosh-session.sh`(limpio), `/etc/local.d/zzzz-phosh.start`(helper). Memoria `.claude`: `reference_mt6582_backlight`.
 
 ---
 
