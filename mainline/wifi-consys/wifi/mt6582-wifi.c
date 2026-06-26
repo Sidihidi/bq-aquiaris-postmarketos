@@ -872,6 +872,15 @@ static void wifi_rx_drain(struct mt6582_wifi *w)
 	n0 = le16_to_cpu(e.num_valid_rx0);
 	n1 = le16_to_cpu(e.num_valid_rx1);
 
+	/* DIAG 0626: ¿el FW señala RX (cifrado) tras la GTK? whisr=RX0_DONE(BIT1)? n0>0?
+	 * Loguea cuando hay RX, cuando el whisr trae algo que no sea TX_DONE, o 1 de cada 256
+	 * drains estando conectado (heartbeat). Distingue: storm de INT no-RX vs FW que no entrega. */
+	{ static u32 dc; u32 wh = le32_to_cpu(e.whisr);
+	  if (n0 || n1 || (wh & ~WHISR_TX_DONE_INT) || (w->connected && !(dc++ & 255)))
+		dev_info(w->dev, "DIAG-DRAIN whisr=0x%08x n0=%u n1=%u l0=%u l0b=%u mbox0=0x%08x conn=%d\n",
+			wh, n0, n1, le16_to_cpu(e.rx0_len[0]), le16_to_cpu(e.rx0_len[1]),
+			le32_to_cpu(e.rcv_mailbox0), w->connected); }
+
 	/* ---- RX0 (WRDR0): n0 tramas; longitud de cada una en rx0_len[] ---- */
 	for (i = 0; i < n0 && i < 16; i++) {
 		u32 l0 = le16_to_cpu(e.rx0_len[i]);
@@ -884,6 +893,7 @@ static void wifi_rx_drain(struct mt6582_wifi *w)
 			break;
 		wifi_port_read_pio(w, rx, ALIGN(l0 + HIF_RX_HW_APPENDED_LEN, 4));
 		pt = le16_to_cpu(h->packet_type) & HIF_RX_PKT_TYPE_MASK;
+		{ static u32 pc; if (!(pc++ & 63)) dev_info(w->dev, "DIAG-RX0 leida pt=0x%x l0=%u %16ph\n", pt, l0, rx); }
 		if (pt == HIF_RX_PKT_TYPE_DATA)
 			dev_info(w->dev, "RX0 DATA l0=%u %16ph\n", l0, rx);	/* DIAG DHCP: ¿llega la OFFER? */
 		if (pt == HIF_RX_PKT_TYPE_MGMT)
