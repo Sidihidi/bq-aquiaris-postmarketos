@@ -95,6 +95,7 @@ struct mt6582_wifi {
 	u8			mac[ETH_ALEN];		/* MAC permanente (de phase1) */
 	bool			connecting;
 	bool			connected;	/* Fase 3: asociado L2 -> permite el TX de datos (connecting solo dura el handshake) */
+	bool			ch_priv_granted;	/* 0626: lo pone wifi_handle_event al recibir EVENT_ID_CH_PRIVILEGE (0x18) */
 	u8			connect_bssid[ETH_ALEN];
 	u8			connect_ssid[32];	/* para el IE SSID del ASSOC-REQ */
 	u8			connect_ssid_len;
@@ -777,6 +778,9 @@ static void wifi_handle_event(struct mt6582_wifi *w, u8 *rx, u32 len)
 		w->connecting = false;
 		dev_info(w->dev, "*** EVENT_CONNECTION_STATUS media=%u (%s) %pM ***\n",
 			 cs->media_status, ok ? "CONNECTED" : "fail", cs->bssid);
+	} else if (ev->eid == EVENT_ID_CH_PRIVILEGE) {	/* 0626: grant del canal (async) -> despertar a wifi_wait_grant */
+		w->ch_priv_granted = true;
+		dev_info(w->dev, "*** CH_PRIVILEGE GRANT recibido (via drain) ***\n");
 	} else if (ev->eid != 0x0e) {	/* 0x0e = heartbeat periódico del FW (~30ms); ignorar sin spamear */
 		dev_info(w->dev, "evt eid=0x%02x len=%u %*ph\n",
 			 ev->eid, len, min_t(int, len, 20), rx);
@@ -1203,29 +1207,22 @@ static void wifi_send_join(struct mt6582_wifi *w)
  * y el AUTH se descarta (TX FLUSHED). Caller con hif_lock (el kthread no compite). */
 static bool wifi_wait_grant(struct mt6582_wifi *w, u32 ms)
 {
-	u8 rx[1600];
 	u32 t;
 
+	/* 0626 FIX: antes esto sondeaba MCR_WRPLR CRUDO + wifi_port_read_pio, el método que el propio
+	 * driver documenta como ROTO (ver wifi_read_enhance, ~l.423): leer WRPLR crudo NO completa el
+	 * read-clear del puerto WHISR -> tras los 1ºs paquetes el FW DEJA DE ENTREGAR RX. Como esto corre
+	 * en mitad del .connect (busy-poll bajo hif_lock), estancaba el RX del FW de forma intermitente y
+	 * el AUTH-2/ASSOC-RESP caían (connect flaky + sin DHCP). Ahora drenamos con el BLOQUE ENHANCE
+	 * (wifi_rx_drain, que SÍ re-arma RX0_DONE) y el grant (EVENT 0x18) lo despacha wifi_handle_event. */
+	w->ch_priv_granted = false;
 	for (t = 0; t < ms; t += 5) {
-		u32 wrplr, l0;
-
-		if (!wifi_hif_alive(w))		/* audit 0624: no busy-read un HIF muerto durante el connect (cuelga el bus) */
+		if (!wifi_hif_alive(w))		/* audit 0624: no tocar un HIF muerto durante el connect (cuelga el bus) */
 			return false;
-		wrplr = rd(w->hif, MCR_WRPLR);
-		l0 = WRPLR_RX0_LEN(wrplr);
-
-		if (l0 && ALIGN(l0, 4) <= sizeof(rx)) {
-			struct wifi_event *ev = (void *)rx;
-
-			wifi_port_read_pio(w, rx, ALIGN(l0, 4));
-			if ((le16_to_cpu(ev->packet_type) & HIF_RX_PKT_TYPE_MASK) == HIF_RX_PKT_TYPE_EVENT &&
-			    ev->eid == EVENT_ID_CH_PRIVILEGE) {
-				dev_info(w->dev, "*** CH_PRIVILEGE GRANT recibido ***\n");
-				return true;
-			}
-		} else {
-			msleep(5);
-		}
+		wifi_rx_drain(w);		/* read-clear correcto; despacha beacons/heartbeats/grant */
+		if (w->ch_priv_granted)
+			return true;
+		msleep(5);
 	}
 	return false;
 }
@@ -1302,8 +1299,8 @@ static int wifi_cfg_connect(struct wiphy *wiphy, struct net_device *ndev,
 	chp.max_interval = cpu_to_le32(5000);
 	memcpy(chp.bssid, bssid, ETH_ALEN);
 	wifi_send_cmd(w, CMD_ID_CH_PRIVILEGE, 1, &chp, sizeof(chp), 0);
-	if (!wifi_wait_grant(w, 1000))
-		dev_warn(w->dev, ".connect: sin grant CH_PRIVILEGE en 1s\n");
+	if (!wifi_wait_grant(w, 2000))
+		dev_warn(w->dev, ".connect: sin grant CH_PRIVILEGE en 2s\n");
 
 	/* 2) STA-record del AP (idx 1) — IMPRESCINDIBLE: sin él el FW no sabe a quién asociar */
 	sta.index = 0;	/* cnmStaRecAlloc da el PRIMER slot libre = 0 para el 1er STA del AIS (NO 1) */
