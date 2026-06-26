@@ -336,6 +336,7 @@ struct cmd_set_domain_info {
 #define ENC_STATUS_CCMP_ENABLED		6	/* ENUM_ENCRYPTION3_ENABLED: CCMP con clave */
 #define ENC_STATUS_CCMP_KEY_ABSENT	7	/* ENUM_ENCRYPTION3_KEY_ABSENT: CCMP, clave aún no instalada (SET_BSS_INFO pre-4way-handshake) */
 #define CIPHER_NONE			0
+#define CIPHER_TKIP			2	/* CIPHER_SUITE_TKIP (privacy.h:121); el 3 es TKIP_WO_MIC, NO usar */
 #define CIPHER_CCMP			4
 /* valores para el STA-record del AP (de wlan_def.h): LEGACY_AP=BIT(0)|BIT(6); STATE_3=2;
  * BG=HR_DSSS(0)|ERP(1); RATE_SET_ERP=1..54M; BASIC_RATE_SET_ERP=1/2/5.5/11M */

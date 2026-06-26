@@ -35,6 +35,8 @@
 #include <linux/etherdevice.h>
 #include <linux/kthread.h>
 #include <linux/workqueue.h>
+#include <linux/interrupt.h>
+#include <linux/wait.h>
 #include <net/cfg80211.h>
 
 #include "mt6582-wifi-reg.h"
@@ -106,6 +108,14 @@ struct mt6582_wifi {
 	u8			bringup_tries;
 	struct cmd_set_bss_info	saved_bi;	/* copia del SET_BSS_INFO del join, para reenviarlo con enc_status=ENABLED tras la PTK */
 	bool			enc_enabled;	/* SET_BSS_INFO(ENABLED) ya enviado en esta conexión (1 sola vez) */
+	/* IRQ real del HIF (0625): AHB_SLAVE_HIF (GIC_SPI 160) dispara en cada evento RX/TX del FW. El ISR
+	 * enmascara el INT y despierta el rx_thread, que lee el bloque enhance y re-arma el INT. Es lo que
+	 * cierra el handshake RX0_DONE en cada entrega (el polling cada 20ms NO llegaba -> el FW se atascaba).
+	 * Verificado en LineageOS: el driver original usa este IRQ (6163 disparos en /proc/interrupts). */
+	int			irq;		/* -1 / 0 = sin IRQ (fallback a polling) */
+	wait_queue_head_t	rx_wq;		/* el ISR despierta aquí al rx_thread */
+	bool			irq_pending;	/* set por el ISR, leído por el rx_thread */
+	bool			irq_ok;		/* request_irq tuvo éxito -> usar IRQ; si no, polling */
 };
 
 static struct mt6582_wifi *g_wifi;
@@ -900,6 +910,19 @@ static void wifi_rx_drain(struct mt6582_wifi *w)
 }
 
 /* kthread RX: sondea ~20ms; cierra el scan por timeout si el FW no manda SCAN_DONE. */
+/* ISR del HIF (= HifAhbISR downstream, ahb.c:1838). Corre en hardirq: enmascara el INT global (WHLPCR
+ * está en el dominio always-on -> escribirlo NUNCA cuelga, seguro en hardirq) y despierta el rx_thread,
+ * que drena (lee el bloque enhance) y re-arma el INT. NO toca hif_lock ni el data-port. */
+static irqreturn_t wifi_isr(int irq, void *dev_id)
+{
+	struct mt6582_wifi *w = dev_id;
+
+	wr(w->hif, MCR_WHLPCR, WHLPCR_INT_EN_CLR);	/* enmascarar el INT (always-on, no cuelga en hardirq) */
+	WRITE_ONCE(w->irq_pending, true);
+	wake_up_interruptible(&w->rx_wq);
+	return IRQ_HANDLED;
+}
+
 static int wifi_rx_thread(void *data)
 {
 	struct mt6582_wifi *w = data;
@@ -909,6 +932,7 @@ static int wifi_rx_thread(void *data)
 		bool idle;
 
 		mutex_lock(&w->hif_lock);
+		WRITE_ONCE(w->irq_pending, false);
 		/* completar un scan vencido (incl. los GATED, deadline=jiffies) SIN tocar el data-port */
 		if (w->scan_req && time_after(jiffies, w->scan_deadline)) {
 			struct cfg80211_scan_info info = { .aborted = false };
@@ -916,22 +940,29 @@ static int wifi_rx_thread(void *data)
 			cfg80211_scan_done(w->scan_req, &info);
 			w->scan_req = NULL;
 		}
-		/* 0624h — CAUSA RAÍZ del crash POST-DISCONNECT: tras desconectar, el FW deja el DATA-PORT (WRPLR/
-		 * WRDR) en un estado donde leerlo CUELGA el bus (WHLPCR sigue driver-own, pero el puerto no responde
-		 * = el caso "data-port cuelga, control vivo"). El rx_thread sondeaba WRPLR SIEMPRE, también en IDLE
-		 * (sin scan/connect/datos) -> a los ~5s del disconnect pegaba el cuelgue (visto con la miga DIAG).
-		 * FIX: drenar el data-port SOLO cuando de verdad esperamos RX (scan activo/connect/conectado/TX). */
+		/* 0624h — drenar el data-port SOLO cuando de verdad esperamos RX (scan/connect/conectado/TX);
+		 * tras un disconnect leer WRPLR/WRDR en idle cuelga el bus. */
 		idle = !w->started ||
 		       (!w->scan_req && !w->connecting && !w->connected && skb_queue_empty(&w->tx_queue));
 		if (!idle && wifi_hif_alive(w)) {	/* audit 0624 fix A: no tocar un HIF muerto (evita el hard-lockup) */
+			/* (0626) El IRQ del HIF está montado y REGISTRA (IRQ 209, GIC_SPI 160) pero NO dispara
+			 * (count=0 con LEVEL_LOW y LEVEL_HIGH, con y sin polling) -> la línea de interrupción del
+			 * HIF NO llega al GIC. Falta el routing de INT a nivel CONSYS/HIFSYS (bridge AP2CONN) que
+			 * el original habilita en su bring-up del CONSYS y nuestro mt6582-consys no. Hasta resolver
+			 * eso, RX por POLLING (como antes). El infra del IRQ queda listo para cuando se arregle. */
 			wifi_rx_drain(w);
 			while ((skb = skb_dequeue(&w->tx_queue)) != NULL) {	/* Fase 3: TX de datos encolados */
 				wifi_tx_data(w, skb);
 				dev_kfree_skb(skb);
 			}
+			if (w->irq_ok)
+				wr(w->hif, MCR_WHLPCR, WHLPCR_INT_EN_SET);	/* re-armar el INT (inocuo si no dispara) */
 		}
 		mutex_unlock(&w->hif_lock);
-		msleep(idle ? 200 : 20);	/* fix B: idle -> sondeo lento (200ms) */
+
+		wait_event_interruptible_timeout(w->rx_wq,
+			READ_ONCE(w->irq_pending) || kthread_should_stop(),
+			msecs_to_jiffies(idle ? 200 : 20));
 	}
 	return 0;
 }
@@ -1368,10 +1399,27 @@ static int wifi_cfg_add_key(struct wiphy *wiphy, struct net_device *ndev, int li
 		memset(k.peer_addr, 0xff, ETH_ALEN);	/* *** GTK *** (mac_addr NULL = clave de grupo): peer = broadcast
 						 * FF:FF:FF:FF:FF:FF. Sin esto el FW liga la GTK a 00:00:00:00:00:00 -> NO descifra
 						 * broadcast/multicast (ARP, DHCP OFFER) -> rx=2, no navega. (audit vs gl_cfg80211.c:196) */
-	k.algorithm_id = (params->cipher == WLAN_CIPHER_SUITE_CCMP) ? CIPHER_CCMP : CIPHER_NONE;
+	/* Exp D (0625): mapear el algoritmo por cipher. ANTES: TKIP -> CIPHER_NONE(0) -> el FW NO sabía
+	 * que la GTK era TKIP -> no descifraba el broadcast (la OFFER del DHCP en APs grupo-TKIP como
+	 * vodafone). (wlanoidSetAddKey: len32 -> CIPHER_SUITE_TKIP=2, len16 -> CCMP=4) */
+	switch (params->cipher) {
+	case WLAN_CIPHER_SUITE_CCMP:	k.algorithm_id = CIPHER_CCMP; break;	/* =4 */
+	case WLAN_CIPHER_SUITE_TKIP:	k.algorithm_id = CIPHER_TKIP; break;	/* =2 */
+	default:			k.algorithm_id = CIPHER_NONE; break;
+	}
 	k.key_id = key_idx;
 	k.key_len = params->key_len;
 	memcpy(k.key_material, params->key, params->key_len);
+	/* Exp D (0625): TKIP (key_len==32): el FW espera TX-MIC en [16:24] y RX-MIC en [24:32]; cfg80211
+	 * los entrega al revés -> swapear los 2 bloques de 8B. Sin esto el FW computa mal la MIC del
+	 * broadcast (la OFFER va por la GTK TKIP) y la descarta. Réplica de gl_cfg80211.c:240-245. */
+	if (params->key_len == 32) {
+		u8 tmp[8];
+
+		memcpy(tmp, &k.key_material[16], 8);
+		memcpy(&k.key_material[16], &params->key[24], 8);	/* [16:24] <- key[24:32] */
+		memcpy(&k.key_material[24], tmp, 8);			/* [24:32] <- key[16:24] */
+	}
 	if (params->seq_len && params->seq_len <= sizeof(k.key_rsc))
 		memcpy(k.key_rsc, params->seq, params->seq_len);	/* RSC/PN inicial (GTK) */
 	wifi_send_cmd(w, CMD_ID_ADD_REMOVE_KEY, 1, &k, sizeof(k), 0);
@@ -1407,20 +1455,11 @@ static int wifi_cfg_del_key(struct wiphy *wiphy, struct net_device *ndev, int li
 static int wifi_cfg_set_default_key(struct wiphy *wiphy, struct net_device *ndev, int link_id,
 				    u8 key_idx, bool unicast, bool multicast)
 {
-	struct mt6582_wifi *w = g_wifi;
-	struct cmd_default_key_id dk = {};
-
-	if (!w || !w->started)
-		return -EINVAL;
-	/* wpa_supplicant lo llama tras instalar la PTK; el FW necesita saber qué idx es TX-default
-	 * para cifrar/descifrar en la direccion del AP. Sin esto algunos FW MTK no transmiten cifrado. */
-	mutex_lock(&w->hif_lock);
-	if (!wifi_hif_alive(w)) { mutex_unlock(&w->hif_lock); return -ENODEV; }	/* audit 0624: guard PIO */
-	dk.net_type_idx = NETWORK_TYPE_AIS;
-	dk.key_id = key_idx;
-	dev_info(w->dev, "set_default_key: idx=%d uni=%d multi=%d\n", key_idx, unicast, multicast);
-	wifi_send_cmd(w, CMD_ID_DEFAULT_KEY_ID, 1, &dk, sizeof(dk), 0);
-	mutex_unlock(&w->hif_lock);
+	/* Exp D (0625): NO-OP. El downstream (mtk_cfg80211_set_default_key) NO manda ningún comando al FW
+	 * (CMD_DEFAULT_KEY_ID no se compone en NINGÚN sitio del driver original). El TX-default key ya lo
+	 * fija ucTxKey=1 en la PTK del add_key. Mandar CMD_ID_DEFAULT_KEY_ID era un comando de MÁS que el
+	 * FW no espera (riesgo de crash). */
+	(void)wiphy; (void)ndev; (void)link_id; (void)key_idx; (void)unicast; (void)multicast;
 	return 0;
 }
 
@@ -1762,7 +1801,27 @@ static int wifi_bringup(struct mt6582_wifi *w)
 
 	w->started = true;
 
-	dev_info(w->dev, "*** mt6582-wifi listo: cfg80211 (scan/connect/key) + data-path (Fases 0-3) ***\n");
+	/* IRQ (0625): RE-INICIALIZAR el motor de status del HIF tras WLAN_READY. El original llama a
+	 * nicInitializeAdapter DOS veces en wlanAdapterStart: antes de la descarga (wlan_lib.c:1285) y
+	 * OTRA VEZ con el FW ya arrancado (wlan_lib.c:1629, tras el Ready bit). El FW resetea WHCR/WHIER
+	 * al hacer WIFI_START, así que hay que re-aplicarlos AQUÍ: WHCR(read-clear) + WHIER(fuentes de
+	 * INT) y habilitar el INT global. Sin re-aplicar WHIER aquí, el INT global queda ON pero NINGUNA
+	 * fuente (RX0_DONE...) activa -> el IRQ NUNCA dispara (visto: contador 209 a 0). */
+	{
+		u32 whcr = rd(w->hif, MCR_WHCR);
+
+		whcr &= ~WHCR_MAX_HIF_RX_LEN_NUM;
+		whcr &= ~WHCR_RX_ENHANCE_MODE_EN;
+		whcr &= ~WHCR_W_INT_CLR_CTRL;		/* read-clear */
+		wr(w->hif, MCR_WHCR, whcr);
+		(void)rd(w->hif, MCR_WHISR);		/* limpiar el status con read-clear */
+		wr(w->hif, MCR_WHIER, WHIER_DEFAULT);	/* re-habilitar las fuentes de INT (RX0/RX1/TX/ABN/D2H) */
+	}
+	if (w->irq_ok)
+		wr(w->hif, MCR_WHLPCR, WHLPCR_INT_EN_SET);	/* INT global ON (= nicEnableInterrupt, wlan_lib.c:1828) */
+
+	dev_info(w->dev, "*** mt6582-wifi listo: cfg80211 + data-path%s ***\n",
+		 w->irq_ok ? " + IRQ (AHB_SLAVE_HIF)" : " (polling, sin IRQ)");
 	return 0;
 }
 
@@ -1841,6 +1900,19 @@ static int mt6582_wifi_probe(struct platform_device *pdev)
 	debugfs_create_file("bringup", 0200, w->dbg, w, &bringup_fops);
 	platform_set_drvdata(pdev, w);
 
+	/* IRQ real del HIF (0625): el FW dispara AHB_SLAVE_HIF (DT: GIC_SPI 160) en cada evento RX/TX.
+	 * El ISR despierta el rx_thread (que lee el bloque enhance y cierra el handshake RX0_DONE). Si el
+	 * DT no declara 'interrupts' -> irq_ok=false y el rx_thread cae a polling (retro-compatible). */
+	init_waitqueue_head(&w->rx_wq);
+	w->irq = platform_get_irq(pdev, 0);
+	if (w->irq > 0 &&
+	    request_irq(w->irq, wifi_isr, IRQF_TRIGGER_LOW, "mt6582-wifi", w) == 0) {
+		w->irq_ok = true;
+		dev_info(dev, "IRQ %d (AHB_SLAVE_HIF) registrado -> RX por interrupción\n", w->irq);
+	} else {
+		dev_warn(dev, "sin IRQ del DT (platform_get_irq=%d) -> RX por polling\n", w->irq);
+	}
+
 	dev_info(dev, "mapeado HIF@0x%x PDMA@0x%x — auto-bringup en 30s (o echo 1 > debugfs/bringup)\n",
 		 WIFI_HIF_PHYS, WIFI_PDMA_PHYS);
 
@@ -1855,6 +1927,9 @@ static void mt6582_wifi_remove(struct platform_device *pdev)	/* kernel 7.0.12: r
 	struct mt6582_wifi *w = platform_get_drvdata(pdev);
 
 	cancel_delayed_work_sync(&w->auto_bringup);
+
+	if (w->irq_ok)
+		free_irq(w->irq, w);	/* parar el ISR antes de soltar el rx_thread / desmapear el HIF */
 
 	/* cleanup cfg80211/netdev/RX-thread (parche 07 del auditor). Solo se ejecuta en rmmod;
 	 * con el driver built-in NO se llama, pero deja el .remove() correcto si se compila como modulo. */
