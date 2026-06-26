@@ -816,7 +816,11 @@ static void wifi_tx_data(struct mt6582_wifi *w, struct sk_buff *skb)
 	/* EAPOL (4-way handshake WPA2) = frame "1X": el FW lo emite SIN CIFRAR aunque el BSS sea WPA2.
 	 * Sin el flag, el FW intentaría cifrarlo con la clave que aún no existe -> handshake roto. */
 	h->pktfmt_flags = (((struct ethhdr *)skb->data)->h_proto == htons(ETH_P_PAE)) ? HIF_TX_FLAG_1X_FRAME : 0;
-	h->pkt_seq = 0;
+	/* DIAG 0626: pedir TX-DONE en datos (pkt_seq!=0) para confirmar si el DISCOVER sale al aire
+	 * (TX-vs-RX del DHCP). status=0 => el FW transmitio => el fallo es RX. Quitar cuando se cierre. */
+	if (++w->mgmt_seq == 0)
+		w->mgmt_seq = 1;
+	h->pkt_seq = w->mgmt_seq;
 	h->ack_bip_rate = 0;
 	memcpy((u8 *)w->dlm + sizeof(*h), skb->data, frame_len);
 	/* dword-cero terminador de TX-aggregation = comportamiento CORRECTO del downstream (HAL_WRITE_TX_PORT, hal.h:300;
