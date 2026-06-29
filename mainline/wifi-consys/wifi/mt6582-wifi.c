@@ -117,6 +117,8 @@ struct mt6582_wifi {
 	wait_queue_head_t	rx_wq;		/* el ISR despierta aquí al rx_thread */
 	bool			irq_pending;	/* set por el ISR, leído por el rx_thread */
 	bool			irq_ok;		/* request_irq tuvo éxito -> usar IRQ; si no, polling */
+	bool			irq_disabled;	/* 0627: IRQ enmascarado en GIC durante el teardown/settle del disconnect
+					 * (disable_irq_nosync), re-armado en el proximo .connect. Init=false (kzalloc). */
 };
 
 static struct mt6582_wifi *g_wifi;
@@ -962,13 +964,19 @@ static int wifi_rx_thread(void *data)
 		 * tras un disconnect leer WRPLR/WRDR en idle cuelga el bus. */
 		idle = !w->started ||
 		       (!w->scan_req && !w->connecting && !w->connected && skb_queue_empty(&w->tx_queue));
+		{ static unsigned long dbg_hb; bool dbg_rec = time_before(jiffies, w->disc_settle_until + msecs_to_jiffies(5000));
+		  if (dbg_rec || time_after(jiffies, dbg_hb + HZ)) { dbg_hb = jiffies;
+		    dev_info(w->dev, "DIAG hb: idle=%d scan=%d conn=%d connecting=%d settle=%ld\n",
+		      idle, !!w->scan_req, w->connected, w->connecting, (long)(w->disc_settle_until - jiffies)); } }
 		if (!idle && wifi_hif_alive(w)) {	/* audit 0624 fix A: no tocar un HIF muerto (evita el hard-lockup) */
 			/* (0626) El IRQ del HIF está montado y REGISTRA (IRQ 209, GIC_SPI 160) pero NO dispara
 			 * (count=0 con LEVEL_LOW y LEVEL_HIGH, con y sin polling) -> la línea de interrupción del
 			 * HIF NO llega al GIC. Falta el routing de INT a nivel CONSYS/HIFSYS (bridge AP2CONN) que
 			 * el original habilita en su bring-up del CONSYS y nuestro mt6582-consys no. Hasta resolver
 			 * eso, RX por POLLING (como antes). El infra del IRQ queda listo para cuando se arregle. */
+			if (w->dbg_disc) dev_info(w->dev, "DIAG pre-drain dbg=%d\n", w->dbg_disc);
 			wifi_rx_drain(w);
+			if (w->dbg_disc) dev_info(w->dev, "DIAG post-drain\n");
 			while ((skb = skb_dequeue(&w->tx_queue)) != NULL) {	/* Fase 3: TX de datos encolados */
 				wifi_tx_data(w, skb);
 				dev_kfree_skb(skb);
@@ -1137,7 +1145,11 @@ static void wifi_send_join(struct mt6582_wifi *w)
 								 * El miedo previo ("ENABLED sin claves descarta beacons -> 0x1b -> rx_thread cuelga")
 								 * NO aplica: el 0x1b es benigno y el rx_thread ya tiene el guard wifi_hif_alive. */
 		bi.auth_mode = AUTH_MODE_WPA2_PSK;
-		bi.enc_status = ENC_STATUS_CCMP_ENABLED;
+		/* 0629 FIX TX-ENCRYPT: KEY_ABSENT en el JOIN (aun sin clave). El FW activa el cifrado del TX con la
+		 * TRANSICION KEY_ABSENT->ENABLED tras la PTK (re-SET_BSS_INFO en .add_key) = el fgTransmitKeyExist del
+		 * downstream (wlanoidSetEncryptionStatus). Hardcodear ENABLED aqui (antes de la clave) NO activaba el
+		 * cifrado del TX -> el AP tiraba todo dato cifrado (probado: ni unicast PTK sale, sniff Pi-cpcd 0629). */
+		bi.enc_status = ENC_STATUS_CCMP_KEY_ABSENT;
 	} else {
 		bi.auth_mode = AUTH_MODE_OPEN;
 		bi.enc_status = ENC_STATUS_DISABLED;
@@ -1279,6 +1291,14 @@ static int wifi_cfg_connect(struct wiphy *wiphy, struct net_device *ndev,
 
 	mutex_lock(&w->hif_lock);
 	if (!wifi_hif_alive(w)) { mutex_unlock(&w->hif_lock); return -ENODEV; }	/* audit 0624: guard PIO */
+	/* 0627: re-armar el IRQ del HIF que el disconnect previo enmascaro. Guardado por irq_disabled para no
+	 * disparar "Unbalanced enable for IRQ" en boot->connect (sin disconnect previo). Seguro bajo hif_lock:
+	 * la ISR resultante solo hace writel(WHLPCR)+wake_up, no toma hif_lock; el rx_thread re-arma el INT en su
+	 * primer tick (connecting=true => !idle). */
+	if (w->irq_ok && w->irq_disabled) {
+		enable_irq(w->irq);
+		w->irq_disabled = false;
+	}
 	memcpy(w->connect_bssid, bssid, ETH_ALEN);
 	w->connect_channel = ch;
 	w->connect_ssid_len = min_t(u8, sme->ssid_len, sizeof(w->connect_ssid));
@@ -1344,6 +1364,14 @@ static int wifi_cfg_disconnect(struct wiphy *wiphy, struct net_device *ndev, u16
 	if (!w || !w->started)
 		return -ENODEV;
 	mutex_lock(&w->hif_lock);
+	/* 0627: cortar el IRQ del HIF ANTES del guard hif_alive (enmascarar SIEMPRE, aun si caemos en la ventana
+	 * de settle y retornamos -ENODEV). Con IRQF_TRIGGER_LOW, si el FW deja la linea HIF asserted-low durante
+	 * su teardown del MAC, el GIC re-dispara la ISR en bucle -> tormenta de hardirqs -> lockup -> mtk-wdt 31s
+	 * -> reset frio. Re-armado en el proximo .connect. nosync: la ISR no toma hif_lock. */
+	if (w->irq_ok && !w->irq_disabled) {
+		disable_irq(w->irq);	/* 0628 SYNC (era _nosync): espera la ISR en vuelo (synchronize_irq); el IRQ dispara cada 3ms en RX-flood; la ISR no toma hif_lock -> sin deadlock */
+		w->irq_disabled = true;
+	}
 	if (!wifi_hif_alive(w)) { mutex_unlock(&w->hif_lock); return -ENODEV; }	/* audit 0624: guard PIO */
 	/* 0624f — TEARDOWN CORRECTO (causa raíz del hard-lockup del disconnect, FW-side, PROBADA con la miga DIAG:
 	 * el rx_thread no tocaba el HIF y aun así colgaba -> lo cuelga el FW). El .disconnect viejo mandaba un
@@ -1367,10 +1395,15 @@ static int wifi_cfg_disconnect(struct wiphy *wiphy, struct net_device *ndev, u16
 	sta.desired_nonht_rate_set = cpu_to_le16(RATE_SET_ERP);
 	sta.bss_basic_rate_set = cpu_to_le16(BASIC_RATE_SET_ERP);
 	sta.sta_state = STA_STATE_1;		/* demover de STATE_3 -> el FW deja de aceptar/enviar datos */
+	/* 0629 RE-ANADIDO: el LIGERO dejaba el MAC activo -> un scan ~4s despues lo colgaba (probado, marcadores DIAG). Desmontar el MAC de verdad, SIN el SET_BSS_INFO que si colgaba. */
+	dev_info(w->dev, "DIAG pre-UPDATE_STA\n");
 	wifi_send_cmd(w, CMD_ID_UPDATE_STA_RECORD, 1, &sta, sizeof(sta), 0);
+	dev_info(w->dev, "DIAG post-UPDATE_STA\n");
 
 	dev_info(w->dev, "DIAG disc C: STA ok -> BSS_ACTIVATE(deact)\n");
-	wifi_send_cmd(w, CMD_ID_BSS_ACTIVATE_CTRL, 1, &deact, sizeof(deact), 0);	/* desactivar el BSS AIS (reverso del .connect) */
+	dev_info(w->dev, "DIAG pre-BSS_ACTIVATE\n");
+	wifi_send_cmd(w, CMD_ID_BSS_ACTIVATE_CTRL, 1, &deact, sizeof(deact), 0);
+	dev_info(w->dev, "DIAG post-BSS_ACTIVATE\n");
 	w->connecting = false;
 	w->connected = false;
 	w->last_op_jiffies = jiffies;	/* gate 0624b: cooldown de scans tras disconnect (HIF en transición) */
@@ -1382,7 +1415,8 @@ static int wifi_cfg_disconnect(struct wiphy *wiphy, struct net_device *ndev, u16
 	}
 	mutex_unlock(&w->hif_lock);
 	cfg80211_disconnected(ndev, reason, NULL, 0, true, GFP_KERNEL);
-	dev_info(w->dev, "*** .disconnect: SET_BSS_INFO(DISC,saved_bi) + STA->STATE_1 + BSS-deact (teardown 0624f) ***\n");
+	dev_info(w->dev, "*** .disconnect: LIGERO sin teardown del MAC (FW vivo, estilo downstream) 0627 ***\n");
+	dev_info(w->dev, "DIAG disc RETURN reason=%u\n", reason);
 	return 0;
 }
 
@@ -1436,9 +1470,18 @@ static int wifi_cfg_add_key(struct wiphy *wiphy, struct net_device *ndev, int li
 	wifi_send_cmd(w, CMD_ID_ADD_REMOVE_KEY, 1, &k, sizeof(k), 0);
 	dev_info(w->dev, "add_key: %s idx=%d cipher=0x%x peer=%pM len=%d tx_key=%d\n",
 		 pairwise ? "PTK" : "GTK", key_idx, params->cipher, k.peer_addr, params->key_len, k.tx_key);
-	/* NOTA 0624: reenviar SET_BSS_INFO con enc_status=ENABLED a mitad de conexión (tras la PTK) CRASHEA
-	 * el FW (WDT, pstore corta justo tras el GTK add_key). Y la sesión Mac ya probó enc_status 6 y 7 en
-	 * el JOIN: el DHCP falla idéntico -> enc_status NO es la causa del DHCP cifrado. Revertido. */
+	/* 0629 FIX TX-ENCRYPT v2: re-enviar SET_BSS_INFO con enc_status=CCMP_ENABLED reusando saved_bi (guardado
+	 * con KEY_ABSENT en el JoinComplete) = la TRANSICION KEY_ABSENT->ENABLED que el FW espera para activar el
+	 * cifrado del TX. Se hace tras el GTK (!pairwise), que es la ULTIMA add_key del 4-way: asi el GTK se
+	 * instala con el FW tranquilo y el re-envio es lo ULTIMO (sin add_key despues que pueda crashear).
+	 * v1 (re-send entre PTK y GTK) confirmo por pstore que el FW crashea (WDT) justo tras el GTK add_key
+	 * -> probamos GTK-primero / re-send-ultimo. La PTK ya esta instalada (PTK va antes que el GTK). */
+	if (!pairwise && w->connect_wpa2 && !w->enc_enabled) {
+		w->saved_bi.enc_status = ENC_STATUS_CCMP_ENABLED;
+		wifi_send_cmd(w, CMD_ID_SET_BSS_INFO, 1, &w->saved_bi, sizeof(w->saved_bi), 0);
+		w->enc_enabled = true;
+		dev_info(w->dev, "*** TX-ENCRYPT: re-SET_BSS_INFO(ENABLED) tras GTK -> cifrado TX ON ***\n");
+	}
 	mutex_unlock(&w->hif_lock);
 	return 0;
 }

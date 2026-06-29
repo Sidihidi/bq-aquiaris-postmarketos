@@ -17,6 +17,46 @@ Estado tras una sesión muy larga. **3 hitos reales hoy** + el muro actual bien 
   basura están en **NUESTRO** struct → **corrupción de memoria**. Los dispara el scan en bucle de NM.
   **Workaround**: `nmcli radio wifi off` + `rfkill block wifi` → sin scan → sin crash (móvil estable).
 
+## ⏩ ESTADO EXACTO AL CERRAR + QUÉ CAPTURAR (para retomar en casa)
+
+**YA LISTO en la Pi .123** (`~/mainline/pkg/`):
+- `boot-kasan.img` (21 MB) — kernel KASAN OUTLINE empaquetado y **cabe en la partición** (28.5 MB).
+- `bootimg-kasan.cfg` — con **`ramdiskaddr=0x15000000`** (movido: el kernel DESCOMPRIMIDO es **57 MB**, así
+  que el ramdiskaddr original `0x11000000` lo pisaba; lo subí a 80 MB, bien después del kernel).
+- zImage KASAN = 20 MB (vs 14 normal). Config: `KASAN_GENERIC + OUTLINE + STACK + VMALLOC`.
+
+**Lo último que se lanzó**: flash de `boot-kasan.img` + `reboot -f`. **FALTA CONFIRMAR si arranca** (1er boot
+de un kernel de 57 MB con el ramdisk reubicado; puede que no a la primera).
+
+### PASO 1 — ¿arranca el kernel-KASAN?
+```bash
+ssh root@172.16.42.1 'uname -a | grep -o "#[0-9]*"; dmesg | grep -iE "KASAN|KernelAddress" | head'
+```
+- Responde + "KernelAddressSanitizer initialized" → ✅ KASAN vivo → PASO 2.
+- **NO arranca** (No route to host / bootloop) → recuperar con un boot bueno (`boot-184.img` por fastboot o
+  dd a mmcblk0 83968) y luego: subir el ramdiskaddr a `0x16000000`, o reducir el kernel
+  (`scripts/config -d KASAN_STACK -d KASAN_VMALLOC` y rebuild).
+
+### PASO 2 — provocar la corrupción y CAPTURAR el informe  ⭐ ESTO ES EL OBJETIVO
+```bash
+ssh root@172.16.42.1 'wpa_passphrase hola kakatua1 > /tmp/wpa.conf
+nmcli device set wlan0 managed no; ip link set wlan0 up
+wpa_supplicant -i wlan0 -c /tmp/wpa.conf -D nl80211 -B'
+# dejar 1-2 min (que escanee/conecte). KASAN salta al PRIMER acceso malo. Guardar:
+ssh root@172.16.42.1 'dmesg | grep -B2 -A45 "BUG: KASAN"' > kasan-report.txt
+```
+**QUÉ MIRAR en el informe (esto resuelve el crash, sin adivinar):**
+1. `BUG: KASAN: <tipo> in <FUNCIÓN>+0x..` ← **la función que corrompe**.
+2. `Write of size N at addr 0x..` ← qué escribe de más y dónde.
+3. `Call Trace:` ← la pila exacta (qué línea de `mt6582-wifi.c` o cfg80211).
+4. Apuesta: un `slab-out-of-bounds`/`stack-out-of-bounds` **write** de nuestro driver que pisa
+   `scan_req`/`connect_bss` (ambos en el struct `mt6582_wifi`). Con la línea exacta, el fix es directo.
+
+### PASO 3 — fix + DHCP
+- Arreglar el overflow que cante KASAN (acotar el buffer / corregir índice/longitud).
+- Crash muerto → atacar el DHCP-RX (sección de abajo): RX_FILTER del JoinComplete / GTK / OFFER unicast.
+- **Quitar KASAN** del config y rebuild normal cuando se cierre (kernel de 57MB es solo para debug).
+
 ## POR QUÉ KASAN
 La corrupción NO se caza leyendo (probé 5 hipótesis: scan_req UAF, hif_lock antipattern, overflow de `dlm`,
 `flen` del inform_bss, profundidad de stack — ninguna confirma). KASAN instrumenta cada acceso a memoria y,
