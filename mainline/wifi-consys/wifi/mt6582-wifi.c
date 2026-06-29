@@ -1470,18 +1470,14 @@ static int wifi_cfg_add_key(struct wiphy *wiphy, struct net_device *ndev, int li
 	wifi_send_cmd(w, CMD_ID_ADD_REMOVE_KEY, 1, &k, sizeof(k), 0);
 	dev_info(w->dev, "add_key: %s idx=%d cipher=0x%x peer=%pM len=%d tx_key=%d\n",
 		 pairwise ? "PTK" : "GTK", key_idx, params->cipher, k.peer_addr, params->key_len, k.tx_key);
-	/* 0629 FIX TX-ENCRYPT v2: re-enviar SET_BSS_INFO con enc_status=CCMP_ENABLED reusando saved_bi (guardado
-	 * con KEY_ABSENT en el JoinComplete) = la TRANSICION KEY_ABSENT->ENABLED que el FW espera para activar el
-	 * cifrado del TX. Se hace tras el GTK (!pairwise), que es la ULTIMA add_key del 4-way: asi el GTK se
-	 * instala con el FW tranquilo y el re-envio es lo ULTIMO (sin add_key despues que pueda crashear).
-	 * v1 (re-send entre PTK y GTK) confirmo por pstore que el FW crashea (WDT) justo tras el GTK add_key
-	 * -> probamos GTK-primero / re-send-ultimo. La PTK ya esta instalada (PTK va antes que el GTK). */
-	if (!pairwise && w->connect_wpa2 && !w->enc_enabled) {
-		w->saved_bi.enc_status = ENC_STATUS_CCMP_ENABLED;
-		wifi_send_cmd(w, CMD_ID_SET_BSS_INFO, 1, &w->saved_bi, sizeof(w->saved_bi), 0);
-		w->enc_enabled = true;
-		dev_info(w->dev, "*** TX-ENCRYPT: re-SET_BSS_INFO(ENABLED) tras GTK -> cifrado TX ON ***\n");
-	}
+	/* 0629 via A (downstream-confirmado): NO re-enviar SET_BSS_INFO. Bucear el downstream MT6628
+	 * (wlanoidSetAddKey, common/wlan_oid.c:2887-3160) demostro que SOLO construye esta CMD_802_11_KEY
+	 * + pone fgTransmitKeyExist=TRUE, NADA mas (ni 2o SET_BSS_INFO, ni WTBL/STA_REC/secFsm). El SET_BSS_INFO
+	 * de AIS se manda UNA vez, en JoinComplete (ais_fsm.c:2903, STA_STATE_3) con enc_status=KEY_ABSENT.
+	 * => el FW activa el cifrado del TX PURAMENTE con esta CMD_KEY (la PTK en la WTBL del peer). El struct
+	 * cmd_802_11_key cuadra byte-a-byte con CMD_802_11_KEY del FW (is_auth=0 = STA, correcto). El re-envio
+	 * de SET_BSS_INFO a mitad de conexion crashea el FW (WDT, confirmado por pstore v1+v2) -> ELIMINADO.
+	 * Pendiente de test en HW: confirmar por sniff que el DISCOVER cifrado sale al aire. */
 	mutex_unlock(&w->hif_lock);
 	return 0;
 }

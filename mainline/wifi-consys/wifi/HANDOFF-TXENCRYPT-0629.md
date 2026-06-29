@@ -1,4 +1,28 @@
-# HANDOFF — TX-ENCRYPT: bug CAZADO, el fix DISPARA pero el re-envío crashea (2026-06-29)
+# HANDOFF — TX-ENCRYPT: bug CAZADO → vía A implementada (downstream-confirmada), pendiente test HW (2026-06-29)
+
+## 🏆 ACTUALIZACIÓN (0629, tarde) — investigación del aisFsm COMPLETA → vía A implementada
+Bucé el downstream MT6628 y **el caso está cerrado**:
+- `wlanoidSetAddKey` (`common/wlan_oid.c:2887-3160`) **SOLO** construye la `CMD_802_11_KEY` + pone
+  `fgTransmitKeyExist=TRUE`. NADA más (ni 2º SET_BSS_INFO, ni WTBL/STA_REC/secFsm — grep "algo más" = vacío).
+- El `SET_BSS_INFO` de AIS se manda **UNA vez**, en JoinComplete (`mgmt/ais_fsm.c:2903`, STA_STATE_3) con
+  `enc_status = KEY_ABSENT` (porque `eEncStatus` lo fijó el connect con `fgTransmitKeyExist=FALSE`).
+- Nuestro struct `cmd_802_11_key` **cuadra byte-a-byte** con `CMD_802_11_KEY` del FW
+  (`include/nic_cmd_event.h:911`). Campos OK: `tx_key=pairwise`, `key_type`, `peer_addr` (BSSID / broadcast GTK),
+  `net_type=AIS`, `algorithm_id=CCMP`, `key_id`, `key_len`, `key_material`. **`is_auth=0`** = STA (correcto:
+  el bit `IS_AUTHENTICATOR` del key-index no se pone nunca en cfg80211).
+
+**→ El FW enciende el cifrado del TX PURAMENTE con la `CMD_KEY` (la PTK en la WTBL del peer). El 2º
+`SET_BSS_INFO` no hace falta — y es justo lo que crasheaba.** Por qué fallaba el original: mandaba
+`enc_status=ENABLED` en el JoinComplete (ANTES de la clave) → FW en estado raro. El downstream usa
+`KEY_ABSENT` ahí a propósito y deja que la key-cmd haga la transición.
+
+**vía A IMPLEMENTADA** en `mt6582-wifi.c`: change 1 (KEY_ABSENT en join) ✅ + **re-envío ELIMINADO**.
+Queda idéntico al downstream. **SIGUIENTE = TEST en HW** (seguro, sin re-send = sin el crash):
+`bash ~/build-diag.sh` → flash (`dd` seek 83968) → conectar a cpcd → sniff desde la Pi. Si el DISCOVER
+cifrado sale al aire (la Pi lo ve) → **DHCP arreglado → WPA2**.
+
+---
+### (abajo: el handoff original con el diagnóstico que llevó hasta aquí)
 
 Sesión Mac larga. **Cazado el bug raíz del DHCP/WPA2** y acotado al milímetro. El fix DISPARA (confirmado en
 HW por pstore), pero el mecanismo del re-envío crashea el FW → hay que activar el cifrado de otra forma.
