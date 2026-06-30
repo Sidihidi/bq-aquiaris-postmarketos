@@ -1,0 +1,1 @@
+ram:f0026470 type=COMPUTED_CALL in (no-func)

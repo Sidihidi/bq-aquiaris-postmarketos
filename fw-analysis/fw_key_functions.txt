@@ -1,0 +1,696 @@
+# Mapeo FW NDS32 (633 funcs) -> modulo .c + lineas ASSERT
+
+========== (sin ASSERT) (441 funcs) ==========
+  0xf0020000  FUN_ram_f0020000        
+  0xf0020010  FUN_ram_f0020010        
+  0xf002003c  FUN_ram_f002003c        
+  0xf0020068  FUN_ram_f0020068        
+  0xf0020094  FUN_ram_f0020094        
+  0xf00200b8  FUN_ram_f00200b8        
+  0xf00200e0  FUN_ram_f00200e0        
+  0xf00200fc  FUN_ram_f00200fc        
+  0xf0020124  FUN_ram_f0020124        
+  0xf00201d0  FUN_ram_f00201d0        
+  0xf00201ec  FUN_ram_f00201ec        
+  0xf0020218  FUN_ram_f0020218        
+  0xf0020298  FUN_ram_f0020298        
+  0xf0020480  FUN_ram_f0020480        
+  0xf0020508  FUN_ram_f0020508        
+  0xf00205c4  FUN_ram_f00205c4        
+  0xf0020704  FUN_ram_f0020704        
+  0xf0020710  FUN_ram_f0020710        
+  0xf0020a78  FUN_ram_f0020a78        
+  0xf0020b14  FUN_ram_f0020b14        
+  0xf0020b28  FUN_ram_f0020b28        
+  0xf0020c1c  FUN_ram_f0020c1c        
+  0xf0020cb8  FUN_ram_f0020cb8        
+  0xf0020cf4  FUN_ram_f0020cf4        
+  0xf0020d4c  FUN_ram_f0020d4c        
+  0xf0020d88  FUN_ram_f0020d88        
+  0xf0020dc8  FUN_ram_f0020dc8        
+  0xf0020ed0  FUN_ram_f0020ed0        
+  0xf0020ef4  FUN_ram_f0020ef4        
+  0xf0021088  FUN_ram_f0021088        
+  0xf0021198  FUN_ram_f0021198        
+  0xf0021344  FUN_ram_f0021344        
+  0xf00213e0  FUN_ram_f00213e0        
+  0xf002140c  FUN_ram_f002140c        
+  0xf0021430  FUN_ram_f0021430        
+  0xf00214f0  FUN_ram_f00214f0        
+  0xf0021538  FUN_ram_f0021538        
+  0xf0021984  FUN_ram_f0021984        
+  0xf0021d30  FUN_ram_f0021d30        
+  0xf0021e04  FUN_ram_f0021e04        
+  0xf0022800  FUN_ram_f0022800        
+  0xf00228c0  FUN_ram_f00228c0        
+  0xf0023778  FUN_ram_f0023778        
+  0xf0023798  FUN_ram_f0023798        
+  0xf00237f4  FUN_ram_f00237f4        
+  0xf00237f8  FUN_ram_f00237f8        
+  0xf0023860  FUN_ram_f0023860        
+  0xf0023864  FUN_ram_f0023864        
+  0xf0023868  FUN_ram_f0023868        
+  0xf0023870  FUN_ram_f0023870        
+  0xf0023880  FUN_ram_f0023880        
+  0xf0023930  FUN_ram_f0023930        
+  0xf0023a38  FUN_ram_f0023a38        
+  0xf0023b48  FUN_ram_f0023b48        
+  0xf0023bdc  FUN_ram_f0023bdc        
+  0xf00242a0  FUN_ram_f00242a0        
+  0xf0024394  FUN_ram_f0024394        
+  0xf00243c8  FUN_ram_f00243c8        
+  0xf0024414  FUN_ram_f0024414        
+  0xf002444c  FUN_ram_f002444c        
+  0xf002460c  FUN_ram_f002460c        
+  0xf00247b8  FUN_ram_f00247b8        
+  0xf0025090  FUN_ram_f0025090        
+  0xf0025a70  FUN_ram_f0025a70        
+  0xf0025b14  FUN_ram_f0025b14        
+  0xf0025b3c  FUN_ram_f0025b3c        
+  0xf0025c48  FUN_ram_f0025c48        
+  0xf0025d90  FUN_ram_f0025d90        
+  0xf0025ef8  FUN_ram_f0025ef8        
+  0xf0025f4c  FUN_ram_f0025f4c        
+  0xf0025f64  FUN_ram_f0025f64        
+  0xf0025fc0  FUN_ram_f0025fc0        
+  0xf00265a8  FUN_ram_f00265a8        
+  0xf002694c  FUN_ram_f002694c        
+  0xf00269e4  FUN_ram_f00269e4        
+  0xf0026b00  FUN_ram_f0026b00        
+  0xf00273ac  FUN_ram_f00273ac        
+  0xf00273e4  FUN_ram_f00273e4        
+  0xf0028000  FUN_ram_f0028000        
+  0xf0028478  FUN_ram_f0028478        
+  0xf00284a0  FUN_ram_f00284a0        
+  0xf002856c  FUN_ram_f002856c        
+  0xf00285a8  FUN_ram_f00285a8        
+  0xf0028638  FUN_ram_f0028638        
+  0xf0028718  FUN_ram_f0028718        
+  0xf0028740  FUN_ram_f0028740        
+  0xf0028750  FUN_ram_f0028750        
+  0xf00288e8  FUN_ram_f00288e8        
+  0xf002893c  FUN_ram_f002893c        
+  0xf0028984  FUN_ram_f0028984        
+  0xf0028ad0  FUN_ram_f0028ad0        
+  0xf0028b44  FUN_ram_f0028b44        
+  0xf0028b5c  FUN_ram_f0028b5c        
+  0xf0028c5c  FUN_ram_f0028c5c        
+  0xf0028f00  FUN_ram_f0028f00        
+  0xf0029580  FUN_ram_f0029580        
+  0xf00297b0  FUN_ram_f00297b0        
+  0xf0029af0  FUN_ram_f0029af0        
+  0xf0029d8c  FUN_ram_f0029d8c        
+  0xf002a0ec  FUN_ram_f002a0ec        
+  0xf002a4cc  FUN_ram_f002a4cc        
+  0xf002a8e0  FUN_ram_f002a8e0        
+  0xf002abec  FUN_ram_f002abec        
+  0xf002ac70  FUN_ram_f002ac70        
+  0xf002ad0c  FUN_ram_f002ad0c        
+  0xf002ad54  FUN_ram_f002ad54        
+  0xf002ad8c  FUN_ram_f002ad8c        
+  0xf002ada4  FUN_ram_f002ada4        
+  0xf002adbc  FUN_ram_f002adbc        
+  0xf002aef4  FUN_ram_f002aef4        
+  0xf002afbc  FUN_ram_f002afbc        
+  0xf002b1b0  FUN_ram_f002b1b0        
+  0xf002b1e4  FUN_ram_f002b1e4        
+  0xf002b290  FUN_ram_f002b290        
+  0xf002b3d8  FUN_ram_f002b3d8        
+  0xf002b420  FUN_ram_f002b420        
+  0xf002b494  FUN_ram_f002b494        
+  0xf002b9d4  FUN_ram_f002b9d4        
+  0xf002bb7c  FUN_ram_f002bb7c        
+  0xf002bc24  FUN_ram_f002bc24        
+  0xf002bcd4  FUN_ram_f002bcd4        
+  0xf002bd88  FUN_ram_f002bd88        
+  0xf002bda8  FUN_ram_f002bda8        
+  0xf002bdc8  FUN_ram_f002bdc8        
+  0xf002be74  FUN_ram_f002be74        
+  0xf002bf0c  FUN_ram_f002bf0c        
+  0xf002c188  FUN_ram_f002c188        
+  0xf002c468  FUN_ram_f002c468        
+  0xf002c4ac  FUN_ram_f002c4ac        
+  0xf002d318  FUN_ram_f002d318        
+  0xf002d7fc  FUN_ram_f002d7fc        
+  0xf002e94c  FUN_ram_f002e94c        
+  0xf002ea68  FUN_ram_f002ea68        
+  0xf002eb2c  FUN_ram_f002eb2c        
+  0xf002eb6c  FUN_ram_f002eb6c        
+  0xf002ecac  FUN_ram_f002ecac        
+  0xf002ee54  FUN_ram_f002ee54        
+  0xf002efa8  FUN_ram_f002efa8        
+  0xf002f2d8  FUN_ram_f002f2d8        
+  0xf002f4ac  FUN_ram_f002f4ac        
+  0xf002fcb8  FUN_ram_f002fcb8        
+  0xf002fd54  FUN_ram_f002fd54        
+  0xf002fe3c  FUN_ram_f002fe3c        
+  0xf002fff8  FUN_ram_f002fff8        
+  0xf003008c  FUN_ram_f003008c        
+  0xf00301dc  FUN_ram_f00301dc        
+  0xf0030278  FUN_ram_f0030278        
+  0xf00303b4  FUN_ram_f00303b4        
+  0xf003041c  FUN_ram_f003041c        
+  0xf003046c  FUN_ram_f003046c        
+  0xf0030510  FUN_ram_f0030510        
+  0xf003065c  FUN_ram_f003065c        
+  0xf0030700  FUN_ram_f0030700        
+  0xf0030784  FUN_ram_f0030784        
+  0xf003083c  FUN_ram_f003083c        
+  0xf0030a30  FUN_ram_f0030a30        
+  0xf0030a6c  FUN_ram_f0030a6c        
+  0xf0030aa8  FUN_ram_f0030aa8        
+  0xf0030b00  FUN_ram_f0030b00        
+  0xf0030b14  FUN_ram_f0030b14        
+  0xf0030b28  FUN_ram_f0030b28        
+  0xf0030b3c  FUN_ram_f0030b3c        
+  0xf0030c40  FUN_ram_f0030c40        
+  0xf00314b4  FUN_ram_f00314b4        
+  0xf0031cdc  FUN_ram_f0031cdc        
+  0xf0031d90  FUN_ram_f0031d90        
+  0xf0031dd4  FUN_ram_f0031dd4        
+  0xf0031e28  FUN_ram_f0031e28        
+  0xf0031e40  FUN_ram_f0031e40        
+  0xf0031e70  FUN_ram_f0031e70        
+  0xf0031f08  FUN_ram_f0031f08        
+  0xf0031f1c  FUN_ram_f0031f1c        
+  0xf0031f74  FUN_ram_f0031f74        
+  0xf0031fc0  FUN_ram_f0031fc0        
+  0xf00321f0  FUN_ram_f00321f0        
+  0xf0032ffc  FUN_ram_f0032ffc        
+  0xf003359c  FUN_ram_f003359c        
+  0xf00339c0  FUN_ram_f00339c0        
+  0xf0033a2c  FUN_ram_f0033a2c        
+  0xf0033d24  FUN_ram_f0033d24        
+  0xf0033de8  FUN_ram_f0033de8        
+  0xf0033e2c  FUN_ram_f0033e2c        
+  0xf0033f8c  FUN_ram_f0033f8c        
+  0xf0033fa8  FUN_ram_f0033fa8        
+  0xf0033fc4  FUN_ram_f0033fc4        
+  0xf0034034  FUN_ram_f0034034        
+  0xf0034044  FUN_ram_f0034044        
+  0xf003432c  FUN_ram_f003432c        
+  0xf003436c  FUN_ram_f003436c        
+  0xf00343a8  FUN_ram_f00343a8        
+  0xf00343c0  FUN_ram_f00343c0        
+  0xf00343fc  FUN_ram_f00343fc        
+  0xf0034610  FUN_ram_f0034610        
+  0xf0034648  FUN_ram_f0034648        
+  0xf0034658  FUN_ram_f0034658        
+  0xf00347c4  FUN_ram_f00347c4        
+  0xf00347e8  FUN_ram_f00347e8        
+  0xf00348a0  FUN_ram_f00348a0        
+  0xf0034a68  FUN_ram_f0034a68        
+  0xf0034a98  FUN_ram_f0034a98        
+  0xf0034ad8  FUN_ram_f0034ad8        
+  0xf0034d38  FUN_ram_f0034d38        
+  0xf0034dac  FUN_ram_f0034dac        
+  0xf0034f64  FUN_ram_f0034f64        
+  0xf00351f4  FUN_ram_f00351f4        
+  0xf003570c  FUN_ram_f003570c        
+  0xf0037050  FUN_ram_f0037050        
+  0xf00370b8  FUN_ram_f00370b8        
+  0xf00372b4  FUN_ram_f00372b4        
+  0xf0037300  FUN_ram_f0037300        
+  0xf003734c  FUN_ram_f003734c        
+  0xf003740c  FUN_ram_f003740c        
+  0xf00377e0  FUN_ram_f00377e0        
+  0xf0037844  FUN_ram_f0037844        
+  0xf00386fc  FUN_ram_f00386fc        
+  0xf00387e0  FUN_ram_f00387e0        
+  0xf0038a10  FUN_ram_f0038a10        
+  0xf0038d30  FUN_ram_f0038d30        
+  0xf0038d88  FUN_ram_f0038d88        
+  0xf0038d98  FUN_ram_f0038d98        
+  0xf0038dfc  FUN_ram_f0038dfc        
+  0xf0038e4c  FUN_ram_f0038e4c        
+  0xf0038f00  FUN_ram_f0038f00        
+  0xf0038f3c  FUN_ram_f0038f3c        
+  0xf0039018  FUN_ram_f0039018        
+  0xf0039060  FUN_ram_f0039060        
+  0xf0039800  FUN_ram_f0039800        
+  0xf0039884  FUN_ram_f0039884        
+  0xf0039914  FUN_ram_f0039914        
+  0xf003aadc  FUN_ram_f003aadc        
+  0xf003aaf8  FUN_ram_f003aaf8        
+  0xf003ab1c  FUN_ram_f003ab1c        
+  0xf003ab40  FUN_ram_f003ab40        
+  0xf003aba0  FUN_ram_f003aba0        
+  0xf003ad98  FUN_ram_f003ad98        
+  0xf003ae04  FUN_ram_f003ae04        
+  0xf003ae2c  FUN_ram_f003ae2c        
+  0xf003b4a0  FUN_ram_f003b4a0        
+  0xf003b600  FUN_ram_f003b600        
+  0xf003b6c8  FUN_ram_f003b6c8        
+  0xf003b76c  FUN_ram_f003b76c        
+  0xf003b804  FUN_ram_f003b804        
+  0xf003b828  FUN_ram_f003b828        
+  0xf003b84c  FUN_ram_f003b84c        
+  0xf003bb88  FUN_ram_f003bb88        
+  0xf003bbc8  FUN_ram_f003bbc8        
+  0xf003bc90  FUN_ram_f003bc90        
+  0xf003bcb0  FUN_ram_f003bcb0        
+  0xf003bcf0  FUN_ram_f003bcf0        
+  0xf003bdb4  FUN_ram_f003bdb4        
+  0xf003c280  FUN_ram_f003c280        
+  0xf003c308  FUN_ram_f003c308        
+  0xf003c334  FUN_ram_f003c334        
+  0xf003c3e8  FUN_ram_f003c3e8        
+  0xf003c4f8  FUN_ram_f003c4f8        
+  0xf003c528  FUN_ram_f003c528        
+  0xf003c5a4  FUN_ram_f003c5a4        
+  0xf003c618  FUN_ram_f003c618        
+  0xf003c868  FUN_ram_f003c868        
+  0xf003c9b4  FUN_ram_f003c9b4        
+  0xf003c9f4  FUN_ram_f003c9f4        
+  0xf003c9f8  FUN_ram_f003c9f8        
+  0xf003cb04  FUN_ram_f003cb04        
+  0xf003cb60  FUN_ram_f003cb60        
+  0xf003cbc8  FUN_ram_f003cbc8        
+  0xf003cc84  FUN_ram_f003cc84        
+  0xf003ccc4  FUN_ram_f003ccc4        
+  0xf003cd78  FUN_ram_f003cd78        
+  0xf003cdb0  FUN_ram_f003cdb0        
+  0xf003ce08  FUN_ram_f003ce08        
+  0xf003cf78  FUN_ram_f003cf78        
+  0xf003d034  FUN_ram_f003d034        
+  0xf003d1b4  FUN_ram_f003d1b4        
+  0xf003d1e8  FUN_ram_f003d1e8        
+  0xf003d21c  FUN_ram_f003d21c        
+  0xf003d388  FUN_ram_f003d388        
+  0xf003d488  FUN_ram_f003d488        
+  0xf003dab8  FUN_ram_f003dab8        
+  0xf003dbc8  FUN_ram_f003dbc8        
+  0xf003dc5c  FUN_ram_f003dc5c        
+  0xf003dff8  FUN_ram_f003dff8        
+  0xf003e03c  FUN_ram_f003e03c        
+  0xf003e054  FUN_ram_f003e054        
+  0xf003e080  FUN_ram_f003e080        
+  0xf003e0d8  FUN_ram_f003e0d8        
+  0xf003e540  FUN_ram_f003e540        
+  0xf003e5c8  FUN_ram_f003e5c8        
+  0xf003e5f8  FUN_ram_f003e5f8        
+  0xf003e5fc  FUN_ram_f003e5fc        
+  0xf003e608  FUN_ram_f003e608        
+  0xf003e614  FUN_ram_f003e614        
+  0xf003e618  FUN_ram_f003e618        
+  0xf003e6f8  FUN_ram_f003e6f8        
+  0xf003eeb0  FUN_ram_f003eeb0        
+  0xf003ef14  FUN_ram_f003ef14        
+  0xf003ef48  FUN_ram_f003ef48        
+  0xf003efac  FUN_ram_f003efac        
+  0xf003f058  FUN_ram_f003f058        
+  0xf003f094  FUN_ram_f003f094        
+  0xf003f140  FUN_ram_f003f140        
+  0xf003f3d0  FUN_ram_f003f3d0        
+  0xf003f498  FUN_ram_f003f498        
+  0xf003f6a4  FUN_ram_f003f6a4        
+  0xf003f8b0  FUN_ram_f003f8b0        
+  0xf003fa48  FUN_ram_f003fa48        
+  0xf003fb50  FUN_ram_f003fb50        
+  0xf003fddc  FUN_ram_f003fddc        
+  0xf003ff24  FUN_ram_f003ff24        
+  0xf0040174  FUN_ram_f0040174        
+  0xf00401e4  FUN_ram_f00401e4        
+  0xf004052c  FUN_ram_f004052c        
+  0xf0040780  FUN_ram_f0040780        
+  0xf0040d3c  FUN_ram_f0040d3c        
+  0xf0040e14  FUN_ram_f0040e14        
+  0xf0040e78  FUN_ram_f0040e78        
+  0xf0040ecc  FUN_ram_f0040ecc        
+  0xf0040f4c  FUN_ram_f0040f4c        
+  0xf00410f4  FUN_ram_f00410f4        
+  0xf004113c  FUN_ram_f004113c        
+  0xf0041210  FUN_ram_f0041210        
+  0xf00412b0  FUN_ram_f00412b0        
+  0xf00412dc  FUN_ram_f00412dc        
+  0xf00413b4  FUN_ram_f00413b4        
+  0xf00415b0  FUN_ram_f00415b0        
+  0xf00415d0  FUN_ram_f00415d0        
+  0xf00416b0  FUN_ram_f00416b0        
+  0xf0041724  FUN_ram_f0041724        
+  0xf0041768  FUN_ram_f0041768        
+  0xf0041c18  FUN_ram_f0041c18        
+  0xf0041cbc  FUN_ram_f0041cbc        
+  0xf0041d34  FUN_ram_f0041d34        
+  0xf004201c  FUN_ram_f004201c        
+  0xf00420e8  FUN_ram_f00420e8        
+  0xf00421d0  FUN_ram_f00421d0        
+  0xf0042254  FUN_ram_f0042254        
+  0xf0042264  FUN_ram_f0042264        
+  0xf00422bc  FUN_ram_f00422bc        
+  0xf0042344  FUN_ram_f0042344        
+  0xf00424d0  FUN_ram_f00424d0        
+  0xf0042688  FUN_ram_f0042688        
+  0xf00427c0  FUN_ram_f00427c0        
+  0xf0042810  FUN_ram_f0042810        
+  0xf00428ac  FUN_ram_f00428ac        
+  0xf0042998  FUN_ram_f0042998        
+  0xf0042a24  FUN_ram_f0042a24        
+  0xf0042b1c  FUN_ram_f0042b1c        
+  0xf0042bcc  FUN_ram_f0042bcc        
+  0xf0042c48  FUN_ram_f0042c48        
+  0xf0042d0c  FUN_ram_f0042d0c        
+  0xf0042eb8  FUN_ram_f0042eb8        
+  0xf0042f70  FUN_ram_f0042f70        
+  0xf0042f80  FUN_ram_f0042f80        
+  0xf0042ff4  FUN_ram_f0042ff4        
+  0xf00430c8  FUN_ram_f00430c8        
+  0xf004322c  FUN_ram_f004322c        
+  0xf0043270  FUN_ram_f0043270        
+  0xf00432dc  FUN_ram_f00432dc        
+  0xf0043ed0  FUN_ram_f0043ed0        
+  0xf0043ee4  FUN_ram_f0043ee4        
+  0xf0043fac  FUN_ram_f0043fac        
+  0xf0044008  FUN_ram_f0044008        
+  0xf0044048  FUN_ram_f0044048        
+  0xf0044204  FUN_ram_f0044204        
+  0xf0044344  FUN_ram_f0044344        
+  0xf0044404  FUN_ram_f0044404        
+  0xf0044768  FUN_ram_f0044768        
+  0xf0044898  FUN_ram_f0044898        
+  0xf0044c94  FUN_ram_f0044c94        
+  0xf0044d2c  FUN_ram_f0044d2c        
+  0xf0044d48  FUN_ram_f0044d48        
+  0xf0044d9c  FUN_ram_f0044d9c        
+  0xf0044e24  FUN_ram_f0044e24        
+  0xf0045348  FUN_ram_f0045348        
+  0xf0045380  FUN_ram_f0045380        
+  0xf0045c9c  FUN_ram_f0045c9c        
+  0xf0045ce4  FUN_ram_f0045ce4        
+  0xf0045d70  FUN_ram_f0045d70        
+  0xf0045e34  FUN_ram_f0045e34        
+  0xf00462c4  FUN_ram_f00462c4        
+  0xf0046300  FUN_ram_f0046300        
+  0xf00465cc  FUN_ram_f00465cc        
+  0xf0046744  FUN_ram_f0046744        
+  0xf0046800  FUN_ram_f0046800        
+  0xf0046978  FUN_ram_f0046978        
+  0xf0046990  FUN_ram_f0046990        
+  0xf00469d8  FUN_ram_f00469d8        
+  0xf00469dc  FUN_ram_f00469dc        
+  0xf00469e0  FUN_ram_f00469e0        
+  0xf0046aa0  FUN_ram_f0046aa0        
+  0xf0046ad8  FUN_ram_f0046ad8        
+  0xf0046c10  FUN_ram_f0046c10        
+  0xf0046c44  FUN_ram_f0046c44        
+  0xf0046d0c  FUN_ram_f0046d0c        
+  0xf0047000  FUN_ram_f0047000        
+  0xf0047138  FUN_ram_f0047138        
+  0xf0047248  FUN_ram_f0047248        
+  0xf0047db8  FUN_ram_f0047db8        
+  0xf004844c  FUN_ram_f004844c        
+  0xf00484bc  FUN_ram_f00484bc        
+  0xf00484ec  FUN_ram_f00484ec        
+  0xf0048840  FUN_ram_f0048840        
+  0xf00488dc  FUN_ram_f00488dc        
+  0xf0048914  FUN_ram_f0048914        
+  0xf0048954  FUN_ram_f0048954        
+  0xf004898c  FUN_ram_f004898c        
+  0xf0048ab4  FUN_ram_f0048ab4        
+  0xf0048acc  FUN_ram_f0048acc        
+  0xf0048af4  FUN_ram_f0048af4        
+  0xf0048c48  FUN_ram_f0048c48        
+  0xf0048c9c  FUN_ram_f0048c9c        
+  0xf0048d20  FUN_ram_f0048d20        
+  0xf0048d54  FUN_ram_f0048d54        
+  0xf0048e48  FUN_ram_f0048e48        
+  0xf0048f14  FUN_ram_f0048f14        
+  0xf0049074  FUN_ram_f0049074        
+  0xf004912c  FUN_ram_f004912c        
+  0xf004931c  FUN_ram_f004931c        
+  0xf00494b0  FUN_ram_f00494b0        
+  0xf0049504  FUN_ram_f0049504        
+  0xf00497b4  FUN_ram_f00497b4        
+  0xf004999c  FUN_ram_f004999c        
+  0xf0049b54  FUN_ram_f0049b54        
+  0xf0049c24  FUN_ram_f0049c24        
+  0xf0049ce4  FUN_ram_f0049ce4        
+  0xf0049de4  FUN_ram_f0049de4        
+  0xf004a410  FUN_ram_f004a410        
+  0xf004a784  FUN_ram_f004a784        
+  0xf004a7ac  FUN_ram_f004a7ac        
+  0xf004a888  FUN_ram_f004a888        
+  0xf004aea8  FUN_ram_f004aea8        
+  0xf004afa4  FUN_ram_f004afa4        
+  0xf004b1d0  FUN_ram_f004b1d0        
+  0xf004b1d4  FUN_ram_f004b1d4        
+  0xf004b684  FUN_ram_f004b684        
+  0xf004b690  FUN_ram_f004b690        
+  0xf004b6cc  FUN_ram_f004b6cc        
+  0xf004b748  FUN_ram_f004b748        
+  0xf004b7e0  FUN_ram_f004b7e0        
+  0xf004b86c  FUN_ram_f004b86c        
+  0xf004be1c  FUN_ram_f004be1c        
+  0xf004bed0  FUN_ram_f004bed0        
+
+========== wifi/mgmt/bss.c (8 funcs) ==========
+  0xf0021cc4  FUN_ram_f0021cc4        0xe8a,0xe96
+  0xf0021f24  FUN_ram_f0021f24        0x9c9,0x9cb
+  0xf0021fe4  FUN_ram_f0021fe4        0x489,0x48a,0x48b,0x4ae
+  0xf0022114  FUN_ram_f0022114        0x430,0x431,0x432,0x455
+  0xf0022990  FUN_ram_f0022990        0x82b,0x837
+  0xf0022bd0  FUN_ram_f0022bd0        0x895,0x89d,0x8a6,0x8c9
+  0xf0022fe8  FUN_ram_f0022fe8        0xa17
+  0xf002365c  FUN_ram_f002365c        0x360
+
+========== wifi/mgmt/cnm.c (13 funcs) ==========
+  0xf002379c  FUN_ram_f002379c        0x3e4
+  0xf00239e8  FUN_ram_f00239e8        0xa1d
+  0xf0023a90  FUN_ram_f0023a90        0xd7a
+  0xf0023c3c  FUN_ram_f0023c3c        0xb68
+  0xf0023d9c  FUN_ram_f0023d9c        0xdcf
+  0xf0023e50  FUN_ram_f0023e50        0x5fa
+  0xf0024024  FUN_ram_f0024024        0xdf0
+  0xf0024080  FUN_ram_f0024080        0xe1e
+  0xf00240f8  FUN_ram_f00240f8        0xb40
+  0xf0024168  FUN_ram_f0024168        0x989
+  0xf00248a4  FUN_ram_f00248a4        0x4cd,0x515,0x518,0xbd0,0xbe8,0xc23,0xc61,0xcbf
+  0xf0024fc0  FUN_ram_f0024fc0        0x564,0x573
+  0xf0025198  FUN_ram_f0025198        0x6eb,0x700,0x711,0x734,0x816,0x81f,0x855,0x856,0x87a,0x887,0x8f3,0x932
+
+========== wifi/mgmt/cnm_mem.c (6 funcs) ==========
+  0xf0025b48  FUN_ram_f0025b48        0x407,0x408,0x411,0x41a
+  0xf0025cac  FUN_ram_f0025cac        0x457,0x471
+  0xf0025ddc  FUN_ram_f0025ddc        0x57a
+  0xf00260bc  FUN_ram_f00260bc        0x5cc,0x5cd
+  0xf0026470  FUN_ram_f0026470        0x66c
+  0xf002653c  FUN_ram_f002653c        0x507
+
+========== wifi/mgmt/cnm_timer.c (5 funcs) ==========
+  0xf00265f0  FUN_ram_f00265f0        0xe2
+  0xf0026644  FUN_ram_f0026644        0x111
+  0xf00266a0  FUN_ram_f00266a0        0x129
+  0xf00266d8  FUN_ram_f00266d8        0x159
+  0xf002672c  FUN_ram_f002672c        0x17c,0x184,0x197
+
+========== wifi/mgmt/hem.c (1 funcs) ==========
+  0xf00278a8  FUN_ram_f00278a8        0x585
+
+========== wifi/mgmt/hem_cmd.c (1 funcs) ==========
+  0xf0028190  FUN_ram_f0028190        0x2d9
+
+========== wifi/mgmt/hem_mbox.c (3 funcs) ==========
+  0xf0028250  FUN_ram_f0028250        0x1a2
+  0xf0028304  FUN_ram_f0028304        0x1b7
+  0xf0028344  FUN_ram_f0028344        0x1cf,0x1d0,0x1de
+
+========== wifi/mgmt/mqm.c (13 funcs) ==========
+  0xf0028650  FUN_ram_f0028650        0x4c4
+  0xf0028770  FUN_ram_f0028770        0x512,0x530
+  0xf0028ca8  FUN_ram_f0028ca8        0x8ea
+  0xf0028ddc  FUN_ram_f0028ddc        0x6a2
+  0xf00291ec  FUN_ram_f00291ec        0x75c
+  0xf002929c  FUN_ram_f002929c        0xa3f,0xaaa
+  0xf0029634  FUN_ram_f0029634        0x5f7,0x60c
+  0xf0029828  FUN_ram_f0029828        0x108e
+  0xf0029a40  FUN_ram_f0029a40        0xaf5
+  0xf0029d08  FUN_ram_f0029d08        0x54f
+  0xf0029e24  FUN_ram_f0029e24        0x7d1
+  0xf0029fd8  FUN_ram_f0029fd8        0x594,0x595
+  0xf002a114  FUN_ram_f002a114        0x3a8
+
+========== wifi/mgmt/mt6582/rlm_phy.c (6 funcs) ==========
+  0xf0042ee4  FUN_ram_f0042ee4        0x67b
+  0xf0043f84  FUN_ram_f0043f84        0xe91
+  0xf0044e50  FUN_ram_f0044e50        0x808
+  0xf004518c  FUN_ram_f004518c        0xba2
+  0xf00452b4  FUN_ram_f00452b4        0x1321
+  0xf004571c  FUN_ram_f004571c        0xc21,0xc55
+
+========== wifi/mgmt/mt6582/rlm_sensor.c (1 funcs) ==========
+  0xf004655c  FUN_ram_f004655c        0x5ec
+
+========== wifi/mgmt/mt6582/rlm_test.c (4 funcs) ==========
+  0xf00468c8  FUN_ram_f00468c8        0x666
+  0xf0046c78  FUN_ram_f0046c78        0x9ca
+  0xf004735c  FUN_ram_f004735c        0x702,0x71b
+  0xf00481e8  FUN_ram_f00481e8        0x315
+
+========== wifi/mgmt/mt6582/rlm_txpwr.c (4 funcs) ==========
+  0xf0048a48  FUN_ram_f0048a48        0x822
+  0xf0049bac  FUN_ram_f0049bac        0xd2e
+  0xf004a020  FUN_ram_f004a020        0x652
+  0xf004a200  FUN_ram_f004a200        0x455
+
+========== wifi/mgmt/mt6582/roaming_fsm.c (1 funcs) ==========
+  0xf00426f0  FUN_ram_f00426f0        0x4d2
+
+========== wifi/mgmt/p2p_fsm.c (3 funcs) ==========
+  0xf002a1ac  FUN_ram_f002a1ac        0x196,0x197
+  0xf002a228  FUN_ram_f002a228        0x1c9,0x1cb,0x1cc
+  0xf002a3a4  FUN_ram_f002a3a4        0xe2
+
+========== wifi/mgmt/pm_timer.c (5 funcs) ==========
+  0xf0030e04  FUN_ram_f0030e04        0x593
+  0xf0030e9c  FUN_ram_f0030e9c        0x5d4,0x5d5
+  0xf0030f88  FUN_ram_f0030f88        0x548
+  0xf0031078  FUN_ram_f0031078        0x4bb,0x501
+  0xf0031220  FUN_ram_f0031220        0x2d7,0x2d8,0x338,0x339,0x35d,0x35e
+
+========== wifi/mgmt/privacy.c (2 funcs) ==========
+  0xf002a480  FUN_ram_f002a480        0x191
+  0xf002a554  FUN_ram_f002a554        0x504
+
+========== wifi/mgmt/pwr_mgt_fsm.c (39 funcs) ==========
+  0xf002b140  FUN_ram_f002b140        0x202d
+  0xf002b184  FUN_ram_f002b184        0x2161
+  0xf002b584  FUN_ram_f002b584        0x2bd7
+  0xf002b6b8  FUN_ram_f002b6b8        0x298c,0x298d,0x298e,0x29a8
+  0xf002b844  FUN_ram_f002b844        0x240a,0x240b,0x2424
+  0xf002bde4  FUN_ram_f002bde4        0x21c3
+  0xf002c094  FUN_ram_f002c094        0x26ba
+  0xf002c334  FUN_ram_f002c334        0x2371
+  0xf002c5cc  FUN_ram_f002c5cc        0x2651,0x2652
+  0xf002c640  FUN_ram_f002c640        0x25fc
+  0xf002c690  FUN_ram_f002c690        0x2625,0x263b
+  0xf002c750  FUN_ram_f002c750        0x25cf
+  0xf002c7a8  FUN_ram_f002c7a8        0x2184
+  0xf002c824  FUN_ram_f002c824        0x2056
+  0xf002c88c  FUN_ram_f002c88c        0x1fe1,0x1fe2
+  0xf002c928  FUN_ram_f002c928        0x200e
+  0xf002c974  FUN_ram_f002c974        0x1d36
+  0xf002c9d4  FUN_ram_f002c9d4        0x1f86,0x1fbf
+  0xf002caf0  FUN_ram_f002caf0        0x2223,0x2226
+  0xf002ccb8  FUN_ram_f002ccb8        0x1f4d,0x1f58
+  0xf002cd78  FUN_ram_f002cd78        0x1e29
+  0xf002cdec  FUN_ram_f002cdec        0x22ca
+  0xf002ce58  FUN_ram_f002ce58        0x2559,0x2560
+  0xf002cfa8  FUN_ram_f002cfa8        0x1ce2,0x1ce5,0x1ce6
+  0xf002d178  FUN_ram_f002d178        0x1f0a
+  0xf002d278  FUN_ram_f002d278        0x229c
+  0xf002d38c  FUN_ram_f002d38c        0x1df3,0x1df4,0x1df8
+  0xf002d478  FUN_ram_f002d478        0x1e8b,0x1e8c
+  0xf002d594  FUN_ram_f002d594        0x1da6,0x1da9,0x1dc9,0x1dd1
+  0xf002d6d8  FUN_ram_f002d6d8        0x1c98
+  0xf002e1ec  FUN_ram_f002e1ec        0xa30
+  0xf002e2d0  FUN_ram_f002e2d0        0xe93,0xe94
+  0xf002e64c  FUN_ram_f002e64c        0x960
+  0xf002f314  FUN_ram_f002f314        0x2691
+  0xf002f374  FUN_ram_f002f374        0x20ea
+  0xf002f504  FUN_ram_f002f504        0x266e
+  0xf002f574  FUN_ram_f002f574        0x209e
+  0xf002f8dc  FUN_ram_f002f8dc        0xbe9
+  0xf002fa8c  FUN_ram_f002fa8c        0xdd4
+
+========== wifi/mgmt/rate.c (4 funcs) ==========
+  0xf00314ec  FUN_ram_f00314ec        0xfb,0xfc,0xfd
+  0xf0031640  FUN_ram_f0031640        0x15d,0x15e
+  0xf00316c8  FUN_ram_f00316c8        0x18a
+  0xf003170c  FUN_ram_f003170c        0x1ab
+
+========== wifi/mgmt/rlm.c (6 funcs) ==========
+  0xf003ab54  FUN_ram_f003ab54        0x68d
+  0xf003ac24  FUN_ram_f003ac24        0x47b
+  0xf003ae98  FUN_ram_f003ae98        0x2d2,0x2d3
+  0xf003af48  FUN_ram_f003af48        0x2a2,0x2a7
+  0xf003aff4  FUN_ram_f003aff4        0x4fa
+  0xf003b0b8  FUN_ram_f003b0b8        0x1fb,0x256,0x348,0x349,0x3c4,0x3c5
+
+========== wifi/mgmt/rlm_ar.c (7 funcs) ==========
+  0xf003c9fc  FUN_ram_f003c9fc        0x18d1
+  0xf003d110  FUN_ram_f003d110        0xb6a
+  0xf003d24c  FUN_ram_f003d24c        0x1956
+  0xf003d4a4  FUN_ram_f003d4a4        0x1470
+  0xf003d680  FUN_ram_f003d680        0xd01,0xd0b
+  0xf003e0f8  FUN_ram_f003e0f8        0xed0,0xedf
+  0xf003e184  FUN_ram_f003e184        0x1004
+
+========== wifi/mgmt/rlm_protection.c (1 funcs) ==========
+  0xf003b8dc  FUN_ram_f003b8dc        0x236
+
+========== wifi/mgmt/rxm.c (15 funcs) ==========
+  0xf0038764  FUN_ram_f0038764        0xb69
+  0xf00387ac  FUN_ram_f00387ac        0xb81
+  0xf00388e8  FUN_ram_f00388e8        0xc06,0xc07
+  0xf0038980  FUN_ram_f0038980        0xe95
+  0xf0038ad0  FUN_ram_f0038ad0        0xfe7
+  0xf0038b38  FUN_ram_f0038b38        0x10cb,0x10cc,0x10cd
+  0xf0038c28  FUN_ram_f0038c28        0x1114,0x1115,0x1116,0x1117
+  0xf00390e4  FUN_ram_f00390e4        0x1156
+  0xf0039230  FUN_ram_f0039230        0xea9
+  0xf003929c  FUN_ram_f003929c        0x9c6,0x9c7,0x9c8,0x9c9
+  0xf00393bc  FUN_ram_f00393bc        0x41c,0x479
+  0xf0039640  FUN_ram_f0039640        0xc6e,0xc6f
+  0xf0039750  FUN_ram_f0039750        0xdf4,0xdf5,0xdf7
+  0xf0039b78  FUN_ram_f0039b78        0xa4a,0xa4b,0xa4c,0xa4d,0xa7a
+  0xf0039f70  FUN_ram_f0039f70        0xa13,0xa14
+
+========== wifi/mgmt/scan.c (2 funcs) ==========
+  0xf0031908  FUN_ram_f0031908        0x26d,0x274
+  0xf0031a3c  FUN_ram_f0031a3c        0x234,0x3a6,0x3aa
+
+========== wifi/mgmt/scan_fsm.c (4 funcs) ==========
+  0xf0032024  FUN_ram_f0032024        0xc47,0xc94
+  0xf0032244  FUN_ram_f0032244        0x844
+  0xf0032490  FUN_ram_f0032490        0x3ef,0x40a
+  0xf0032e68  FUN_ram_f0032e68        0x671,0x679
+
+========== wifi/mgmt/tdls.c (1 funcs) ==========
+  0xf003e76c  FUN_ram_f003e76c        0x3ac
+
+========== wifi/mgmt/txm.c (26 funcs) ==========
+  0xf0034054  FUN_ram_f0034054        0x13ff,0x1400,0x1413
+  0xf00341e8  FUN_ram_f00341e8        0x1728
+  0xf00342c4  FUN_ram_f00342c4        0x191d
+  0xf0034424  FUN_ram_f0034424        0x2040
+  0xf00344b4  FUN_ram_f00344b4        0x1bb7,0x1bbb
+  0xf0034540  FUN_ram_f0034540        0x2163,0x2166
+  0xf0034724  FUN_ram_f0034724        0x207b
+  0xf0034bd8  FUN_ram_f0034bd8        0x21c7
+  0xf0034e20  FUN_ram_f0034e20        0x1f42
+  0xf0034e90  FUN_ram_f0034e90        0x1ec9
+  0xf00355c4  FUN_ram_f00355c4        0x3f3
+  0xf0035620  FUN_ram_f0035620        0x20d2,0x20de
+  0xf0035760  FUN_ram_f0035760        0x188b
+  0xf0035804  FUN_ram_f0035804        0x1114,0x111d,0x1147
+  0xf0035fc4  FUN_ram_f0035fc4        0xeca,0xeda,0xedc,0xee4,0x107c
+  0xf0036814  FUN_ram_f0036814        0x1fb5
+  0xf0036a34  FUN_ram_f0036a34        0x1c94,0x1c9a,0x1cd2,0x1d0f
+  0xf0036d28  FUN_ram_f0036d28        0x1bfa,0x1bfc,0x1c05,0x1c41
+  0xf0036ee8  FUN_ram_f0036ee8        0x19cf
+  0xf003718c  FUN_ram_f003718c        0x149c
+  0xf0037428  FUN_ram_f0037428        0xd37
+  0xf003757c  FUN_ram_f003757c        0x155a
+  0xf0037888  FUN_ram_f0037888        0xb1d
+  0xf0037940  FUN_ram_f0037940        0xa6d,0xa7c,0xaaf,0xab0,0xab5,0xac6
+  0xf0037b58  FUN_ram_f0037b58        0x969,0x97f,0x9e5,0xa44
+  0xf0037f14  FUN_ram_f0037f14        0x697,0x83f,0x8a3,0x8a4,0x8b4,0x91e
+
+========== wifi/nic/HAL/mt6582/hal.c (1 funcs) ==========
+  0xf004be5c  FUN_ram_f004be5c        0x143
+
+========== wifi/nic/nic.c (2 funcs) ==========
+  0xf004aac8  FUN_ram_f004aac8        0x6fe,0x710
+  0xf004ac48  FUN_ram_f004ac48        0x56b
+
+========== wifi/nic/nic_dma.c (7 funcs) ==========
+  0xf004b140  FUN_ram_f004b140        0x143
+  0xf004b180  FUN_ram_f004b180        0x164
+  0xf004b1fc  FUN_ram_f004b1fc        0x499,0x4a8
+  0xf004b290  FUN_ram_f004b290        0x4dc,0x4e1,0x4e5
+  0xf004b3d4  FUN_ram_f004b3d4        0x1ca,0x1ef,0x1fa
+  0xf004b520  FUN_ram_f004b520        0x2f6,0x310
+  0xf004b5e4  FUN_ram_f004b5e4        0x24f,0x275
+
+========== wifi/nic/nic_privacy.c (1 funcs) ==========
+  0xf004bb2c  FUN_ram_f004bb2c        0x288
