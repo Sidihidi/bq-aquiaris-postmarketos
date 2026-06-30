@@ -324,6 +324,8 @@ struct cmd_set_domain_info {
 #define EVENT_ID_CONNECTION_STATUS	0x03
 #define EVENT_ID_TX_DONE		0x17	/* TX-status de un mgmt frame: body[0]=seq, body[1]=status (TX_RESULT: 0=OK+ACK, 1=LIFE_TIMEOUT/sin-ACK, 3=MPDU_ERROR) */
 #define EVENT_ID_CH_PRIVILEGE		0x18	/* grant del canal (async) */
+#define CMD_ID_ACCESS_REG		0xc2	/* runtime: lee MCR/RAM del FW (query) -> EVENT_ID_ACCESS_REG por puerto 1 */
+#define EVENT_ID_ACCESS_REG		0x0a
 #define CMD_CH_ACTION_REQ		0
 #define CMD_CH_ACTION_ABORT		1	/* soltar el privilege tras el join -> el FW cae al canal-home del BSS (sin esto: off-channel + beacon-timeout 0x1b a los ~30s) */
 #define EVENT_CH_STATUS_GRANT		0

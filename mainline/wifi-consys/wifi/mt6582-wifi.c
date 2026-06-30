@@ -377,7 +377,7 @@ static u32 wifi_access_reg_read(struct mt6582_wifi *w, u32 addr)
 	}
 	mutex_unlock(&w->hif_lock);
 	return val;
-}
+ }
 
 /* ======================================================================
  *  FASE 1 — cmd/event runtime por TC4/puerto-1 (WTDR1/WRDR1).
@@ -1857,6 +1857,69 @@ static const struct file_operations bringup_fops = {
 	.owner = THIS_MODULE,
 };
 
+/* Lectura RUNTIME del MCR/RAM del FW via CMD_ID_ACCESS_REG (0xc2) por puerto 1.
+ * La RESPUESTA llega por PUERTO 0 (los eventos runtime van ahi, no al puerto 1). */
+static u32 wifi_runtime_reg_read(struct mt6582_wifi *w, u32 addr)
+{
+	struct { u8 sq; u8 rsv[3]; __le32 address; __le32 data; } __packed body = {};
+	u8 rxbuf[64];
+	u32 wrplr, plen, readlen;
+	int loops = 200;
+
+	body.sq = 0;
+	body.address = cpu_to_le32(addr);
+	mutex_lock(&w->hif_lock);
+	wifi_send_cmd(w, CMD_ID_ACCESS_REG, 0, &body, sizeof(body), 0);
+	/* runtime events llegan por PUERTO 0 (MGMT/EVENT), no puerto 1 */
+	while (loops-- > 0) {
+		wrplr = rd(w->hif, MCR_WRPLR);
+		plen = WRPLR_RX0_LEN(wrplr);
+		if (plen == 0) { udelay(50); continue; }
+		readlen = ALIGN(plen, 4);
+		if (readlen > sizeof(rxbuf)) break;
+		wifi_port_read_pio(w, rxbuf, readlen);
+		{
+			struct wifi_event *ev = (void *)rxbuf;
+			if ((le16_to_cpu(ev->packet_type) & HIF_RX_PKT_TYPE_MASK) == HIF_RX_PKT_TYPE_EVENT &&
+			    ev->eid == EVENT_ID_ACCESS_REG) {
+				u32 val = le32_to_cpup((__le32 *)(rxbuf + sizeof(*ev) + 4));
+				mutex_unlock(&w->hif_lock);
+				return val;
+			}
+		}
+	}
+	mutex_unlock(&w->hif_lock);
+	return 0xdeadbeef;
+}
+
+/* debugfs fwdump: echo "<addr_hex> <nwords>" > fwdump_cfg ; cat fwdump */
+static u32 g_fwdump_addr, g_fwdump_words;
+static ssize_t fwdump_cfg_write(struct file *f, const char __user *u, size_t n, loff_t *o)
+{
+	char b[32];
+	size_t m = min_t(size_t, n, sizeof(b) - 1);
+	if (copy_from_user(b, u, m)) return -EFAULT;
+	b[m] = 0;
+	if (sscanf(b, "%x %u", &g_fwdump_addr, &g_fwdump_words) != 2) return -EINVAL;
+	if (g_fwdump_words > 262144) g_fwdump_words = 262144;
+	return n;
+}
+static const struct file_operations fwdump_cfg_fops = { .owner = THIS_MODULE, .write = fwdump_cfg_write };
+static int fwdump_show(struct seq_file *m, void *v)
+{
+	struct mt6582_wifi *w = g_wifi;
+	u32 i;
+	if (!w || !w->started) return 0;
+	for (i = 0; i < g_fwdump_words; i++)
+		seq_printf(m, "%08x=%08x\n", g_fwdump_addr + i * 4,
+			   wifi_runtime_reg_read(w, g_fwdump_addr + i * 4));
+	return 0;
+}
+static int fwdump_open(struct inode *in, struct file *f) { return single_open(f, fwdump_show, NULL); }
+static const struct file_operations fwdump_fops = {
+	.owner = THIS_MODULE, .open = fwdump_open, .read = seq_read, .llseek = seq_lseek, .release = single_release,
+};
+
 /* auto-bring-up con REINTENTO: levanta wlan0 solo al boot. El WLAN_READY del FW es flaky cerca del
  * boot (afirma sólo cuando el sistema lleva un rato arriba), así que si falla se reintenta cada 20s
  * hasta 15 veces (~5min). Elimina los reboots y el echo manual. wifi_bringup deja started=false en
@@ -1919,6 +1982,8 @@ static int mt6582_wifi_probe(struct platform_device *pdev)
 	g_wifi = w;
 	w->dbg = debugfs_create_dir("mt6582_wifi", NULL);
 	debugfs_create_file("bringup", 0200, w->dbg, w, &bringup_fops);
+	debugfs_create_file("fwdump_cfg", 0200, w->dbg, w, &fwdump_cfg_fops);
+	debugfs_create_file("fwdump", 0400, w->dbg, w, &fwdump_fops);
 	platform_set_drvdata(pdev, w);
 
 	/* IRQ real del HIF (0625): el FW dispara AHB_SLAVE_HIF (DT: GIC_SPI 160) en cada evento RX/TX.
