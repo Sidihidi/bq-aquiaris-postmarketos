@@ -1128,27 +1128,16 @@ static void wifi_send_join(struct mt6582_wifi *w)
 	__le32 rxf;
 
 	bi.net_type_idx = NETWORK_TYPE_AIS;
-	bi.conn_state = MEDIA_STATE_CONNECTED;	/* =0. ENUM_PARAM_MEDIA_STATE_T (downstream wlan_oid.h:372) = {CONNECTED=0, DISCONNECTED=1}: el 2 estaba FUERA DE RANGO -> el FW ignoraba el SET_BSS_INFO -> nunca entraba en estado de datos (RX=0). Confirmado: reg.h, el EVENT_CONNECTION_STATUS y el enum del downstream coinciden en 0. */
+	bi.conn_state = MEDIA_STATE_CONNECTED;
 	bi.op_mode = OP_MODE_INFRASTRUCTURE;
 	bi.ssid_len = w->connect_ssid_len;
 	memcpy(bi.ssid, w->connect_ssid, w->connect_ssid_len);
 	memcpy(bi.bssid, w->connect_bssid, ETH_ALEN);
 	bi.op_rate_set = cpu_to_le16(RATE_SET_ERP);
 	bi.basic_rate_set = cpu_to_le16(BASIC_RATE_SET_ERP);
-	bi.sta_rec_idx_of_ap = 0;	/* STA-record del AP (idx 0, creado en .connect) */
-	if (w->connect_wpa2) {				/* WPA2-CCMP. ★★ FIX 06-24: el downstream cfg80211 (gl_cfg80211.c:726)
-								 * mapea CCMP -> eEncStatus = ENUM_ENCRYPTION3_ENABLED(6), y nic.c:2034 lo manda
-								 * TAL CUAL en SET_BSS_INFO para infra-AIS. Mandábamos KEY_ABSENT(7) -> el FW NUNCA
-								 * activaba el descifrado/cifrado CCMP -> TODO el dato cifrado (OFFER del DHCP, ARP,
-								 * ICMP) se descartaba; solo el EAPOL pasaba (por su flag 1x). Test concluyente con
-								 * subnet real: tx=55 rx=2, 0 respuestas uni/broadcast. -> ENABLED(6) activa el CCMP.
-								 * El miedo previo ("ENABLED sin claves descarta beacons -> 0x1b -> rx_thread cuelga")
-								 * NO aplica: el 0x1b es benigno y el rx_thread ya tiene el guard wifi_hif_alive. */
+	bi.sta_rec_idx_of_ap = 0;
+	if (w->connect_wpa2) {
 		bi.auth_mode = AUTH_MODE_WPA2_PSK;
-		/* 0629 FIX TX-ENCRYPT: KEY_ABSENT en el JOIN (aun sin clave). El FW activa el cifrado del TX con la
-		 * TRANSICION KEY_ABSENT->ENABLED tras la PTK (re-SET_BSS_INFO en .add_key) = el fgTransmitKeyExist del
-		 * downstream (wlanoidSetEncryptionStatus). Hardcodear ENABLED aqui (antes de la clave) NO activaba el
-		 * cifrado del TX -> el AP tiraba todo dato cifrado (probado: ni unicast PTK sale, sniff Pi-cpcd 0629). */
 		bi.enc_status = ENC_STATUS_CCMP_KEY_ABSENT;
 	} else {
 		bi.auth_mode = AUTH_MODE_OPEN;
@@ -1157,64 +1146,46 @@ static void wifi_send_join(struct mt6582_wifi *w)
 	bi.phy_type_set = PHY_TYPE_SET_802_11BG;
 	memcpy(bi.own_mac, w->mac, ETH_ALEN);
 	bi.rlm.net_type_idx = NETWORK_TYPE_AIS;
-	bi.rlm.rf_band = 1;		/* BAND_2G4 */
+	bi.rlm.rf_band = 1;
 	bi.rlm.primary_channel = w->connect_channel;
 	bi.rlm.check_id = 0x72;
 	wifi_send_cmd(w, CMD_ID_SET_BSS_INFO, 1, &bi, sizeof(bi), 0);
-	w->saved_bi = bi;		/* guardar para reenviar con enc_status=ENABLED(6) tras instalar la PTK (.add_key) */
-	w->enc_enabled = false;		/* nueva conexión: aún en KEY_ABSENT */
+	w->saved_bi = bi;
+	w->enc_enabled = false;
 
-	/* promover el STA a STATE_3 (asociado/data-ready). SIN esto el FW descarta TODO dato del STA:
-	 * secCheckClassError() (privacy.c) tira cada RX de datos como Class-3-error Y manda DEAUTH al AP,
-	 * y rechaza el TX. Es el cnmStaRecChangeState(STATE_3) del downstream -> abre la cola TX del STA. */
-	sta.index = 0;				/* el mismo staRec del AP (creado en .connect) */
+	sta.index = 0;
 	sta.sta_type = STA_TYPE_LEGACY_AP;
 	memcpy(sta.mac_addr, w->connect_bssid, ETH_ALEN);
 	sta.net_type_index = NETWORK_TYPE_AIS;
 	sta.desired_phy_type_set = PHY_TYPE_SET_802_11BG;
 	sta.desired_nonht_rate_set = cpu_to_le16(RATE_SET_ERP);
 	sta.bss_basic_rate_set = cpu_to_le16(BASIC_RATE_SET_ERP);
-	sta.sta_state = STA_STATE_3;		/* =2: asociado, Class 1,2&3 -> el FW acepta DATOS */
-	sta.need_resp = 1;			/* el FW responde EVENT_ACTIVATE_STA_REC -> activa la cola TX */
+	sta.sta_state = STA_STATE_3;
+	sta.need_resp = 1;
 	wifi_send_cmd(w, CMD_ID_UPDATE_STA_RECORD, 1, &sta, sizeof(sta), 0);
 
-	/* CAM (siempre despierto): sin esto el FW entra en power-save, DUERME, y pierde tanto los beacons del
-	 * AP (EVENT_ID_BSS_BEACON_TIMEOUT 0x1b a los 30s -> desconexión) como la OFFER del DHCP (el AP la
-	 * manda mientras el FW duerme). = nicConfigPowerSaveProfile(AIS, Param_PowerModeCAM) del downstream. */
 	ps.net_type_index = NETWORK_TYPE_AIS;
-	ps.ps_profile = 0;			/* Param_PowerModeCAM = 0 */
+	ps.ps_profile = 0;
 	wifi_send_cmd(w, CMD_ID_POWER_SAVE_MODE, 1, &ps, sizeof(ps), 0);
 
-	/* FILTRO RX (clave para la OFFER): el FW por DEFECTO NO entrega broadcast al host -> la OFFER del
-	 * DHCP se descarta en la ENTRADA. CMD_ID_SET_RX_FILTER con DIRECTED|MULTICAST|BROADCAST (0x0B) abre
-	 * la entrega de la OFFER (broadcast) + unicast a mi MAC. = u4OsPacketFilter=PARAM_PACKET_FILTER_SUPPORTED
-	 * del downstream (wlan_lib.c:1248); un driver mínimo que solo replica el JOIN se lo salta. */
 	rxf = cpu_to_le32(0x0000000B);
 	wifi_send_cmd(w, CMD_ID_SET_RX_FILTER, 1, &rxf, sizeof(rxf), 0);
 
-	/* INDICAR BSS CONECTADO al power-management del FW (beacon-interval/DTIM/AID) = comportamiento CORRECTO del
-	 * downstream (nicPmIndicateBssConnected, nic.c:2167; el stock lo manda tras el assoc). NOTA: NO fue el fix del
-	 * DHCP ni evita el 0x1b (benigno); se mantiene por fidelidad. beacon=100/DTIM=1 por defecto (CAM=siempre despierto). */
 	pm.net_type_idx = NETWORK_TYPE_AIS;
 	pm.dtim_period = 1;
 	pm.assoc_id = cpu_to_le16(w->assoc_id);
 	pm.beacon_interval = cpu_to_le16(100);
 	wifi_send_cmd(w, CMD_ID_INDICATE_PM_BSS_CONNECTED, 1, &pm, sizeof(pm), 0);
 
-	/* Soltar el privilege del canal tras el join = comportamiento CORRECTO del downstream (aisFsmReleaseCh al
-	 * entrar en AIS_STATE_NORMAL_TR, ais_fsm.c:2632): el CH_PRIVILEGE(REQ) del .connect es TEMPORAL (max_interval
-	 * 5s); al soltarlo el FW cae al CANAL-HOME del BSS (fijado por el SET_BSS_INFO de arriba). action=ABORT, mismo
-	 * token (0). NOTA: NO fue el fix del DHCP (lo fue la MAC del netdev = MAC del FW, ver wifi_register_cfg80211);
-	 * se mantiene por fidelidad al downstream. El EVENT 0x1b a +30s es BENIGNO (la conexión sobrevive; lo ignoramos). */
 	chp.net_type_idx = NETWORK_TYPE_AIS;
-	chp.token_id = 0;			/* = el token del REQ en .connect (zero-init) */
+	chp.token_id = 0;
 	chp.action = CMD_CH_ACTION_ABORT;
 	chp.primary_channel = w->connect_channel;
-	chp.rf_band = 1;			/* BAND_2G4 */
+	chp.rf_band = 1;
 	memcpy(chp.bssid, w->connect_bssid, ETH_ALEN);
 	wifi_send_cmd(w, CMD_ID_CH_PRIVILEGE, 1, &chp, sizeof(chp), 0);
 
-	dev_info(w->dev, "*** JoinComplete: SET_BSS_INFO + STA->STATE_3 + PS=CAM + RX_FILTER + CH_ABORT(home ch=%u) -> data-path ON ***\n",
+	dev_info(w->dev, "*** JoinComplete: SET_BSS_INFO + STA->STATE_3 + PS=CAM + RX_FILTER + PM_BSS + CH_ABORT(home ch=%u) [REVERTIDO: quitar PS/RX_FILTER rompe el handshake] ***\n",
 		 w->connect_channel);
 }
 
