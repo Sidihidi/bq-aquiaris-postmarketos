@@ -1,0 +1,64 @@
+=== privacy.c  (string @ ram:f0063590) referenciada por: ===
+  ram:f002a480  FUN_ram_f002a480
+  ram:f002a554  FUN_ram_f002a554
+  ram:f002a650  (sin funcion)
+  ram:f002a674  (sin funcion)
+  ram:f002a9bc  (sin funcion)
+  ram:f002aa50  (sin funcion)
+  ram:f002ab70  (sin funcion)
+
+=== nic_privacy.c  (string @ ram:f006486c) referenciada por: ===
+  ram:f004bb2c  FUN_ram_f004bb2c
+
+=== HAL/hal.c  (string @ ram:f0064898) referenciada por: ===
+  ram:f004be5c  FUN_ram_f004be5c
+
+=== nic.c  (string @ ram:f0064834) referenciada por: ===
+  ram:f004aac8  FUN_ram_f004aac8
+  ram:f004ac48  FUN_ram_f004ac48
+
+=== txm.c  (string @ ram:f006380c) referenciada por: ===
+  ram:f0034054  FUN_ram_f0034054
+  ram:f00341e8  FUN_ram_f00341e8
+  ram:f00342c4  FUN_ram_f00342c4
+  ram:f0034424  FUN_ram_f0034424
+  ram:f00344b4  FUN_ram_f00344b4
+  ram:f0034540  FUN_ram_f0034540
+  ram:f0034724  FUN_ram_f0034724
+  ram:f003494e  (sin funcion)
+  ram:f0034bd8  FUN_ram_f0034bd8
+  ram:f0034e20  FUN_ram_f0034e20
+  ram:f0034e90  FUN_ram_f0034e90
+  ram:f00351f4  FUN_ram_f00351f4
+  ram:f003551e  (sin funcion)
+  ram:f0035544  (sin funcion)
+  ram:f003558e  (sin funcion)
+  ram:f00355c4  FUN_ram_f00355c4
+  ram:f0035620  FUN_ram_f0035620
+  ram:f0035760  FUN_ram_f0035760
+  ram:f0035804  FUN_ram_f0035804
+  ram:f0035fc4  FUN_ram_f0035fc4
+  ram:f0036814  FUN_ram_f0036814
+  ram:f003689a  (sin funcion)
+  ram:f0036932  (sin funcion)
+  ram:f0036a34  FUN_ram_f0036a34
+  ram:f0036d28  FUN_ram_f0036d28
+  ram:f0036ee8  FUN_ram_f0036ee8
+  ram:f003718c  FUN_ram_f003718c
+  ram:f0037428  FUN_ram_f0037428
+  ram:f003757c  FUN_ram_f003757c
+  ram:f0037888  FUN_ram_f0037888
+  ram:f0037940  FUN_ram_f0037940
+  ram:f0037b58  FUN_ram_f0037b58
+  ram:f0037f14  FUN_ram_f0037f14
+
+=== nic_dma.c  (string @ ram:f0064858) referenciada por: ===
+  ram:f004b140  FUN_ram_f004b140
+  ram:f004b180  FUN_ram_f004b180
+  ram:f004b1fc  FUN_ram_f004b1fc
+  ram:f004b290  FUN_ram_f004b290
+  ram:f004b3c0  (sin funcion)
+  ram:f004b3d4  FUN_ram_f004b3d4
+  ram:f004b520  FUN_ram_f004b520
+  ram:f004b5e4  FUN_ram_f004b5e4
+

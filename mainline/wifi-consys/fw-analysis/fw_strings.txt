@@ -1,0 +1,149 @@
+=== S1 (0x0209f800) ===
+H `,H `8H `xH `
+H ` H `
+H `TH `hH `
+H `dH `|H `
+ `P\ `
+\ ``\ `d\ `p\ `
+V `h\ `l\ `H
+N ` N `$N `(N `8N `<N `@N `
+T `pH `DH `@L `,N `
+H `<H `
+] ` ] `$] `
+R `(F `
+ `HH `<
+xxvxtxrxow
+|y{y{x
+"""""""
+7\6\6\6\6\6\6\6\t
+=== S3 (0xf0063000) ===
+Gavin - bcmConfigLteTdmReq trigger 
+Gavin - bcmConfigLteTdmReq trigger else 
+Gavin - Wi-FI Freerun
+Gavin - Wi-FI mode 1
+Gavin - Wi-FI mode 2
+Gavin - Wi-FI free run
+1 dis
+2 dis
+3 dis
+BCM INIT
+wifi/mgmt/bcm.c
+ACS: safe channel bitmask : [%x]
+wifi/mgmt/bss.c
+u4NumElem != 0
+wifi/mgmt/cnm.c
+wifi/mgmt/cnm_mem.c
+wifi/mgmt/cnm_timer.c
+SnifferDBG hemCmdSetMonitor ucPriCh %d eExt %d ucChS1 %d ucChS2 %d eChWidth %d ucEnable %d ucBand %d
+wifi/mgmt/hem.c
+Mira [%d]
+20150401225557
+[CMD] 0x11111114(%d)
+[CMD]0x%x(%d)
+%x %x
+wifi/mgmt/hem_cmd.c
+wifi/mgmt/hem_mbox.c
+wifi/mgmt/hem_pwr.c
+wifi/mgmt/mqm.c
+wifi/mgmt/p2p_fsm.c
+DIRECT-
+wifi/mgmt/privacy.c
+wifi/mgmt/pwr_mgt_fsm.c
+[WOW] enable(%d), FF(%x), Detect(%x)
+[WOW] Start to parse UDP Magic Packet!
+[WOW] Got Magic Packet!!
+wifi/mgmt/pwr_apsd.c
+wifi/mgmt/pm_timer.c
+wifi/mgmt/rate.c
+$0H`l
+wifi/mgmt/scan.c
+wifi/mgmt/scan_fsm.c
+BATCH: stop
+BATCH: launch next timer
+BATCH: current mscan = %d
+BATCH: check
+Send MID_SCN_CNM_SCAN_ABORT
+Abort batch scan by normal scan.
+scnCmdBatchReq, cmd = 0x%x
+bestn=%d, mscan=%d, scanfreq=%d
+  EVENT_ID_BATCH_RESULT, scan count = %d
+wifi/mgmt/txm.c
+TXM: wrong eStaType %d
+prMsduInfo->ucMacTxQueIdx >= MAC_TX_QUEUE_NUM
+<fw> [%02x:%02x:%02x:%02x:%02x:%02x] ac%d %d quenum%d
+wifi/mgmt/rxm.c
+rxmSendWarnLogEventToHost: Warning!! EVENT packet allocation failure!
+wifi/mgmt/rlm.c
+wifi/mgmt/rlm_domain.c
+wifi/mgmt/rlm_protection.c
+wifi/mgmt/rlm_statistics.c
+wifi/mgmt/rlm_ar.c
+'4Nhu
+wifi/mgmt/tdls.c
+wifi/mgmt/stats.c
+<samp> statsEventTxLogIndicate
+wifi/mgmt/mt6582/roaming_fsm.c
+roamingCmdEnhInfo: enable(%d), retryc(%d), retryto(%d)
+roamingCmdEnhInfo: CCK delta(%d), LQ Good(%d), LQ Poor(%d), LQ Weak(%d)
+roamingCmdEnhInfo: OFDM delta(%d), LQ Good(%d), LQ Poor(%d)
+wifi/mgmt/mt6582/hem_efuse.c
+SPI ADDR %x W %x R %x
+wifi/mgmt/mt6582/rlm_phy.c
+Chip ID %x, ECO = %x IPD=%x
+A-Die MT6625L
+[GPS] GPS Init state(%x)
+LCTank %d PC %x PMax %x
+5G_K Grp Skip(%d)
+5G_K Grp(%d) Time(%d)ms ReK(%x)
+wlan Cal break
+5G RF Cal Duration(%d)ms
+N ` N `$N `(N `8N `<N `@N `
+N `,N `
+\ `<\ ` V `l
+b'v	H&K
+x	XMK
+wifi/mgmt/mt6582/rlm_sensor.c
+wifi/mgmt/mt6582/rlm_test.c
+rlmTestSetAtCmd Func(%x) Val(%x)
+wifi/mgmt/mt6582/rlm_txpwr.c
+DPD Retry
+rlmCmdSetBandEdge5GTxPwrLimit BW20(%x) BW40(%x)
+rlmCmdSetRssiCompensate 2G(%x) 5G(%x)
+[GPS] state(%x) ready(%x)
+DPD successed gp=%d g0=%x 
+DPD Failed gp=%d g0=%x 
+2G DPD
+5G DPD ConnFreq(%d) SCO(%d) Chnl(%d)
+rlmCmdSetBandSupport Trig_5G_Cal(%x)
+>LV `
+DV `4
+  `|o
+WIFI LISR handler
+T-sensor handler
+wifi/Service/wifi_init.c
+wifi/nic/nic.c
+wifi/nic/nic_pm.c
+wifi/nic/nic_dma.c
+wifi/nic/nic_privacy.c
+wifi/nic/HAL/mt6582/hal.c
+#.CV^f
+!(/8:=
+s8H `"@
+xH `"`
+H `++
+hH `AP2S
+|H `"
+^ `I2
+H ` `
+!C$H `S
+R `H)
+&&&&&&!!!!!!      
+&&&&&&
+=== S0 (0x6a000) ===
+	\F  
+ D0	U
+4D0	\
+4D0	j
+4D0	q
+4D0	8
+DONE
