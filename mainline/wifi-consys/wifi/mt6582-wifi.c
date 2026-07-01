@@ -1862,39 +1862,24 @@ static const struct file_operations bringup_fops = {
 	.owner = THIS_MODULE,
 };
 
-/* Lectura RUNTIME del MCR/RAM del FW via CMD_ID_ACCESS_REG (0xc2) por puerto 1.
- * La RESPUESTA llega por PUERTO 0 (los eventos runtime van ahi, no al puerto 1). */
+/* Lectura RUNTIME del MCR/RAM del FW via CMD_ID_ACCESS_REG (0xc2). La respuesta (EVENT_ID_ACCESS_REG)
+ * llega por PUERTO 1, igual que BASIC_CONFIG/NIC_CAPABILITY -> usar el patron bueno wifi_send_cmd(con
+ * resp_reserve) + wifi_poll_event(puerto 1). (0701 FIX: la version anterior sondeaba RX0/puerto 0 con
+ * resp_reserve=0 -> el FW no reservaba respuesta y ademas se miraba el puerto equivocado -> deadbeef.) */
 static u32 wifi_runtime_reg_read(struct mt6582_wifi *w, u32 addr)
 {
 	struct { u8 sq; u8 rsv[3]; __le32 address; __le32 data; } __packed body = {};
-	u8 rxbuf[64];
-	u32 wrplr, plen, readlen;
-	int loops = 200;
+	u8 resp[16];		/* body del EVENT_ID_ACCESS_REG: address(4) + data(4) */
+	int ret;
 
-	body.sq = 0;
 	body.address = cpu_to_le32(addr);
 	mutex_lock(&w->hif_lock);
-	wifi_send_cmd(w, CMD_ID_ACCESS_REG, 0, &body, sizeof(body), 0);
-	/* runtime events llegan por PUERTO 0 (MGMT/EVENT), no puerto 1 */
-	while (loops-- > 0) {
-		wrplr = rd(w->hif, MCR_WRPLR);
-		plen = WRPLR_RX0_LEN(wrplr);
-		if (plen == 0) { udelay(50); continue; }
-		readlen = ALIGN(plen, 4);
-		if (readlen > sizeof(rxbuf)) break;
-		wifi_port_read_pio(w, rxbuf, readlen);
-		{
-			struct wifi_event *ev = (void *)rxbuf;
-			if ((le16_to_cpu(ev->packet_type) & HIF_RX_PKT_TYPE_MASK) == HIF_RX_PKT_TYPE_EVENT &&
-			    ev->eid == EVENT_ID_ACCESS_REG) {
-				u32 val = le32_to_cpup((__le32 *)(rxbuf + sizeof(*ev) + 4));
-				mutex_unlock(&w->hif_lock);
-				return val;
-			}
-		}
-	}
+	wifi_send_cmd(w, CMD_ID_ACCESS_REG, 0, &body, sizeof(body), sizeof(resp));
+	ret = wifi_poll_event(w, EVENT_ID_ACCESS_REG, resp, sizeof(resp), 500);
 	mutex_unlock(&w->hif_lock);
-	return 0xdeadbeef;
+	if (ret)
+		return 0xdeadbeef;
+	return le32_to_cpup((__le32 *)(resp + 4));	/* data, tras el echo del address */
 }
 
 /* debugfs fwdump: echo "<addr_hex> <nwords>" > fwdump_cfg ; cat fwdump */
