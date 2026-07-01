@@ -102,6 +102,7 @@ struct mt6582_wifi {
 	struct cfg80211_bss	*connect_bss;	/* BSS retenido del .connect -> cfg80211_connect_bss (evita WARN sme.c:845) */
 	u8			connect_channel;	/* canal guardado para el SET_BSS_INFO del JoinComplete */
 	u16			assoc_id;		/* AID del ASSOC-RESP -> CMD_INDICATE_PM_BSS_CONNECTED */
+	u16			assoc_cap_info;		/* cap_info del ASSOC-RESP -> RLM short_slot/preamble */
 	bool			connect_wpa2;		/* WPA2-CCMP pedido en .connect (vs red abierta) */
 	u8			assoc_ie[256];		/* IEs de wpa_supplicant (incluye el IE RSN) para el ASSOC-REQ */
 	u16			assoc_ie_len;
@@ -724,6 +725,7 @@ static void wifi_rx_mgmt(struct mt6582_wifi *w, u8 *rx, u32 plen)
 
 		if (st == 0) {
 			w->assoc_id = le16_to_cpu(*(__le16 *)(frame + 28)) & 0x3FFF;	/* AID (cap@24,status@26,AID@28; sin los 2 bits altos) */
+			w->assoc_cap_info = le16_to_cpu(*(__le16 *)(frame + 24));	/* cap_info del AP */
 			wifi_send_join(w);	/* JoinComplete: SET_BSS_INFO(CONNECTED) -> el FW enruta datos */
 		}
 		cfg80211_connect_bss(w->ndev, w->connect_bssid, w->connect_bss, NULL, 0, NULL, 0,
@@ -1148,6 +1150,9 @@ static void wifi_send_join(struct mt6582_wifi *w)
 	bi.rlm.net_type_idx = NETWORK_TYPE_AIS;
 	bi.rlm.rf_band = 1;
 	bi.rlm.primary_channel = w->connect_channel;
+	bi.rlm.short_slot = (w->assoc_cap_info & BIT(10)) ? 1 : 0;
+	bi.rlm.short_preamble = (w->assoc_cap_info & BIT(5)) ? 1 : 0;
+	bi.nonht_basic_phy = 1;		/* PHY_TYPE_ERP_INDEX = 1 (11g) ? el downstream lo usa para slot time/CWmin */
 	bi.rlm.check_id = 0x72;
 	wifi_send_cmd(w, CMD_ID_SET_BSS_INFO, 1, &bi, sizeof(bi), 0);
 	w->saved_bi = bi;
@@ -1920,6 +1925,39 @@ static const struct file_operations fwdump_fops = {
 	.owner = THIS_MODULE, .open = fwdump_open, .read = seq_read, .llseek = seq_lseek, .release = single_release,
 };
 
+/* Escritura RUNTIME del MCR/RAM del FW via CMD_ID_ACCESS_REG (0xc2) SET (set_query=1 = escribir). Palabra
+ * de 32b. Para setear un flag-byte del gate (p.ej. [0x12e3] en ~0x020a1347): leer la palabra alineada con
+ * fwdump, poner el byte, y escribir la palabra con fwpoke (RMW en userspace). Diagnostico: probar si escribir
+ * los gates [0x12e3]/[0x12f5] a 1 tras el connect desbloquea el DHCP (confirma el gate como EL bug). */
+static void wifi_runtime_reg_write(struct mt6582_wifi *w, u32 addr, u32 val)
+{
+	struct { u8 sq; u8 rsv[3]; __le32 address; __le32 data; } __packed body = {};
+
+	body.sq = 0;
+	body.address = cpu_to_le32(addr);
+	body.data = cpu_to_le32(val);
+	mutex_lock(&w->hif_lock);
+	wifi_send_cmd(w, CMD_ID_ACCESS_REG, 1, &body, sizeof(body), 0);	/* 1 = SET (write) */
+	mutex_unlock(&w->hif_lock);
+}
+/* debugfs fwpoke: echo "<addr_hex> <val_hex>" > fwpoke -> escribe la palabra de 32b en el FW */
+static ssize_t fwpoke_write(struct file *f, const char __user *u, size_t n, loff_t *o)
+{
+	struct mt6582_wifi *w = g_wifi;
+	char b[48];
+	u32 addr, val;
+	size_t m = min_t(size_t, n, sizeof(b) - 1);
+
+	if (!w || !w->started) return -ENODEV;
+	if (copy_from_user(b, u, m)) return -EFAULT;
+	b[m] = 0;
+	if (sscanf(b, "%x %x", &addr, &val) != 2) return -EINVAL;
+	wifi_runtime_reg_write(w, addr, val);
+	dev_info(w->dev, "fwpoke: [0x%08x] <- 0x%08x\n", addr, val);
+	return n;
+}
+static const struct file_operations fwpoke_fops = { .owner = THIS_MODULE, .write = fwpoke_write };
+
 /* auto-bring-up con REINTENTO: levanta wlan0 solo al boot. El WLAN_READY del FW es flaky cerca del
  * boot (afirma sólo cuando el sistema lleva un rato arriba), así que si falla se reintenta cada 20s
  * hasta 15 veces (~5min). Elimina los reboots y el echo manual. wifi_bringup deja started=false en
@@ -1984,6 +2022,7 @@ static int mt6582_wifi_probe(struct platform_device *pdev)
 	debugfs_create_file("bringup", 0200, w->dbg, w, &bringup_fops);
 	debugfs_create_file("fwdump_cfg", 0200, w->dbg, w, &fwdump_cfg_fops);
 	debugfs_create_file("fwdump", 0400, w->dbg, w, &fwdump_fops);
+	debugfs_create_file("fwpoke", 0200, w->dbg, w, &fwpoke_fops);
 	platform_set_drvdata(pdev, w);
 
 	/* IRQ real del HIF (0625): el FW dispara AHB_SLAVE_HIF (DT: GIC_SPI 160) en cada evento RX/TX.
