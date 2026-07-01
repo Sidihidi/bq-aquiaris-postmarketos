@@ -1174,7 +1174,13 @@ static void wifi_send_join(struct mt6582_wifi *w)
 	bi.sta_rec_idx_of_ap = 0;
 	if (w->connect_wpa2) {
 		bi.auth_mode = AUTH_MODE_WPA2_PSK;
-		bi.enc_status = ENC_STATUS_CCMP_KEY_ABSENT;
+		/* 0701: el krillin usa el driver mt_wifi (conn_soc/drv_wlan/mt_wifi), NO mt6628. El cfg80211 del
+		 * mt_wifi (gl_cfg80211.c:1225) fija eEncStatus=ENCRYPTION3_ENABLED(6) para CCMP y nicUpdateBss lo
+		 * manda TAL CUAL en el JoinComplete (una vez, sin re-envío, sin downgrade). El KEY_ABSENT(7) previo
+		 * venía de leer el árbol mt6628 equivocado (ese sí usa fgTransmitKeyExist). mt_wifi hasta ASERTA que
+		 * enc_status<KEY_ABSENT (privacy.c:887). El FW abre el gate de grupo + instala el cifrador al procesar
+		 * el GTK SOLO si enc_status==ENABLED → cifra el broadcast → el DHCP DISCOVER sale cifrado → OFFER. */
+		bi.enc_status = ENC_STATUS_CCMP_ENABLED;
 	} else {
 		bi.auth_mode = AUTH_MODE_OPEN;
 		bi.enc_status = ENC_STATUS_DISABLED;
@@ -2007,6 +2013,8 @@ static void wifi_diag_gates(struct mt6582_wifi *w, bool pairwise)
 	u32 bss_rd, bss;
 
 	if (!w || !w->started)
+		return;
+	if (!g_poke_gates)	/* 0701: test enc_status=ENABLED LIMPIO -> sin lectura conectada ni poke de diag salvo poke_gates=1 */
 		return;
 	bss_rd = wifi_runtime_reg_read(w, 0x020a0068);	/* intento de read (deadbeef si el FW no responde conectado) */
 	dev_info(w->dev, "DIAG gates[%s]: read *0x020a0068=0x%08x\n", pairwise ? "PTK" : "GTK", bss_rd);
