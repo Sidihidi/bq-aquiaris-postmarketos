@@ -1,3 +1,0 @@
-[D-BUS Service]
-Name=sm.puri.OSK0
-Exec=/usr/bin/squeekboard
