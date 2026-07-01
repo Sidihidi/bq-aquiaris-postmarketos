@@ -1431,6 +1431,7 @@ static int wifi_cfg_disconnect(struct wiphy *wiphy, struct net_device *ndev, u16
 }
 
 /* .add_key (WPA2): PTK/GTK vía CMD_802_11_KEY. */
+static bool g_poke_gates;						/* 0701: activado por debugfs poke_gates */
 static void wifi_diag_gates(struct mt6582_wifi *w, bool pairwise);	/* 0701: instrumentacion de los gates */
 
 static int wifi_cfg_add_key(struct wiphy *wiphy, struct net_device *ndev, int link_id,
@@ -1479,6 +1480,20 @@ static int wifi_cfg_add_key(struct wiphy *wiphy, struct net_device *ndev, int li
 	}
 	if (params->seq_len && params->seq_len <= sizeof(k.key_rsc))
 		memcpy(k.key_rsc, params->seq, params->seq_len);	/* RSC/PN inicial (GTK) */
+	if (g_poke_gates) {
+		/* FIX 0701: poner los gates ANTES de instalar la clave, para que f004bb2c (WTBL) vea [0x12e3]!=0 y
+		 * programe local_40=1 (bit tx-encrypt de la WTBL). Ponerlos DESPUES dejaba local_40=0 -> mismatch:
+		 * el FW cifra con una WTBL sin cifrador -> crash ~1s tras el connect. Poke SIN re-lock (ya tenemos
+		 * hif_lock) -> wifi_send_cmd directo (ACCESS_REG SET, no espera respuesta; reg_write deadlockearia). */
+		struct { __le32 a; __le32 d; } __packed pk;
+
+		pk.a = cpu_to_le32(0x020a1378); pk.d = cpu_to_le32(0x01000000);	/* [0x12e3]=1 (@0x020a137b) */
+		wifi_send_cmd(w, CMD_ID_ACCESS_REG, 1, &pk, sizeof(pk), 0);
+		pk.a = cpu_to_le32(0x020a138c); pk.d = cpu_to_le32(0x00000100);	/* [0x12f5]=1 (@0x020a138d) */
+		wifi_send_cmd(w, CMD_ID_ACCESS_REG, 1, &pk, sizeof(pk), 0);
+		dev_info(w->dev, "FIX gates PRE-key [%s]: [0x12e3]=1 [0x12f5]=1 (antes del install)\n",
+			 pairwise ? "PTK" : "GTK");
+	}
 	wifi_send_cmd(w, CMD_ID_ADD_REMOVE_KEY, 1, &k, sizeof(k), 0);
 	dev_info(w->dev, "add_key: %s idx=%d cipher=0x%x peer=%pM len=%d tx_key=%d\n",
 		 pairwise ? "PTK" : "GTK", key_idx, params->cipher, k.peer_addr, params->key_len, k.tx_key);
@@ -1987,7 +2002,6 @@ static const struct file_operations fwpoke_fops = { .owner = THIS_MODULE, .write
  * El decisor del broadcast (DHCP DISCOVER) exige AMBOS gates a 1: [0x12e3] (privacy/port) y [0x12f5] (grupo);
  * nuestro enc_status=KEY_ABSENT los deja a 0. Con g_poke_gates=1 (echo 1 > .../poke_gates) los fuerza a 1 (RMW
  * por palabra de 32b) para PROBAR si eso desbloquea el DHCP -> confirma el gate como EL bug. */
-static bool g_poke_gates;
 static void wifi_diag_gates(struct mt6582_wifi *w, bool pairwise)
 {
 	u32 bss_rd, bss;
