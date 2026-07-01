@@ -46,6 +46,26 @@ sola** (no 12) para minimizar el riesgo. Con eso el read conectado debería ir �
 [0x12f5]).
 - (alternativa si aún crashea: volcar los gates a un fichero/dmesg que sobreviva al crash y leer del pstore.)
 
+## RESULTADO EMPÍRICO del skip-poll (Windows/Opus, build #217, 2026-07-01 tarde) — el skip-poll NO basta
+Implementé EXACTAMENTE ese fix: **`wifi_poll_event_skip`** (bucle propio que SALTA los eventos no-ACCESS_REG,
+consumiendo el paquete completo, dentro del MISMO `hif_lock`; `wifi_runtime_reg_read` lo usa; `wifi_poll_event`
+intacto para phase1) + instrumentación **`wifi_diag_gates`** en `add_key` (lee los gates al 4-way, log síncrono
+a console-ramoops, pocas lecturas) + debugfs **`poke_gates`**. Commit `b1e2f2b`, build **#217** flasheado y
+verificado (`poke_gates` + `wifi_poll_event_skip` en System.map).
+**RESULTADO EN HW: sigue dando `0xdeadbeef`, pero ahora por TIMEOUT** (el skip-poll recorre TODO el puerto 1 y
+NUNCA encuentra `EVENT_ID_ACCESS_REG`). → **NO es orden de eventos: el FW NO responde a ACCESS_REG sobre la
+data RAM `0x020axxxx` con la conexión ACTIVA** (idle sí responde). La conexión **completa** y `add_key` dispara
+`wifi_diag_gates` **SIN colgar** (pocas lecturas al 4-way evitan vuestro crash), pero la respuesta no llega.
+**→ El skip-poll queda DESCARTADO como suficiente. No lo reimplementéis.**
+### Siguientes para leer/pokear los gates conectado:
+1. **Blind-poke (lo más directo para PROBAR el fix sin leer):** `wifi_runtime_reg_write` (SET) NO espera
+   respuesta → puede que SÍ funcione conectado. Pokear los gates a 1 con `bss` HARDCODED `0x020a1000`
+   (idle-confirmado): word `0x020a1378` byte3=1 (`[0x12e3]`) y `0x020a138c` byte1=1 (`[0x12f5]`). OJO: el write
+   ciego clobbea los otros 3 bytes del word (no los conocemos) → riesgo, pero prueba el fix directo (¿cae el DHCP?).
+2. **Pausar el `rx_thread`/IRQ durante el read** (disable_irq + parar el drain) para dejar el puerto 1 quieto y
+   que la respuesta ACCESS_REG llegue. Más limpio, más código.
+3. **Timeout mayor** (500→3000ms) por si el FW responde lento en data-mode (poco probable: es timeout total, no lento).
+
 ## Una vez confirmados los gates a 0
 - **FIX C (más fiable):** patch binario del FW = NOP del check `[0x12e3]!=0` en `f004bb2c` (bit tx-enc
   incondicional en CCMP). No toca beacon/TSF → no cuelga.
