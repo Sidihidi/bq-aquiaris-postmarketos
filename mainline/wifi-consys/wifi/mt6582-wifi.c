@@ -1990,32 +1990,23 @@ static const struct file_operations fwpoke_fops = { .owner = THIS_MODULE, .write
 static bool g_poke_gates;
 static void wifi_diag_gates(struct mt6582_wifi *w, bool pairwise)
 {
-	u32 bss;
+	u32 bss_rd, bss;
 
 	if (!w || !w->started)
 		return;
-	dev_info(w->dev, "DIAG gates[%s]: *0x020a0098=0x%08x\n",
-		 pairwise ? "PTK" : "GTK", wifi_runtime_reg_read(w, 0x020a0098));
-	bss = wifi_runtime_reg_read(w, 0x020a0068);		/* puntero al BSS array (idle -> 0x020a1000) */
-	dev_info(w->dev, "DIAG gates: bss(*0x020a0068)=0x%08x\n", bss);
-	if (bss >= 0x02090000 && bss < 0x020b0000) {
-		u32 a3 = bss + 0x37b, a5 = bss + 0x38d, w3, w5;	/* candidatos [0x12e3]/[0x12f5] (Mac 0701) */
+	bss_rd = wifi_runtime_reg_read(w, 0x020a0068);	/* intento de read (deadbeef si el FW no responde conectado) */
+	dev_info(w->dev, "DIAG gates[%s]: read *0x020a0068=0x%08x\n", pairwise ? "PTK" : "GTK", bss_rd);
+	bss = (bss_rd >= 0x02090000 && bss_rd < 0x020b0000) ? bss_rd : 0x020a1000;	/* fallback HARDCODED (idle-confirmado) */
 
-		w3 = wifi_runtime_reg_read(w, a3 & ~3u);
-		dev_info(w->dev, "DIAG gates: +0x37b word=0x%08x (byte %u=[0x12e3])\n", w3, a3 & 3);
-		w5 = wifi_runtime_reg_read(w, a5 & ~3u);
-		dev_info(w->dev, "DIAG gates: +0x38d word=0x%08x (byte %u=[0x12f5])\n", w5, a5 & 3);
-		dev_info(w->dev, "DIAG gates: +0x347=0x%08x +0x359=0x%08x\n",
-			 wifi_runtime_reg_read(w, (bss + 0x347) & ~3u),
-			 wifi_runtime_reg_read(w, (bss + 0x359) & ~3u));
-		if (g_poke_gates) {
-			u32 n3 = (w3 & ~(0xffu << ((a3 & 3) * 8))) | (1u << ((a3 & 3) * 8));
-			u32 n5 = (w5 & ~(0xffu << ((a5 & 3) * 8))) | (1u << ((a5 & 3) * 8));
-
-			wifi_runtime_reg_write(w, a3 & ~3u, n3);
-			wifi_runtime_reg_write(w, a5 & ~3u, n5);
-			dev_info(w->dev, "FIX gates POKE: +0x37b=1 +0x38d=1 (w3->0x%08x w5->0x%08x)\n", n3, n5);
-		}
+	if (g_poke_gates) {
+		/* BLIND-poke: wifi_runtime_reg_write (SET) NO espera respuesta -> puede ir con la conexion ACTIVA
+		 * aunque el read falle (deadbeef). Ponemos [0x12e3] (byte3 de la palabra bss+0x378) y [0x12f5]
+		 * (byte1 de bss+0x38c) a 1. Escritura CIEGA: los otros bytes a 0 (= su estado KEY_ABSENT). Prueba
+		 * si activar los gates enciende el cifrado del broadcast -> el DHCP DISCOVER sale cifrado -> OFFER. */
+		wifi_runtime_reg_write(w, bss + 0x378, 0x01000000u);	/* [0x12e3]=1 (@bss+0x37b) */
+		wifi_runtime_reg_write(w, bss + 0x38c, 0x00000100u);	/* [0x12f5]=1 (@bss+0x38d) */
+		dev_info(w->dev, "FIX blind-poke: [0x12e3]@0x%08x=1 [0x12f5]@0x%08x=1 (bss=0x%08x)\n",
+			 bss + 0x37b, bss + 0x38d, bss);
 	}
 }
 static ssize_t poke_gates_write(struct file *f, const char __user *u, size_t n, loff_t *o)
