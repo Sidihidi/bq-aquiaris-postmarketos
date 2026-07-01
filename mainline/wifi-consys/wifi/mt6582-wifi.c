@@ -1868,7 +1868,7 @@ static const struct file_operations bringup_fops = {
  * resp_reserve=0 -> el FW no reservaba respuesta y ademas se miraba el puerto equivocado -> deadbeef.) */
 static u32 wifi_runtime_reg_read(struct mt6582_wifi *w, u32 addr)
 {
-	struct { u8 sq; u8 rsv[3]; __le32 address; __le32 data; } __packed body = {};
+	struct { __le32 address; __le32 data; } __packed body = {};	/* = CMD_ACCESS_REG (address en off 0, SIN prefijo sq/rsv) */
 	u8 resp[16];		/* body del EVENT_ID_ACCESS_REG: address(4) + data(4) */
 	int ret;
 
@@ -1916,9 +1916,8 @@ static const struct file_operations fwdump_fops = {
  * los gates [0x12e3]/[0x12f5] a 1 tras el connect desbloquea el DHCP (confirma el gate como EL bug). */
 static void wifi_runtime_reg_write(struct mt6582_wifi *w, u32 addr, u32 val)
 {
-	struct { u8 sq; u8 rsv[3]; __le32 address; __le32 data; } __packed body = {};
+	struct { __le32 address; __le32 data; } __packed body = {};	/* = CMD_ACCESS_REG (address en off 0, SIN prefijo sq/rsv) */
 
-	body.sq = 0;
 	body.address = cpu_to_le32(addr);
 	body.data = cpu_to_le32(val);
 	mutex_lock(&w->hif_lock);
