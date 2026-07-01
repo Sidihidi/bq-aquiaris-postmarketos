@@ -1397,6 +1397,8 @@ static int wifi_cfg_disconnect(struct wiphy *wiphy, struct net_device *ndev, u16
 }
 
 /* .add_key (WPA2): PTK/GTK vía CMD_802_11_KEY. */
+static void wifi_diag_gates(struct mt6582_wifi *w, bool pairwise);	/* 0701: instrumentacion de los gates */
+
 static int wifi_cfg_add_key(struct wiphy *wiphy, struct net_device *ndev, int link_id,
 			    u8 key_idx, bool pairwise, const u8 *mac_addr,
 			    struct key_params *params)
@@ -1455,6 +1457,8 @@ static int wifi_cfg_add_key(struct wiphy *wiphy, struct net_device *ndev, int li
 	 * de SET_BSS_INFO a mitad de conexion crashea el FW (WDT, confirmado por pstore v1+v2) -> ELIMINADO.
 	 * Pendiente de test en HW: confirmar por sniff que el DISCOVER cifrado sale al aire. */
 	mutex_unlock(&w->hif_lock);
+
+	wifi_diag_gates(w, pairwise);	/* 0701: leer/loguear (y opc. pokear) los gates de cifrado del BSS */
 	return 0;
 }
 
@@ -1942,6 +1946,56 @@ static ssize_t fwpoke_write(struct file *f, const char __user *u, size_t n, loff
 }
 static const struct file_operations fwpoke_fops = { .owner = THIS_MODULE, .write = fwpoke_write };
 
+/* 0701 (Opus): instrumentacion de los GATES de cifrado del BSS. Se llama desde wifi_cfg_add_key TRAS soltar
+ * hif_lock (evita deadlock: wifi_runtime_reg_read re-lockea) y al 4-way, con el PUERTO 1 aun quieto (ANTES del
+ * trafico de datos que desincroniza el stream de eventos ACCESS_REG y crashea el read conectado por debugfs).
+ * LOGUEA con dev_info (console-ramoops es SINCRONO -> el valor se captura aunque una lectura posterior cuelgue).
+ * El decisor del broadcast (DHCP DISCOVER) exige AMBOS gates a 1: [0x12e3] (privacy/port) y [0x12f5] (grupo);
+ * nuestro enc_status=KEY_ABSENT los deja a 0. Con g_poke_gates=1 (echo 1 > .../poke_gates) los fuerza a 1 (RMW
+ * por palabra de 32b) para PROBAR si eso desbloquea el DHCP -> confirma el gate como EL bug. */
+static bool g_poke_gates;
+static void wifi_diag_gates(struct mt6582_wifi *w, bool pairwise)
+{
+	u32 bss;
+
+	if (!w || !w->started)
+		return;
+	dev_info(w->dev, "DIAG gates[%s]: *0x020a0098=0x%08x\n",
+		 pairwise ? "PTK" : "GTK", wifi_runtime_reg_read(w, 0x020a0098));
+	bss = wifi_runtime_reg_read(w, 0x020a0068);		/* puntero al BSS array (idle -> 0x020a1000) */
+	dev_info(w->dev, "DIAG gates: bss(*0x020a0068)=0x%08x\n", bss);
+	if (bss >= 0x02090000 && bss < 0x020b0000) {
+		u32 a3 = bss + 0x37b, a5 = bss + 0x38d, w3, w5;	/* candidatos [0x12e3]/[0x12f5] (Mac 0701) */
+
+		w3 = wifi_runtime_reg_read(w, a3 & ~3u);
+		dev_info(w->dev, "DIAG gates: +0x37b word=0x%08x (byte %u=[0x12e3])\n", w3, a3 & 3);
+		w5 = wifi_runtime_reg_read(w, a5 & ~3u);
+		dev_info(w->dev, "DIAG gates: +0x38d word=0x%08x (byte %u=[0x12f5])\n", w5, a5 & 3);
+		dev_info(w->dev, "DIAG gates: +0x347=0x%08x +0x359=0x%08x\n",
+			 wifi_runtime_reg_read(w, (bss + 0x347) & ~3u),
+			 wifi_runtime_reg_read(w, (bss + 0x359) & ~3u));
+		if (g_poke_gates) {
+			u32 n3 = (w3 & ~(0xffu << ((a3 & 3) * 8))) | (1u << ((a3 & 3) * 8));
+			u32 n5 = (w5 & ~(0xffu << ((a5 & 3) * 8))) | (1u << ((a5 & 3) * 8));
+
+			wifi_runtime_reg_write(w, a3 & ~3u, n3);
+			wifi_runtime_reg_write(w, a5 & ~3u, n5);
+			dev_info(w->dev, "FIX gates POKE: +0x37b=1 +0x38d=1 (w3->0x%08x w5->0x%08x)\n", n3, n5);
+		}
+	}
+}
+static ssize_t poke_gates_write(struct file *f, const char __user *u, size_t n, loff_t *o)
+{
+	char b[8];
+	size_t m = min_t(size_t, n, sizeof(b) - 1);
+
+	if (copy_from_user(b, u, m)) return -EFAULT;
+	b[m] = 0;
+	g_poke_gates = (b[0] == '1');
+	return n;
+}
+static const struct file_operations poke_gates_fops = { .owner = THIS_MODULE, .write = poke_gates_write };
+
 /* auto-bring-up con REINTENTO: levanta wlan0 solo al boot. El WLAN_READY del FW es flaky cerca del
  * boot (afirma sólo cuando el sistema lleva un rato arriba), así que si falla se reintenta cada 20s
  * hasta 15 veces (~5min). Elimina los reboots y el echo manual. wifi_bringup deja started=false en
@@ -2007,6 +2061,7 @@ static int mt6582_wifi_probe(struct platform_device *pdev)
 	debugfs_create_file("fwdump_cfg", 0200, w->dbg, w, &fwdump_cfg_fops);
 	debugfs_create_file("fwdump", 0400, w->dbg, w, &fwdump_fops);
 	debugfs_create_file("fwpoke", 0200, w->dbg, w, &fwpoke_fops);
+	debugfs_create_file("poke_gates", 0200, w->dbg, w, &poke_gates_fops);
 	platform_set_drvdata(pdev, w);
 
 	/* IRQ real del HIF (0625): el FW dispara AHB_SLAVE_HIF (DT: GIC_SPI 160) en cada evento RX/TX.
