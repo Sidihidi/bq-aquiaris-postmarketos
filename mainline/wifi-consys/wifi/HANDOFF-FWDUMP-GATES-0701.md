@@ -33,12 +33,18 @@
 - **⚠️ El read CONECTADO crashea el móvil (reboot).** Conectar WPA2 a "hola" + leer `0x020axxxx` con la conexión
   activa → reset (perdí la captura de los gates). Pasa incluso con la versión puerto-1.
 
-## SIGUIENTE — leer los gates CONECTADO de forma SEGURA (lo único que falta para confirmar el bug)
-1. Volcar los gates a un FICHERO en el móvil DURANTE el connect (sobrevive al crash), o loguearlos a `dmesg`
-   → leer del `pstore` tras el reboot. **(recomendado)**
-2. Leer con timing más corto (justo tras el 4-way, 1 sola palabra) antes del settle.
-3. Investigar por qué el read conectado crashea (¿el port-1 read colisiona con el `rx_thread` durante el
-   tráfico? → serializar mejor, o pausar el rx_thread durante el fwdump).
+## SIGUIENTE — leer los gates CONECTADO (DIAGNÓSTICO del crash confirmado, 2026-07-01 PM)
+El read conectado dio: **`0x020a0098 = deadbeef`** (el fwdump TIMEOUT con la conexión activa — en IDLE iba
+perfecto) y luego el móvil crasheó al leer la región del gate. **CAUSA:** con la conexión activa el puerto 1
+tiene OTROS eventos (del connect/tráfico), y `wifi_poll_event` devuelve `-EBADMSG` al PRIMER evento que no sea
+`EVENT_ID_ACCESS_REG` (NO lo salta — líneas ~503-506) → deadbeef. Las lecturas repetidas fallando → HIF/FW en
+mal estado → reset.
+**FIX (pequeño):** que `wifi_runtime_reg_read` use un poll ROBUSTO que **SALTE** los eventos no-`ACCESS_REG`
+(bucle propio con contador de loops, NO `wifi_poll_event` que phase1 necesita estricto), y leer **1 palabra
+sola** (no 12) para minimizar el riesgo. Con eso el read conectado debería ir → confirmar `[0x12e3]`@0x137b y
+`[0x12f5]`@0x138d = 0 tras el 4-way → aplicar el fix (FIX C = NOP del check en f004bb2c, o el trigger de
+[0x12f5]).
+- (alternativa si aún crashea: volcar los gates a un fichero/dmesg que sobreviva al crash y leer del pstore.)
 
 ## Una vez confirmados los gates a 0
 - **FIX C (más fiable):** patch binario del FW = NOP del check `[0x12e3]!=0` en `f004bb2c` (bit tx-enc
