@@ -511,6 +511,40 @@ static int wifi_poll_event(struct mt6582_wifi *w, u8 want_eid, void *out, u32 ou
 	return -ETIMEDOUT;
 }
 
+/* Como wifi_poll_event pero SALTA (consume) los paquetes que NO son want_eid, dentro del MISMO hif_lock,
+ * hasta encontrarlo o timeout. Necesario para leer ACCESS_REG con la conexion ACTIVA: el puerto 1 lleva
+ * eventos/datos de la conexion que llegan ANTES de la respuesta ACCESS_REG (sin esto la lectura da 0xdeadbeef). */
+static int wifi_poll_event_skip(struct mt6582_wifi *w, u8 want_eid, void *out, u32 out_len, u32 ms)
+{
+	struct wifi_event *ev;
+	u8 rx[96], junk[64];
+	u32 wrplr, plen, rl, got;
+	int loops = ms * 20;
+
+	while (loops-- > 0) {
+		wrplr = rd(w->hif, MCR_WRPLR);
+		plen = WRPLR_RX1_LEN(wrplr);
+		if (!plen) { udelay(50); continue; }
+		rl = ALIGN(plen, 4);
+		got = min_t(u32, rl, sizeof(rx));
+		wifi_port1_read_pio(w, rx, got);
+		while (got < rl) {			/* consumir el resto del paquete -> el puerto queda alineado */
+			u32 c = min_t(u32, rl - got, sizeof(junk));
+			wifi_port1_read_pio(w, junk, c);
+			got += c;
+		}
+		ev = (struct wifi_event *)rx;
+		if ((le16_to_cpu(ev->packet_type) & HIF_RX_PKT_TYPE_MASK) != HIF_RX_PKT_TYPE_EVENT)
+			continue;			/* dato/no-evento: saltar */
+		if (ev->eid != want_eid)
+			continue;			/* otro evento: saltar */
+		if (plen > sizeof(*ev))
+			memcpy(out, rx + sizeof(*ev), min_t(u32, out_len, plen - sizeof(*ev)));
+		return 0;
+	}
+	return -ETIMEDOUT;
+}
+
 /* "hello world" del firmware: MAC permanente (BASIC_CONFIG) + capacidades (NIC_CAPABILITY).
  * Un EVENT_ID_NIC_CAPABILITY válido = el bucle cmd/event FUNCIONA (mata ~70% del riesgo Fase 1). */
 static void wifi_phase1_hello(struct mt6582_wifi *w)
@@ -1879,7 +1913,7 @@ static u32 wifi_runtime_reg_read(struct mt6582_wifi *w, u32 addr)
 	body.address = cpu_to_le32(addr);
 	mutex_lock(&w->hif_lock);
 	wifi_send_cmd(w, CMD_ID_ACCESS_REG, 0, &body, sizeof(body), sizeof(resp));
-	ret = wifi_poll_event(w, EVENT_ID_ACCESS_REG, resp, sizeof(resp), 500);
+	ret = wifi_poll_event_skip(w, EVENT_ID_ACCESS_REG, resp, sizeof(resp), 500);	/* skip: robusto con conexion activa */
 	mutex_unlock(&w->hif_lock);
 	if (ret)
 		return 0xdeadbeef;
