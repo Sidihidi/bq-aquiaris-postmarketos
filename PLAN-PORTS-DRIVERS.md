@@ -328,9 +328,28 @@ Audio por auriculares Bluetooth (A2DP + HFP)
 
 ---
 
-## DRIVER 7: Vibrador + LEDs — 🟢 BAJO
+## DRIVER 7: Vibrador + LEDs — 🟢 BAJO — ✅ CODE-COMPLETE (0702, sesión Mac; falta test HW)
 
-### Estado actual
+### Implementado (0 código nuevo: todo drivers MAINLINE + DT)
+- **Vibrador** = `regulator-haptic` (mainline) sobre `ldo_vibr` del MT6323 a **2.8 V**
+  (cust_vibrator.c krillin: vib_vol=0x5). Input device con FF_RUMBLE → feedbackd/Phosh directo.
+- **LED RGB + botones** = `leds-mt6323` (mainline, "mediatek,mt6323-led") con la tabla del
+  downstream verificada: **green=ISINK0, red=ISINK1, blue=ISINK2, button-backlight=ISINK3**.
+- Config: `CONFIG_LEDS_MT6323=y` + `CONFIG_INPUT_REGULATOR_HAPTIC=y` (deps MFD_MT6397 ya =y).
+- DT: nodos `&pmic { leds {...} }` + `/ { vibrator {...} }` en `mt6582-bq-krillin.dts`
+  (copia canónica versionada en `mainline/dts/`). DTB compila; zImage compila.
+- NOTA: los borradores `mainline/drivers/mt6323-isink-led.c` y `mt6582-vibrator.c` quedan
+  SUPERSEDIDOS por los drivers mainline (no compilados ni cableados).
+
+### Test HW pendiente (cuando el móvil esté libre — coordina con la sesión WiFi antes de flashear)
+```sh
+# LEDs
+echo 255 > /sys/class/leds/red:indicator/brightness      # y green/blue
+echo 255 > /sys/class/leds/white:button-backlight/brightness
+# Vibrador (input FF): fftest /dev/input/eventN (device "regulator-haptic"), o tocar en Phosh
+```
+
+### Estado actual (pre-port)
 Sin implementar.
 
 ### Hardware
