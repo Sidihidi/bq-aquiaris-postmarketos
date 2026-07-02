@@ -24,8 +24,13 @@ por la ruta de seguridad; como data opaca no se entera → gates a 0 → DISCOVE
   post-write del M2 → el cuelgue está en/alrededor del write del M2 al puerto 1 (o el FW murió
   procesándolo y el siguiente PIO-read colgó el AHB). El pstore de ese crash se PERDIÓ (el boot
   intermedio del WDT lo machacó) → por eso el guardián de abajo.
-- **v2 (#225, terminador + prints): FLASHEADO pero SIN PROBAR** — en el boot del test wlan0 no
-  apareció (bring-up flaky) y la sesión se cortó ahí.
+- **v2 (#225, terminador +4 + prints): REFUTADO** — con el dword-cero terminador el móvil **cuelga en
+  el 2º EAPOL** igual que v1. Hipótesis: el `+4` mete un paquete fantasma en el FIFO del puerto 1.
+- **v3 (SIN terminador, SIN PROBAR aún)**: quita el `+4`. El `kalDevPortWrite` del stock en PIO escribe
+  **exactamente `ceil(Size/4)` palabras** (`ahb.c:1740-1755`; el pad extra del `HAL_WRITE_TX_PORT`
+  está en `#if 0`, :1759) → el dword-cero **no se transmite**. v2 lo transmitía y el parser byte-count
+  del FIFO del FW veía un paquete de longitud 0 → estado corrupto → cuelgue. v3 escribe `total` a secas.
+  **Pendiente de flashear+probar (lo decide la sesión WiFi).** Commit de esta sesión.
 - Misterio menor: un boot acabó con `reboot: Restarting system` **limpio** + re-read de particiones
   de mmcblk0, ~3 s tras arrancar wpa_supplicant (¿alguien flasheó/reinició a mano?). No era el WDT.
 

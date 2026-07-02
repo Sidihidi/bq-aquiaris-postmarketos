@@ -850,11 +850,12 @@ static void wifi_tx_eapol(struct mt6582_wifi *w, struct sk_buff *skb)
 	h->pkt_seq = 0;					/* sin TX-DONE a nivel HIF (stock :1718) */
 	h->ack_bip_rate = 0;
 	memcpy((u8 *)w->dlm + sizeof(*h), skb->data, frame_len);
-	/* dword-cero terminador de TX-aggregation: el stock lo mete en CADA TX de AMBOS puertos
-	 * (HAL_WRITE_TX_PORT, hal.h:307-309) — igual que wifi_tx_data en el puerto 0. */
-	*(__le32 *)((u8 *)w->dlm + ALIGN(total, 4)) = 0;
+	/* SIN terminador +4: el kalDevPortWrite del stock en PIO escribe EXACTAMENTE ceil(Size/4)
+	 * palabras (ahb.c:1740-1755; el pad extra esta en #if 0, :1759). El dword-cero de HAL_WRITE_TX_PORT
+	 * queda en el buffer SIN transmitir. v2 lo enviaba (+4) y el parser del FIFO del FW (byte-count)
+	 * veia un paquete fantasma de longitud 0 -> estado corrupto -> cuelgue en el 2o EAPOL. */
 	dev_info(w->dev, "EAPOL-TX pre-write (%u B) por TC4/puerto-1\n", frame_len);	/* si cuelga AQUI = write */
-	wifi_port1_write_pio(w, w->dlm, ALIGN(total, 4) + 4);	/* *** PUERTO 1 (TC4) — NO el data-port 0 *** */
+	wifi_port1_write_pio(w, w->dlm, total);		/* *** PUERTO 1 (TC4) — NO el data-port 0 *** */
 	w->ndev->stats.tx_packets++;
 	w->ndev->stats.tx_bytes += frame_len;
 	dev_info(w->dev, "*** EAPOL-TX OK por TC4/puerto-1 (%u B): ruta security-frame del stock ***\n",
