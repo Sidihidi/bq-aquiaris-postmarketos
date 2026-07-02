@@ -464,14 +464,18 @@ static int mtk_wlanProbe(struct platform_device *pdev)
 		prRegInfo->fgEnArpFilter = TRUE;
 
 		if (kalFirmwareImageMapping(prGlueInfo, &prFwBuffer, &u4FwSize) == NULL) {
-			DBGLOG(INIT, ERROR, ("wlanProbe: kalFirmwareImageMapping fallo\n"));
+			dev_err(&pdev->dev, "DIAG: kalFirmwareImageMapping FALLO (fw no mapeado)\n");
 			i4Status = -EIO;
 		} else {
-			if (wlanAdapterStart(prAdapter, prRegInfo, prFwBuffer, u4FwSize)
-			    != WLAN_STATUS_SUCCESS) {
-				DBGLOG(INIT, ERROR, ("wlanProbe: wlanAdapterStart fallo\n"));
+			WLAN_STATUS st;
+
+			dev_info(&pdev->dev, "DIAG: FW mapeado OK (%u bytes) -> wlanAdapterStart...\n",
+				 (unsigned int)u4FwSize);
+			st = wlanAdapterStart(prAdapter, prRegInfo, prFwBuffer, u4FwSize);
+			dev_info(&pdev->dev, "DIAG: wlanAdapterStart status=0x%08x (0=SUCCESS)\n",
+				 (unsigned int)st);
+			if (st != WLAN_STATUS_SUCCESS)
 				i4Status = -EIO;
-			}
 			kalFirmwareImageUnmapping(prGlueInfo, NULL, prFwBuffer);
 		}
 		if (i4Status < 0)
@@ -612,7 +616,8 @@ static struct platform_driver mtk_mtwifi_driver = {
 	.probe  = mtk_wlanProbe,
 	.remove = mtk_wlanRemove,
 	.driver = {
-		.name = "mt6582-wifi",
+		.name = "mtk_mtwifi",	/* NO "mt6582-wifi": colisiona con el driver A en sysfs. El match
+					 * al nodo DT va por .compatible, no por .name. */
 		.of_match_table = mtk_mtwifi_of_ids,
 	},
 };

@@ -39,3 +39,30 @@ wiphy_new/alloc_netdev/register_netdev, wiphy_apply_custom_regulatory.
    El primer objetivo M1 real es que wlanAdapterStart COMPLETE (FW arranca por el path stock).
 RIESGO: es un full-MAC nuevo haciendo func_on+FW-download en HW degradado -> puede colgar; mirar consola
 + el pstore-save del Mac (/var/log/pstore/) captura el crash.
+
+## TEST HW DEL PROBE (0702 tarde, sesion .38) — EL PROBE ARRANCA
+Corrido en HW (#230): insmod inerte OK (rc=0, no Unknown symbol, sobrevive). Fix: `.driver.name`
+de "mt6582-wifi" (colisiona con driver A en sysfs) -> "mtk_mtwifi" (el match va por .compatible).
+Tras `unbind` del driver A + `bind` del port, **mtk_wlanProbe CORRE end-to-end**:
+- ioremap HIF/MCU/PDMA en rHifInfo OK; IRQ 212 (GIC_SPI 184) registrado OK.
+- **FW mapeado OK (207648 bytes)** (request_firmware "mediatek/mt6582/WIFI_RAM_CODE" funciona).
+- **`wlanAdapterStart` LLAMADO** -> status=**0xc0000001** (WLAN_STATUS_FAILURE) -> probe -5. Movil SOBREVIVE
+  (fallo con gracia, sin cuelgue en el probe).
+- WARNING no-fatal en `wiphy_new_nm` (net/wireless/core.c:456) por el mtk_cfg80211_ops stub (Fase 4).
+
+**Causa del 0xc0000001 (hipotesis fuerte):** el auto-bringup del driver A YA arranco el FW al boot (chip
+CALIENTE, WLAN_READY set); `wlanAdapterStart` intenta re-descargar el FW sobre uno corriendo -> falla
+(no re-inicia un FW vivo). Necesita **CHIP FRIO**.
+
+**Los CRASHES vistos NO son del probe** (que falla -5 con gracia) sino del CHURN del consys (rmmod +
+unbind/bind repetidos sobre un consys medio-vivo) -> WDT. Un solo intento limpio sobrevive.
+
+## SIGUIENTE = test con CHIP FRIO (para que wlanAdapterStart complete):
+Opcion A (definitiva): kernel con driver A deshabilitado (Kconfig off / mt6582_wifi_of_ids vacio) ->
+rebuild zImage + flash -> nodo libre + chip frio al boot -> insmod port -> wlanAdapterStart deberia
+COMPLETAR (FW download + WLAN_READY) = hito M1. Riesgo: sin driver A de fallback si el port cuelga.
+Opcion B (rapida, fragil): en boot fresco, unbind A + bind port en la ventana ~19-29s ANTES del
+auto-bringup de A (chip aun frio). Opcion C: anadir al probe un power-cycle del consys (func_off+VCN33
+off+func_on) o un WIFI reset antes de wlanAdapterStart, para forzar chip frio aunque A lo haya calentado.
+Si con chip frio wlanAdapterStart AUN falla -> es un bug del backend HIF (kalDevPortWrite/RegRead no
+conduce bien el chip) -> depurar mt6582-hif.c. Instrumentacion DIAG ya en el probe (FW size + status).
