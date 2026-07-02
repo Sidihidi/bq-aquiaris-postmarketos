@@ -115,6 +115,12 @@ Flujo: **editar → compilar (cross armhf) en la Pi → flashear por USB → ver
 
 ---
 
+## 📓 Bitácora entre sesiones
+Los frentes que trabajan sobre el repo dejan qué hicieron y cómo seguir en
+[docs/bitacora/](docs/bitacora/README.md) — mirar la última entrada del frente antes de continuar.
+
+---
+
 *Proyecto de aficionado, bring-up en hardware real. Historial completo en
 [mainline/HITOS.md](mainline/HITOS.md); documentación superada en
 [docs/archive/](docs/archive/README.md).*

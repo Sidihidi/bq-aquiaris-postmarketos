@@ -368,7 +368,10 @@
 			reg = <0>;
 			reset-gpios = <&eint 112 GPIO_ACTIVE_LOW>;
 			power-supply = <&mt6323_vgp2_reg>;
-			backlight = <&backlight>;
+			/* SIN backlight = <&backlight> a proposito: Phosh 0.55 intentaba el backlight
+			 * del conector DRM (DSI-1) y fallaba con EISDIR, bloqueando el slider. Sin esta
+			 * referencia, Phosh cae al sysfs /sys/class/backlight/backlight (backlight-sysfs
+			 * -> logind SetBrightness -> daemon PWM). El nodo pwm-backlight (abajo) sigue vivo. */
 			port {
 				panel_in: endpoint { remote-endpoint = <&dsi0_out>; };
 			};

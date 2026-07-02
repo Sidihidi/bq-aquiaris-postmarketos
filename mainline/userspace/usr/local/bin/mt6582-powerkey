@@ -1,0 +1,74 @@
+#!/usr/bin/env python3
+# mt6582-powerkey — botón de encendido del BQ Aquaris E4.5 (krillin).
+#
+# Lee KEY_POWER del DRIVER KERNEL (mtk-pmic-keys, /dev/input/eventN) y hace toggle
+# del LCD (PWM backlight a 0 / restaurar). Pulsación corta = pantalla off/on.
+#
+# Sustituye al daemon viejo que SONDEABA el registro INT0 del PMIC (bit 0x20) por
+# pwrap y lo limpiaba: eso se PELEABA con el driver kernel (que ahora posee ese IRQ)
+# y dejaba el botón flaky. Además, aquí sí APAGAMOS el backlight (bug: "bloquear
+# dejaba el LCD encendido" — Phosh bloquea la sesión pero el PWM del backlight, que
+# es un daemon aparte, no se apagaba). read() bloqueante -> 0 CPU en reposo.
+#
+# NOTA: esto solo apaga/enciende el LCD. El bloqueo de sesión / lockscreen lo hace
+# Phosh por su cuenta. Si algún día se quiere pulsación-larga = menú de apagado,
+# ver docs/bitacora (opción "Phosh nativo": elogind + gsd-power).
+
+import struct, glob, os, time
+
+BL = "/sys/class/backlight/backlight"
+BR = BL + "/brightness"
+MX = BL + "/max_brightness"
+KEY_POWER = 116
+EV_KEY = 1
+FMT = "llHHi"                 # input_event armv7 (32-bit): time(2*long)=8 + type,code(H,H) + value(i) = 16B
+SZ = struct.calcsize(FMT)
+
+
+def find_ev():
+    for e in sorted(glob.glob("/sys/class/input/event*")):
+        try:
+            if "mtk-pmic-keys" in open(e + "/device/name").read():
+                return "/dev/input/" + os.path.basename(e)
+        except Exception:
+            pass
+    return None
+
+
+def read_int(p, d=0):
+    try:
+        return int(open(p).read().strip())
+    except Exception:
+        return d
+
+
+def set_bl(v):
+    try:
+        open(BR, "w").write(str(v))
+    except Exception:
+        pass
+
+
+def main():
+    ev = find_ev()
+    while ev is None:                       # esperar a que el driver kernel registre el input
+        time.sleep(2)
+        ev = find_ev()
+    saved = read_int(MX, 10) or 10
+    fd = open(ev, "rb", buffering=0)
+    while True:
+        d = fd.read(SZ)
+        if not d or len(d) < SZ:
+            continue
+        _, _, typ, code, val = struct.unpack(FMT, d)
+        if typ == EV_KEY and code == KEY_POWER and val == 1:   # solo el press
+            cur = read_int(BR, 0)
+            if cur > 0:
+                saved = cur
+                set_bl(0)                    # LCD OFF
+            else:
+                set_bl(saved or read_int(MX, 10))   # LCD ON
+
+
+if __name__ == "__main__":
+    main()
