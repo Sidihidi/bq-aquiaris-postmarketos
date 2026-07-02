@@ -434,6 +434,22 @@
 	};
 };
 
+/* ============ Botón de encendido (MT6323 PMIC key) — PORT quick-win ============
+ * El MFD mt6397-core ya registra el hijo "mt6323-keys" (IRQ powerkey/homekey).
+ * Solo faltaba el nodo DT con el keycode + CONFIG_KEYBOARD_MTK_PMIC. */
+&pmic {
+	mt6323keys: keys {
+		compatible = "mediatek,mt6323-keys";
+		mediatek,long-press-mode = <1>;	/* long-press = reset (como stock) */
+		power-off-time-sec = <0>;
+
+		power {
+			linux,keycodes = <116>;		/* KEY_POWER */
+			wakeup-source;
+		};
+	};
+};
+
 /* ============ Vibrador + LED RGB (MT6323) — PORT driver 7 ============ */
 &pmic {
 	leds {

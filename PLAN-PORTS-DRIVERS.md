@@ -26,6 +26,23 @@
 
 ---
 
+## QUICK-WINS MAINLINE (0702, sesión Mac) — drivers ya en mainline, solo DT+config
+
+| Subsistema | Driver mainline | Estado | Test HW |
+|---|---|---|---|
+| **Botón de encendido** | `mtk-pmic-keys` ("mediatek,mt6323-keys") | ✅ CODE-COMPLETE | `evtest` → KEY_POWER (116) |
+| **RTC** | `rtc-mt6397` ("mediatek,mt6323-rtc") | ✅ CODE-COMPLETE | `hwclock -r`, `/dev/rtc0` |
+| **Vibrador** | `regulator-haptic` (ldo_vibr 2.8V) | ✅ CODE-COMPLETE (driver 7) | `fftest`, feedbackd |
+| **LED RGB + botones** | `leds-mt6323` (ISINK0-3) | ✅ CODE-COMPLETE (driver 7) | `echo 255 > /sys/class/leds/*/brightness` |
+| **AUXADC (SoC)** | `mt6577_auxadc` ("mediatek,mt6582-auxadc") | ✅ validado por devmem (driver 9) | `iio_info` |
+
+El MFD `mt6397-core` ya registra los hijos mt6323 (rtc/keys/led/regulator/pwrc); solo faltaban el
+nodo DT y el símbolo Kconfig de cada uno. Config: RTC_DRV_MT6397, KEYBOARD_MTK_PMIC, LEDS_MT6323,
+INPUT_REGULATOR_HAPTIC, MEDIATEK_MT6577_AUXADC, GENERIC_ADC_THERMAL. DTS canónico: `mainline/dts/`.
+**Todos compilan (zImage+DTB). Falta 1 flash coordinado con la sesión WiFi para probarlos juntos.**
+
+---
+
 ## DRIVER 1: WiFi (mt_wifi stock port) — 🔴 CRÍTICO
 
 **Plan completo:** `HANDOFF-MTWIFI-PORT-PLAN-0702.md` (189 líneas, 6 fases, 2 críticos adversariales).
@@ -248,7 +265,16 @@ evtest /dev/input/eventX  # debe mostrar el edt-ft5x06
 
 ---
 
-## DRIVER 5: STP core (resync/CRC) — 🟠 MEDIO
+## DRIVER 5: STP core (resync/CRC) — 🟠 MEDIO — 📋 ANALIZADO (0702): handoff con parche listo
+
+**Hallazgo:** nuestro `stp_send` manda checksum=0 y CRC=0 y **BT funciona** → el FW por BTIF NO valida
+CRC/checksum. La única mejora de valor es el **resync RX** (hoy `stp_pop_frame` lee el header a ciegas
+→ un byte espurio desincroniza para siempre). NO portar stp_core.c entero (arrastra psm/btm ~1500 LOC
+inútiles aquí). Parche de ~15 LOC (resync por sync-byte + patrón 4×0x7f del FW) listo para pegar +
+plan de test en `mainline/wifi-consys/HANDOFF-STP-CORE-PORT-0702.md`. **No integrado** (arriesga BT y
+no testeable ahora); hacerlo cuando el móvil esté libre.
+
+## DRIVER 5 (plan original): STP core (resync/CRC) — 🟠 MEDIO
 
 ### Estado actual
 - `mt6582-btif.c` (668 lín) — BTIF DMA simplificado, STP sin CRC
