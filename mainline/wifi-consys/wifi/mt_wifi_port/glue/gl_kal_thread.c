@@ -326,18 +326,6 @@ kalClearSecurityFramesByNetType(
 	GLUE_RELEASE_SPIN_LOCK(prGlueInfo, SPIN_LOCK_CMD_QUE);
 }
 
-VOID
-kalSecurityFrameSendComplete(
-	IN P_GLUE_INFO_T	prGlueInfo,
-	IN PVOID		pvPacket,
-	IN WLAN_STATUS		rStatus
-	)
-{
-	ASSERT(pvPacket);
-
-	dev_kfree_skb((struct sk_buff *)pvPacket);
-	GLUE_DEC_REF_CNT(prGlueInfo->i4TxPendingSecurityFrameNum);
-}
 
 /*==============================================================================
  *  Management-frame lifecycle (mgmt-tx queued into rCmdQueue).
@@ -437,7 +425,7 @@ kalHifAhbKalWakeLockTimeout(
 /* Monotonic boot time in ns; used by a couple of debug counters. */
 UINT_64 kalGetBootTime(void)
 {
-	return (UINT_64)ktime_get_boot_ns();
+	return (UINT_64)ktime_get_boottime_ns();
 }
 
 /*==============================================================================

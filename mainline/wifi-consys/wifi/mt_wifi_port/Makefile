@@ -40,7 +40,6 @@ mtk_mtwifi-y += \
 #   wapi/hs20/wnm quedan comentados (features off); descomentar si el core
 #   dieted arroja undefined-reference a sus simbolos en el primer make.
 mtk_mtwifi-y += \
-	mgmt/aaa_fsm.o \
 	mgmt/ais_fsm.o \
 	mgmt/assoc.o \
 	mgmt/auth.o \
@@ -88,9 +87,7 @@ mtk_mtwifi-y += \
 	os/linux/glue/gl_kal_ioctl.o \
 	os/linux/glue/gl_kal_timer.o \
 	os/linux/glue/gl_kal_indicate.o \
-	os/linux/glue/gl_kal_fw.o \
-	os/linux/glue/gl_init.o \
-	os/linux/glue/gl_cfg80211.o
+	os/linux/glue/gl_kal_fw.o
 
 # Los siguientes glue stock NO se compilan en la Fase 1/STA-only:
 #   os/linux/gl_bow.o gl_p2p.o gl_p2p_cfg80211.o gl_p2p_init.o gl_p2p_kal.o (P2P/BOW)
@@ -150,3 +147,5 @@ ccflags-y += \
 	-DCFG_ENABLE_FW_DOWNLOAD=1 \
 	-DMTK_WCN_HIF_SDIO=0 \
 	-DCFG_BUILT_IN_DRIVER=0
+ccflags-y += -Wno-error=date-time
+mtk_mtwifi-y += os/linux/glue/gl_init.o

@@ -34,6 +34,10 @@
 #include "precomp.h"		/* GLUE_INFO_T completo: rHifInfo, prAdapter, u4Flag, waitq, GLUE_FLAG_* */
 #include "hif.h"			/* nuestro contrato (os/linux/glue/hif.h) */
 
+#ifndef HIF_MOD_NAME
+#define HIF_MOD_NAME		"mt6582-hif"	/* nombre para request_irq() */
+#endif
+
 /* GLUE_FLAG_INT_BIT / GLUE_FLAG_HALT los define el core (gl_os.h). Fallback defensivo por si el
  * orden de include no los trajo aun (mismos valores que el stock gl_os.h). */
 #ifndef GLUE_FLAG_INT_BIT
@@ -93,13 +97,9 @@ static bool hif_alive(GL_HIF_INFO_T *h)
 	return false;
 }
 
-/* HifIsFwOwn: TRUE si NO es seguro tocar el data-port (FW-own / muerto / en settle).
- * El core stock lo consulta al entrar en kalDevPortRead/Write (sanity check). */
-bool HifIsFwOwn(P_GLUE_INFO_T prGlueInfo)
-{
-	return !hif_alive(&prGlueInfo->rHifInfo);
-}
-EXPORT_SYMBOL(HifIsFwOwn);
+/* HifIsFwOwn lo provee el CORE STOCK (nic/nic.c, firma P_ADAPTER_T). Nuestro guard interno
+ * es hif_alive(), usado directamente dentro de kalDevPortRead/Write; no exportamos otro
+ * HifIsFwOwn(P_GLUE_INFO_T) para no chocar con la firma del stock. */
 
 /* pedir driver-own explicito (== wifi_set_driver_own). 0 = conseguido. */
 int kalDevSetDriverOwn(P_GLUE_INFO_T prGlueInfo)
@@ -173,7 +173,7 @@ static int port_write_target(u16 port)
  *  pero WHLPCR/WCIR son always-on y el core los lee para el propio guard -> aqui NO
  *  metemos hif_alive (evita recursion: hif_alive lee WHLPCR via hifrd, no via kalDevRegRead).
  * ====================================================================== */
-bool kalDevRegRead(P_GLUE_INFO_T prGlueInfo, u32 u4Register, u32 *pu4Value)
+BOOL kalDevRegRead(P_GLUE_INFO_T prGlueInfo, UINT_32 u4Register, PUINT_32 pu4Value)
 {
 	GL_HIF_INFO_T *h = &prGlueInfo->rHifInfo;
 
@@ -184,7 +184,7 @@ bool kalDevRegRead(P_GLUE_INFO_T prGlueInfo, u32 u4Register, u32 *pu4Value)
 }
 EXPORT_SYMBOL(kalDevRegRead);
 
-bool kalDevRegWrite(P_GLUE_INFO_T prGlueInfo, u32 u4Register, u32 u4Value)
+BOOL kalDevRegWrite(P_GLUE_INFO_T prGlueInfo, UINT_32 u4Register, UINT_32 u4Value)
 {
 	hifwr(&prGlueInfo->rHifInfo, u4Register, u4Value);
 	return true;
@@ -197,8 +197,8 @@ EXPORT_SYMBOL(kalDevRegWrite);
  *  Guard hif_alive de entrada + re-sondeo WCIR por-palabra (aborta si el core muere a
  *  mitad de burst, en vez de colgar el bus AHB).
  * ====================================================================== */
-bool kalDevPortRead(P_GLUE_INFO_T prGlueInfo, u16 u2Port, u16 u2Len,
-		    u8 *pucBuf, u16 u2ValidOutBufSize)
+BOOL kalDevPortRead(P_GLUE_INFO_T prGlueInfo, UINT_16 u2Port, UINT_16 u2Len,
+		    PUINT_8 pucBuf, UINT_16 u2ValidOutBufSize)
 {
 	GL_HIF_INFO_T *h = &prGlueInfo->rHifInfo;
 	u32 *p = (u32 *)pucBuf;
@@ -237,8 +237,8 @@ EXPORT_SYMBOL(kalDevPortRead);
  *  kalDevPortWrite — escribir 'u2Len' bytes al puerto de datos (WTDR0/WTDR1) en PIO.
  *  (== wifi_port_write_pio / wifi_port1_write_pio unificados.)
  * ====================================================================== */
-bool kalDevPortWrite(P_GLUE_INFO_T prGlueInfo, u16 u2Port, u16 u2Len,
-		     u8 *pucBuf, u16 u2ValidInBufSize)
+BOOL kalDevPortWrite(P_GLUE_INFO_T prGlueInfo, UINT_16 u2Port, UINT_16 u2Len,
+		     PUINT_8 pucBuf, UINT_16 u2ValidInBufSize)
 {
 	GL_HIF_INFO_T *h = &prGlueInfo->rHifInfo;
 	const u32 *p = (const u32 *)pucBuf;

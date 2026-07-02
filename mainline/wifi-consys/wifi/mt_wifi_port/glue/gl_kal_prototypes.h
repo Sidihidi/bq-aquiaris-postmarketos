@@ -18,7 +18,7 @@
  *  core reaches through macros in gl_kal.h (kalMemAlloc/Free/Copy/Set/Zero/Cmp,
  *  kalSendComplete, kalUdelay/Mdelay/Msleep, kalGetTimeTick, kalPrint,
  *  kalCopyFrame, kalDevSetPowerState) are NOT re-declared here - they stay
- *  macros. P2P (kalP2P*) and BOW (kalGetBow*/kalSetBow*/kal*BowDevice/
+ *  macros. P2P (kalP2P...) and BOW (kalGetBow, kalSetBow, kalXxxBowDevice,
  *  kalIndicateBOWEvent) symbols are omitted because CFG_ENABLE_WIFI_DIRECT and
  *  CFG_ENABLE_BT_OVER_WIFI are 0 in this STA-only port.
  *

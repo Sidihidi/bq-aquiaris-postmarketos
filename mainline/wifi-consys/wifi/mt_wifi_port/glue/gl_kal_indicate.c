@@ -197,8 +197,7 @@ kalIndicateStatusAndComplete(
 
 				kalMemZero(&rInformData, sizeof(rInformData));
 				rInformData.chan = prChannel;
-				rInformData.scan_width =
-					NL80211_BSS_CHAN_WIDTH_20;
+				/* scan_width eliminado de cfg80211_inform_bss en 7.0.12 (ancho 20 por defecto) */
 				rInformData.signal =
 					RCPI_TO_dBm(prBssDesc->ucRCPI) * 100;
 
@@ -239,7 +238,8 @@ kalIndicateStatusAndComplete(
 			struct cfg80211_roam_info rRoamInfo;
 
 			kalMemZero(&rRoamInfo, sizeof(rRoamInfo));
-			rRoamInfo.bss = bss;
+			/* 7.0.12 MLO: bss/bssid/channel movidos a links[]; valid_links=0 = enlace único legacy */
+			rRoamInfo.links[0].bss = bss;
 			rRoamInfo.req_ie = prGlueInfo->aucReqIe;
 			rRoamInfo.req_ie_len = prGlueInfo->u4ReqIeLength;
 			rRoamInfo.resp_ie = prGlueInfo->aucRspIe;
@@ -471,7 +471,7 @@ kalIndicateBssInfo(
 
 		kalMemZero(&rInformData, sizeof(rInformData));
 		rInformData.chan = prChannel;
-		rInformData.scan_width = NL80211_BSS_CHAN_WIDTH_20;
+		/* scan_width eliminado de cfg80211_inform_bss en 7.0.12 (ancho 20 por defecto) */
 		rInformData.signal = i4SignalStrength * 100;	/* mBm */
 
 		bss = cfg80211_inform_bss_frame_data(wiphy,

@@ -49,7 +49,7 @@ typedef struct _GLUE_INFO_T	*P_GLUE_INFO_T;
  * Guarda las bases ioremapeadas + el IRQ + el guard driver-own/settle de nuestro PIO probado.
  */
 typedef struct _GL_HIF_INFO_T {
-	struct device		*Dev;		/* &pdev->dev, para dma_*/dev_* */
+	struct device		*Dev;		/* &pdev->dev (dma / dev helpers) */
 	struct platform_device	*PDev;		/* fuente del platform_get_irq() */
 
 	u32			ChipID;		/* leido de WCIR (== 0x6582) */
@@ -83,16 +83,11 @@ typedef struct _GL_HIF_INFO_T {
  *  El core las llama SIEMPRE a traves de las macros HAL_* de <nic/hal.h>.
  *  Devuelven BOOL (int): TRUE=ok, FALSE=fallo de bus (el core setea ADAPTER_FLAG_HW_ERR).
  *******************************************************************************/
-bool kalDevRegRead(P_GLUE_INFO_T prGlueInfo, u32 u4Register, u32 *pu4Value);
-bool kalDevRegWrite(P_GLUE_INFO_T prGlueInfo, u32 u4Register, u32 u4Value);
-bool kalDevPortRead(P_GLUE_INFO_T prGlueInfo, u16 u2Port, u16 u2Len,
-		    u8 *pucBuf, u16 u2ValidOutBufSize);
-bool kalDevPortWrite(P_GLUE_INFO_T prGlueInfo, u16 u2Port, u16 u2Len,
-		     u8 *pucBuf, u16 u2ValidInBufSize);
+/* kalDev* los declara gl_kal.h (tipos stock BOOL/UINT_32/...) */
 
-/* usada por HifIsFwOwn() y por el guard interno: TRUE si el FW tiene la propiedad del HIF
- * (o el HIF esta muerto/en settle) -> el core NO debe tocar los puertos de datos. */
-bool HifIsFwOwn(P_GLUE_INFO_T prGlueInfo);
+/* HifIsFwOwn(P_ADAPTER_T) lo define el CORE STOCK (nic/nic.c: return prAdapter->fgIsFwOwn).
+ * Nuestro backend hace su guard interno (hif_alive) dentro de kalDevPortRead/Write, asi que
+ * NO redeclaramos aqui un HifIsFwOwn(P_GLUE_INFO_T): colisionaria con la firma del stock. */
 
 /* wrappers de propiedad (los usan glSetPowerState / el bring-up del core) */
 int  kalDevSetDriverOwn(P_GLUE_INFO_T prGlueInfo);	/* 0 = driver-own conseguido */
