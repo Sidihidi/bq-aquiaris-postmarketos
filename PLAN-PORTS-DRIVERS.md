@@ -17,7 +17,7 @@
 | 4 | **Touch kernel (edt-ft5x06)** | 2-3 días | 🟠 MEDIO | Userspace polling, funciona | Migrar a driver kernel con EINT117 |
 | 5 | **STP core (resync/CRC)** | 1 sem | 🟠 MEDIO | BTIF sin CRC, BT funciona | Portear stp_core.c del downstream |
 | 6 | **BTCVSD (audio BT)** | 1-2 sem | 🟠 MEDIO | Sin SCO | Portear btcvsd del downstream |
-| 7 | **Vibrador + LEDs** | 2-3 días | 🟢 BAJO | Sin implementar | Driver trivial PWM/GPIO/MT6323 |
+| 7 | **Vibrador + LEDs** | ✅ HECHO | 🟢 BAJO | **PROBADO HW (#230)** | regulator-haptic + leds-mt6323 (DT+config) |
 | 8 | **Accdet (jack detect)** | 1 sem | 🟢 BAJO | Sin implementar | Portear accdet del downstream |
 | 9 | **Thermal** | 1 sem | 🟢 BAJO | Sin implementar | Portear thermal del downstream |
 | 10 | **FM Radio** | 4-6 sem | 🔴 BAJO* | Sin implementar | Port V4L2 masivo, baja prioridad |
@@ -30,16 +30,22 @@
 
 | Subsistema | Driver mainline | Estado | Test HW |
 |---|---|---|---|
-| **Botón de encendido** | `mtk-pmic-keys` ("mediatek,mt6323-keys") | ✅ CODE-COMPLETE | `evtest` → KEY_POWER (116) |
-| **RTC** | `rtc-mt6397` ("mediatek,mt6323-rtc") | ✅ CODE-COMPLETE | `hwclock -r`, `/dev/rtc0` |
-| **Vibrador** | `regulator-haptic` (ldo_vibr 2.8V) | ✅ CODE-COMPLETE (driver 7) | `fftest`, feedbackd |
-| **LED RGB + botones** | `leds-mt6323` (ISINK0-3) | ✅ CODE-COMPLETE (driver 7) | `echo 255 > /sys/class/leds/*/brightness` |
-| **AUXADC (SoC)** | `mt6577_auxadc` ("mediatek,mt6582-auxadc") | ✅ validado por devmem (driver 9) | `iio_info` |
+| **Botón de encendido** | `mtk-pmic-keys` ("mediatek,mt6323-keys") | ✅ **PROBADO HW** (#230) | event1 + **elogind vigila el botón** (suspend/power) |
+| **RTC** | `rtc-mt6397` ("mediatek,mt6323-rtc") | ✅ **PROBADO HW** (#230) | `/dev/rtc0` registrado + lee (`rtc0/time`) |
+| **Vibrador** | `regulator-haptic` (ldo_vibr 2.8V) | ✅ **PROBADO HW** (#230, driver) | event2; FF_RUMBLE sube+dispara sin error (confirmar buzz físico) |
+| **LED RGB + botones** | `leds-mt6323` (ISINK0-3) | ✅ **PROBADO HW** (#230, driver) | 4 `/sys/class/leds/*`; writes OK (confirmar luz física) |
+| **AUXADC (SoC)** | `mt6577_auxadc` ("mediatek,mt6582-auxadc") | 🟡 probea (#230) | `iio:device0`; **0 canales in_voltage expuestos** — investigar |
 
 El MFD `mt6397-core` ya registra los hijos mt6323 (rtc/keys/led/regulator/pwrc); solo faltaban el
 nodo DT y el símbolo Kconfig de cada uno. Config: RTC_DRV_MT6397, KEYBOARD_MTK_PMIC, LEDS_MT6323,
 INPUT_REGULATOR_HAPTIC, MEDIATEK_MT6577_AUXADC, GENERIC_ADC_THERMAL. DTS canónico: `mainline/dts/`.
-**Todos compilan (zImage+DTB). Falta 1 flash coordinado con la sesión WiFi para probarlos juntos.**
+
+**CLAVE (fix 0702):** RTC y keys fallaban hasta declarar el `mt6323` como **interrupt-controller**
+(`interrupt-parent=<&eint>; interrupts=<25 ...>` = GPIO25/EINT25 del downstream `GPIO_PMIC_EINT_PIN`)
++ subnodo `rtc`. El vibrador necesitó **eliminar un nodo `vibrator` duplicado** de una sesión previa
+(`mediatek,mt6582-vibrator`) y su `.o` del build (`regulator-haptic` usa `regulator_get_exclusive`).
+**GOTCHA de flasheo:** el `reboot` plano del script NO reinicia en esta pmOS → usar sysrq
+(`echo 1 > /proc/sys/kernel/sysrq; echo b > /proc/sysrq-trigger`), si no arrancas el kernel viejo.
 
 ---
 

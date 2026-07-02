@@ -198,6 +198,17 @@
 
 		pmic: mt6323 {
 			compatible = "mediatek,mt6323";
+			/* IRQ del PMIC = GPIO25/EINT25 (downstream GPIO_PMIC_EINT_PIN).
+			 * Sin esto los hijos rtc/keys/pwrc no consiguen IRQ. */
+			interrupt-parent = <&eint>;
+			interrupts = <25 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-controller;
+			#interrupt-cells = <2>;
+
+			rtc {
+				compatible = "mediatek,mt6323-rtc";
+			};
+
 			mt6323regulator: mt6323regulator {
 				compatible = "mediatek,mt6323-regulator";
 				mt6323_vgp1_reg: ldo_vgp1 {
@@ -574,9 +585,3 @@
 	};
 };
 
-/ {
-	mt6582_vibrator: vibrator {
-		compatible = "mediatek,mt6582-vibrator";
-		vibr-supply = <&mt6323_vibr_reg>;
-	};
-};
