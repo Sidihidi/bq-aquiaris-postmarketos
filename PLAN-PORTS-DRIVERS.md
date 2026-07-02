@@ -98,7 +98,16 @@ Fase 6: teardown, estabilidad, limpieza (1-2 sem)
 
 ---
 
-## DRIVER 2: Audio codec MT6582 — 🟡 ALTO
+## DRIVER 2: Audio codec MT6582 — 🟡 ALTO — 📋 MAPEADO + Fase A esqueleto (0702, sesión Mac)
+
+**Mapa completo verificado en `mainline/audio/HANDOFF-AUDIO-PORT-0702.md`**: AFE @0x11220000 (SoC) +
+codec ANA en el PMIC vía pwrap + amp externo de altavoz por **GPIO118** (secuencia 3× toggle + 40ms).
+Sin codec mainline → escribir de cero con patrón mt2701-afe-pcm. **Estimación honesta: 6-8 semanas.**
+Fase A empezada: `sound/soc/mediatek/mt6582/` (esqueleto compilable, `CONFIG_SND_SOC_MT6582=m`,
+sin nodo DT → no probea → riesgo cero). Fuentes canónicas en `mainline/audio/`.
+SIGUIENTE: validar reloj del AFE en HW (devmem 0x11220000) → PCM DL1 + IRQ (A.2).
+
+## DRIVER 2 (plan original): Audio codec MT6582 — 🟡 ALTO
 
 ### Estado actual
 Sin implementar. El krillin tiene un codec de audio integrado en el MT6582 SoC
