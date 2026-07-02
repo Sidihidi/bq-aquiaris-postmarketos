@@ -471,6 +471,29 @@
 	};
 };
 
+/* ============ AUXADC del SoC (IIO) — PORT driver 9 (thermal) ============
+ * Bloque validado por devmem: conversion OK (DAT bit12=ready), layout = mt6577.
+ * Gate PERI bit24 ya abierto (PERI_PDN0_STA=0). El canal 0 (NTC bateria, 10K
+ * pull-up 121K a 2.8V) lee 0 mV: su rail de pull-up esta apagado en nuestro
+ * boot — zona termica pendiente de encontrar el rail (ver PLAN-PORTS-DRIVERS). */
+/ {
+	auxadc_clk: auxadc-clk {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <26000000>;
+	};
+};
+
+&{/soc} {
+	auxadc: adc@11001000 {
+		compatible = "mediatek,mt6582-auxadc", "mediatek,mt2701-auxadc";
+		reg = <0x11001000 0x1000>;
+		clocks = <&auxadc_clk>;
+		clock-names = "main";
+		#io-channel-cells = <1>;
+	};
+};
+
 /* ============ lima / Mali-400 MP2 (GPU) ============ */
 / {
 	gpu_core_clk: gpu-core-clk { compatible = "fixed-clock"; #clock-cells = <0>; clock-frequency = <416000000>; };

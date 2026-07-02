@@ -428,7 +428,54 @@ accdet {
 
 ---
 
-## DRIVER 9: Thermal — 🟢 BAJO
+## DRIVER 9: Thermal — 🟢 BAJO — 🟡 INFRA LISTA (0702, sesión Mac): AUXADC validado; zona pendiente de un rail
+
+### Hecho (0702)
+- **AUXADC del SoC @0x11001000 VALIDADO por devmem** en el móvil: conversión real OK
+  (toggle CON1 → DAT bit12=ready), layout idéntico a mt6577 (CON1=0x04, DAT0=0x14+4*ch),
+  gate de reloj PERI bit24 ya abierto de fábrica (PERI_PDN0_STA=0x0 → sin riesgo de cuelgue de bus).
+- DT: nodo `auxadc: adc@11001000` compatible `"mediatek,mt6582-auxadc","mediatek,mt2701-auxadc"`
+  (bind directo al driver mainline `mt6577_auxadc`, 0 código) + fixed-clock. Compila (zImage+DTB).
+- Config: `CONFIG_MEDIATEK_MT6577_AUXADC=y` + `CONFIG_GENERIC_ADC_THERMAL=y`.
+
+### Bloqueado: canal 0 (NTC batería) lee 0 mV
+El NTC (10K, pull-up 121K a 2.8V — mtk_ts_battery2.c) está a masa: **el rail de 2.8V del pull-up
+está apagado en nuestro boot**. TODO: encontrar el rail (candidatos: VTCXO/VIO28/VGP del MT6323 —
+probar encendiéndolos uno a uno y re-leyendo ch0 con `sh /tmp/scan.sh` o devmem).
+
+### Zona térmica lista para pegar cuando el rail esté (generic-adc-thermal, tabla ya convertida a mV)
+```dts
+tbat_sensor: battery-thermal-sensor {
+	compatible = "generic-adc-thermal";
+	#thermal-sensor-cells = <0>;
+	io-channels = <&auxadc 0>;
+	io-channel-names = "sensor-channel";
+	temperature-lookup-table = <
+			( -20000) 1010
+			( -15000)  860
+			( -10000)  728
+			(  -5000)  613
+			       0  514
+			    5000  431
+			   10000  361
+			   15000  303
+			   20000  254
+			   25000  214
+			   30000  180
+			   35000  152
+			   40000  129
+			   45000  109
+			   50000   93
+			   55000   79
+			   60000   68 >;
+};
+```
+(trip inicial tipo "hot", NO "critical" — con el rail caído leería 60°C y un critical apagaría el móvil)
+
+### Pendiente aparte: sensor on-die de CPU (controlador thermal dedicado + calibración efuse
+del downstream mtk_ts_cpu.c) — trabajo medio, evaluar tras STP/audio.
+
+## DRIVER 9 (plan original): Thermal — 🟢 BAJO
 
 ### Estado actual
 Sin implementar. El MT6582 tiene sensores de temperatura internos
