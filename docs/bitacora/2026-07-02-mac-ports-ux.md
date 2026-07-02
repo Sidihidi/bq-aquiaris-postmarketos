@@ -33,9 +33,22 @@ Sesión en la Pi `.123` con el móvil conectado por USB, en paralelo al frente `
    (apaga el LCD de verdad). Canónico en `mainline/userspace/usr/local/bin/mt6582-powerkey`.
    **[verificar en HW → resultado abajo]**
 
-## Resultado HW de los 2 fixes
-- Brillo: _[pendiente de rellenar tras el flash/test]_
-- Botón/LCD: _[pendiente de rellenar tras desplegar el daemon y pulsar]_
+## Resultado HW de los 2 fixes (la Pi .123 se cayó a mitad — "Host is down" — tras flashear)
+- **Brillo: DTS DESPLEGADO en el móvil** ✅ estructural — flash `FLASH_OK_MD5` y **confirmado**:
+  `card1-DSI-1` ya **NO** expone backlight (fin del EISDIR). **FALTA probar el slider en la UI**
+  (que Phosh escriba `/sys/class/backlight` vía logind y que `gsd-power` no lo pise/suspenda).
+- **Botón: daemon nuevo COMMITEADO pero NO instalado aún.** La Pi cayó antes de que el task de
+  despliegue copiara el binario al móvil → **sigue corriendo el daemon VIEJO** (PMIC-poll) del boot.
+  **Para desplegarlo en casa (con la Pi/móvil vivos):**
+  ```sh
+  # copiar el daemon nuevo al movil (rootfs, persiste) y reiniciarlo:
+  scp mainline/userspace/usr/local/bin/mt6582-powerkey  root@172.16.42.1:/usr/local/bin/mt6582-powerkey
+  ssh root@172.16.42.1 'chmod +x /usr/local/bin/mt6582-powerkey; pkill -f mt6582-powerkey; \
+     nohup python3 /usr/local/bin/mt6582-powerkey >/tmp/pk.log 2>&1 &'
+  # el lanzador de boot /etc/local.d/zzw-powerkey.start ya arranca /usr/local/bin/mt6582-powerkey,
+  # asi que con reemplazar el binario basta; confirmar que arranca (cat /tmp/pk.log) y pulsar power.
+  ```
+  Verificar: pulsación corta apaga/enciende el LCD; sin flakiness (ya no pelea con el kernel por INT0).
 
 ## Cómo seguir (para casa)
 1. **Brillo**: si el slider aún no mueve el PWM → `gsd-power` es el sospechoso (memoria). Probar:
