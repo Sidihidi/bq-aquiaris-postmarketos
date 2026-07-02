@@ -1,0 +1,80 @@
+[
+ {
+  "file": "os/linux/include/gl_typedef.h",
+  "old_string": "#ifndef _GL_TYPEDEF_H\n#define _GL_TYPEDEF_H\n\n#if defined(CONFIG_HAS_EARLYSUSPEND)\n#include <linux/earlysuspend.h>\n#endif",
+  "new_string": "#ifndef _GL_TYPEDEF_H\n#define _GL_TYPEDEF_H\n\n/* 7.0.12 port: pull in kernel bits/types first so we can defensively\n * override BIT()/BITS() below instead of colliding with <linux/bits.h>. */\n#include <linux/types.h>\n#include <linux/bitops.h>\n\n#if defined(CONFIG_HAS_EARLYSUSPEND)\n#include <linux/earlysuspend.h>\n#endif",
+  "why": "Incluir <linux/bits.h> (via bitops.h) ANTES para poder redefinir de forma controlada BIT()/BITS(); en 3.10 estos headers no chocaban, en 7.0.12 bits.h ya define ambos."
+ },
+ {
+  "file": "os/linux/include/gl_typedef.h",
+  "old_string": "#ifndef BIT\n#define BIT(n)                          ((UINT_32) 1UL << (n))\n#endif /* BIT */\n\n#ifndef BITS\n/* bits range: for example BITS(16,23) = 0xFF0000\n *   ==>  (BIT(m)-1)   = 0x0000FFFF     ~(BIT(m)-1)   => 0xFFFF0000\n *   ==>  (BIT(n+1)-1) = 0x00FFFFFF\n */\n#define BITS(m,n)                       (~(BIT(m)-1) & ((BIT(n) - 1) | BIT(n)))\n#endif /* BIT */",
+  "new_string": "/* 7.0.12 port: <linux/bits.h> already defines BIT()/BITS() (BITS as a\n * different-arity macro). The stock driver relies on its own single-token\n * BIT() and 2-arg BITS(m,n) semantics, so force-override both. */\n#ifdef BIT\n#undef BIT\n#endif\n#define BIT(n)                          ((UINT_32) 1UL << (n))\n\n#ifdef BITS\n#undef BITS\n#endif\n/* bits range: for example BITS(16,23) = 0xFF0000\n *   ==>  (BIT(m)-1)   = 0x0000FFFF     ~(BIT(m)-1)   => 0xFFFF0000\n *   ==>  (BIT(n+1)-1) = 0x00FFFFFF\n */\n#define BITS(m,n)                       (~(BIT(m)-1) & ((BIT(n) - 1) | BIT(n)))",
+  "why": "DELTA de tipos: gl_typedef.h redefine BIT()/BITS() y colisiona con linux/bits.h. En 7.0.12 el #ifndef BIT no dispara (ya definido), dejando la BITS(m,n) del kernel (arity distinta) -> el core rompe. #undef + redefine garantiza la semantica stock."
+ },
+ {
+  "file": "os/linux/include/gl_os.h",
+  "old_string": "#if CONFIG_ANDROID\n#include <linux/wakelock.h>\n#endif",
+  "new_string": "/* 7.0.12 port: <linux/wakelock.h> was removed from mainline. Wake locks are\n * stubbed to no-ops (see KAL_WAKE_LOCK_* in gl_kal.h), so drop the include. */\n#if CONFIG_ANDROID && defined(CFG_ENABLE_WAKE_LOCK)\n#include <linux/wakelock.h>\n#endif",
+  "why": "wakelock.h eliminado de mainline. Guardado tras CFG_ENABLE_WAKE_LOCK (no definido) -> no se incluye; los wakelocks pasan a no-op."
+ },
+ {
+  "file": "os/linux/include/gl_os.h",
+  "old_string": "#include <linux/rtnetlink.h>    /* for rtnl_lock() and rtnl_unlock() */\n#include <linux/kthread.h>      /* kthread_should_stop(), kthread_run() */\n#include <asm/uaccess.h>        /* for copy_from_user() */\n#include <linux/fs.h>           /* for firmware download */\n#include <linux/vmalloc.h>\n\n#include <linux/kfifo.h>        /* for kfifo interface */\n#include <linux/cdev.h>         /* for cdev interface */",
+  "new_string": "#include <linux/rtnetlink.h>    /* for rtnl_lock() and rtnl_unlock() */\n#include <linux/kthread.h>      /* kthread_should_stop(), kthread_run() */\n/* 7.0.12 port: uaccess.h moved from <asm/uaccess.h> to <linux/uaccess.h>;\n * set_fs()/get_fs() are gone (use kernel_read()/request_firmware()). */\n#include <linux/uaccess.h>      /* for copy_from_user() */\n#include <linux/fs.h>           /* for firmware download */\n#include <linux/vmalloc.h>\n\n#if CFG_ENABLE_BT_OVER_WIFI\n#include <linux/kfifo.h>        /* for kfifo interface (BOW only) */\n#include <linux/cdev.h>         /* for cdev interface (BOW only) */\n#endif",
+  "why": "asm/uaccess.h -> linux/uaccess.h en 7.0.12. kfifo/cdev solo los usa BOW (GL_BOW_INFO): guardados tras CFG_ENABLE_BT_OVER_WIFI=0 para evitar el struct kfifo embebido y dependencias char-dev."
+ },
+ {
+  "file": "os/linux/include/gl_os.h",
+  "old_string": "#include \"hif.h\"\n#if CFG_CHIP_RESET_SUPPORT\n    #include \"gl_rst.h\"\n#endif",
+  "new_string": "#include \"hif.h\"\n/* 7.0.12 port: whole-chip-reset (gl_rst.h) depends on the MTK WMT/CONNSYS\n * stack that does not exist on this port; guarded out via CFG_CHIP_RESET_SUPPORT=0. */\n#if CFG_CHIP_RESET_SUPPORT\n    #include \"gl_rst.h\"\n#endif",
+  "why": "gl_rst.h depende del stack WMT de MTK (inexistente en mainline). Ya guardado por CFG_CHIP_RESET_SUPPORT, que ponemos a 0 en config.h. Solo se documenta el guard."
+ },
+ {
+  "file": "os/linux/include/gl_os.h",
+  "old_string": "#if CFG_ENABLE_AEE_MSG\n#include <linux/aee.h>\n#endif\n\nextern BOOLEAN fgIsBusAccessFailed;",
+  "new_string": "/* 7.0.12 port: MediaTek AEE (aee.h) is not available on mainline; guarded\n * out via CFG_ENABLE_AEE_MSG=0. kalSendAee* become no-ops in gl_kal.h. */\n#if CFG_ENABLE_AEE_MSG\n#include <linux/aee.h>\n#endif\n\nextern BOOLEAN fgIsBusAccessFailed;",
+  "why": "linux/aee.h (MTK AEE) no existe en mainline. Guardado por CFG_ENABLE_AEE_MSG que deriva de CFG_SUPPORT_AEE=0 (config.h)."
+ },
+ {
+  "file": "os/linux/include/gl_kal.h",
+  "old_string": "#if CONFIG_ANDROID /* Defined in Android kernel source */\ntypedef struct wake_lock    KAL_WAKE_LOCK_T, *P_KAL_WAKE_LOCK_T;\n#else\ntypedef UINT_32             KAL_WAKE_LOCK_T, *P_KAL_WAKE_LOCK_T;\n#endif",
+  "new_string": "/* 7.0.12 port: struct wake_lock removed from mainline. Wake locks are\n * stubbed to no-ops, so the handle is a plain scalar regardless of Android. */\n#if CONFIG_ANDROID && defined(CFG_ENABLE_WAKE_LOCK)\ntypedef struct wake_lock    KAL_WAKE_LOCK_T, *P_KAL_WAKE_LOCK_T;\n#else\ntypedef UINT_32             KAL_WAKE_LOCK_T, *P_KAL_WAKE_LOCK_T;\n#endif",
+  "why": "struct wake_lock eliminado; el campo rAhbIsrWakeLock de GLUE_INFO_T necesita un tipo valido. Con el guard, KAL_WAKE_LOCK_T = UINT_32 (escalar) y el struct GLUE_INFO_T compila."
+ },
+ {
+  "file": "os/linux/include/gl_kal.h",
+  "old_string": "#if CONFIG_ANDROID /* Defined in Android kernel source */\n#define KAL_WAKE_LOCK_INIT(_prAdapter, _prWakeLock, _pcName) \\\n        wake_lock_init(_prWakeLock, WAKE_LOCK_SUSPEND, _pcName)",
+  "new_string": "/* 7.0.12 port: wake_lock_*() API removed from mainline; make all wake-lock\n * macros no-ops unless the platform explicitly re-enables them. */\n#if CONFIG_ANDROID && defined(CFG_ENABLE_WAKE_LOCK)\n#define KAL_WAKE_LOCK_INIT(_prAdapter, _prWakeLock, _pcName) \\\n        wake_lock_init(_prWakeLock, WAKE_LOCK_SUSPEND, _pcName)",
+  "why": "La API wake_lock_init/wake_lock/wake_unlock/wake_lock_timeout fue eliminada. Cambiar el guard a CFG_ENABLE_WAKE_LOCK (no definido) enruta al #else que ya define estas macros como no-op."
+ },
+ {
+  "file": "include/config.h",
+  "old_string": "#ifndef _CONFIG_H\n#define _CONFIG_H\n/*******************************************************************************\n*                         C O M P I L E R   F L A G S\n********************************************************************************\n*/\n#define CFG_AIS_SUPPORT_REJ_CNT_AVOID",
+  "new_string": "#ifndef _CONFIG_H\n#define _CONFIG_H\n\n/*------------------------------------------------------------------------------\n * 7.0.12 PORT: defensive defaults.\n * These knobs are normally injected by the out-of-tree config.mk build. On the\n * mainline/postmarketOS port we build the sources directly, so provide safe\n * fallbacks here to guarantee the KAL headers compile standalone and to\n * guard-out subsystems (XLOG, AEE, AGPS, wakelock, HS2.0) whose kernel-side\n * dependencies were removed or never existed on this platform.\n *----------------------------------------------------------------------------*/\n#ifndef DBG\n#define DBG                             0\n#endif\n#ifndef CFG_SUPPORT_XLOG\n#define CFG_SUPPORT_XLOG                0   /* no android xlog_printk on mainline */\n#endif\n#ifndef CFG_SUPPORT_AEE\n#define CFG_SUPPORT_AEE                 0   /* no MTK aee_kernel_* on mainline */\n#endif\n#ifndef CFG_SUPPORT_AGPS_ASSIST\n#define CFG_SUPPORT_AGPS_ASSIST         0\n#endif\n#ifndef CFG_SUPPORT_HOTSPOT_2_0\n#define CFG_SUPPORT_HOTSPOT_2_0         0\n#endif\n/* CFG_ENABLE_WAKE_LOCK intentionally left undefined: wake locks are no-ops. */\n\n/*******************************************************************************\n*                         C O M P I L E R   F L A G S\n********************************************************************************\n*/\n#define CFG_AIS_SUPPORT_REJ_CNT_AVOID",
+  "why": "Estos flags los inyecta normalmente config.mk (ausente en el port directo). Defaults defensivos: XLOG=0 (sin xlog_printk), AEE=0 (sin aee_kernel_*), AGPS=0, HS2.0=0 (sin addrconf), DBG=0. Asi los headers KAL compilan standalone y las macros de log caen a kalPrint/no-op."
+ },
+ {
+  "file": "include/config.h",
+  "old_string": "#ifdef LINUX\n    #ifdef CONFIG_X86\n        #define CFG_ENABLE_BT_OVER_WIFI         0\n    #else\n        #define CFG_ENABLE_BT_OVER_WIFI         1\n    #endif\n#else\n    #define CFG_ENABLE_BT_OVER_WIFI             0\n#endif",
+  "new_string": "/* 7.0.12 STA-only port: BT-over-WiFi pulls in kfifo/cdev char-dev plumbing and\n * the AMPC net device; disabled to keep the diet STA-only. */\n#define CFG_ENABLE_BT_OVER_WIFI             0",
+  "why": "STA-only: BOW arrastra kfifo/cdev, GL_BOW_INFO y un segundo net_device (ampc0). En krillin no-X86 el stock lo ponia a 1; forzamos 0."
+ },
+ {
+  "file": "include/config.h",
+  "old_string": "#ifdef LINUX\n    #ifdef CONFIG_X86\n        #define CFG_ENABLE_WIFI_DIRECT          0\n        #define CFG_SUPPORT_802_11W             0\n    #else\n        #define CFG_ENABLE_WIFI_DIRECT          1\n        #define CFG_SUPPORT_802_11W             0 /*!< 0(default): Disable 802.11W */\n    #endif\n#else\n    #define CFG_ENABLE_WIFI_DIRECT              0\n    #define CFG_SUPPORT_802_11W                 0 /* Not support at WinXP */\n#endif",
+  "new_string": "/* 7.0.12 STA-only port: Wi-Fi Direct (P2P) is out of scope for phase 1 and\n * drags in the whole p2p_* sub-module + a second net device. Disabled. */\n#define CFG_ENABLE_WIFI_DIRECT              0\n#define CFG_SUPPORT_802_11W                 0 /*!< 0(default): Disable 802.11W */",
+  "why": "STA-only Fase 1: WIFI_DIRECT activa todo el sub-modulo p2p (gl_p2p*, p2p_fsm...) y struct rSubModComp + un net_device extra. En krillin no-X86 el stock lo ponia a 1; forzamos 0."
+ },
+ {
+  "file": "include/config.h",
+  "old_string": "#define CFG_CHIP_RESET_SUPPORT                      1",
+  "new_string": "/* 7.0.12 port: gl_rst.h needs the MTK WMT reset stack; disabled for this port. */\n#define CFG_CHIP_RESET_SUPPORT                      0",
+  "why": "Apaga el include de gl_rst.h (stack WMT inexistente) y las llamadas kalIsResetting() del core (wlan_lib.c estan bajo #if CFG_CHIP_RESET_SUPPORT==1)."
+ },
+ {
+  "file": "include/config.h",
+  "old_string": "/* ++ TDLS */\n#define CFG_SUPPORT_TDLS\t\t\t1   /* IEEE802.11z TDLS */\n#define CFG_SUPPORT_TDLS_DBG\t\t0\t/* TDLS debug */\n/* -- TDLS */",
+  "new_string": "/* ++ TDLS */\n/* 7.0.12 STA-only port: TDLS drags in tdls_extr.h + extra cfg80211 ops; off. */\n#define CFG_SUPPORT_TDLS\t\t\t0   /* IEEE802.11z TDLS */\n#define CFG_SUPPORT_TDLS_DBG\t\t0\t/* TDLS debug */\n/* -- TDLS */",
+  "why": "STA-only: TDLS incluye tdls_extr.h y anade TDLS_INFO_T/rTdlsLink a GLUE_INFO_T + ops cfg80211 extra. Fuera de alcance en Fase 1."
+ }
+]
