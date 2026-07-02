@@ -1,5 +1,0 @@
-#!/bin/sh
-# uinput + reset fiable del chip + daemon del touch FT5336 (tras touch-power VGP1)
-[ -e /dev/uinput ] || insmod /root/uinput.ko 2>/dev/null
-/usr/local/bin/touch-reset 2>/dev/null
-pgrep ft5336_touch >/dev/null 2>&1 || ( /usr/local/bin/ft5336_touch >/tmp/ft.log 2>&1 & )
