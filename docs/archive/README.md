@@ -17,4 +17,10 @@ driver A. La conclusión que cierra esta etapa está en
 `mainline/wifi-consys/wifi/HANDOFF-BLINDPOKE-REFUTADO-0702.md` (activo). Los 0701 (fwdump/gates)
 se mantienen en el árbol activo porque el plan del port aún los referencia.
 
+## `superseded-drafts/` — borradores de drivers reemplazados por mainline
+Borradores propios (`mt6323-isink-led.c`, `mt6582-thermal.c`, `mt6582-vibrator.c`) de una sesión
+temprana. **Reemplazados** por drivers ya en mainline (`leds-mt6323`, `mt6577_auxadc`,
+`regulator-haptic`) que hacen lo mismo con solo DT+config — ver `PLAN-PORTS-DRIVERS.md`. Se conservan
+por sus mapas de registros (ISINK, AUXADC) como referencia.
+
 *Archivado 2026-07-02 al limpiar el repo. Nada borrado: git conserva todo el historial.*
