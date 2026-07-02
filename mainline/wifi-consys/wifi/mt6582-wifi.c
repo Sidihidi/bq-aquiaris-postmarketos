@@ -825,6 +825,42 @@ static void wifi_handle_event(struct mt6582_wifi *w, u8 *rx, u32 len)
 	}
 }
 
+/* EAPOL/1X (4-way WPA2) por TC4 -> PUERTO 1, replicando la ruta COMMAND_TYPE_SECURITY_FRAME del stock.
+ * nic_tx.c: nicTxCmd asigna ucPortIdx=1 para "Broadcast/multicast, 1x frames, command packets, MMPDU"
+ * (el data-port es el 0). El descriptor de esa rama (:1697-1720) = PKT_TYPE_DATA + flag 1X +
+ * wlan_hdr=ETH_HLEN + burst-end, SIN ACK. driver A lo mandaba por el data-port 0 (wifi_tx_data) -> el FW
+ * lo emitía al aire pero NO lo alimentaba a su sec-FSM -> el 4-way completaba host-side pero el cifrado de
+ * datos ([0x12e3]/[0x12f5]) nunca se armaba -> DISCOVER broadcast sin cifrar -> 0 OFFER (DHCP roto).
+ * Mandarlo por el puerto 1 (igual que wifi_send_mgmt) es la hipótesis-fix del WPA2. Caller con hif_lock. */
+static void wifi_tx_eapol(struct mt6582_wifi *w, struct sk_buff *skb)
+{
+	struct hif_tx_header *h = (void *)w->dlm;
+	u16 frame_len = skb->len;
+	u16 total = sizeof(*h) + frame_len;
+
+	memset(h, 0, sizeof(*h));
+	h->tx_byte_count_up = cpu_to_le16(total & 0x0fff);
+	h->ether_type_offset = 14;			/* ((ETH_HLEN-2)+16)>>1 (stock nic_tx.c:1702) */
+	h->resource_pkttype_cs = (WIFI_TC4 << HIF_TX_RESOURCE_SHIFT) |
+				 (HIF_TX_PKT_TYPE_DATA << HIF_TX_PKT_TYPE_SHIFT);	/* TC4, tipo DATA (stock :1707) */
+	h->wlan_header_len = ETH_HLEN;			/* =14 (stock :1712) */
+	h->sta_rec_idx = 0;				/* EAPOL unicast al AP (mismo idx que UPDATE_STA_RECORD) */
+	h->fwd_sess = HIF_TX_BURST_END;			/* burst-end (stock :1710) */
+	h->pktfmt_flags = HIF_TX_FLAG_1X_FRAME;		/* flag 1X; net_type AIS=0 (stock :1713-1715) */
+	h->pkt_seq = 0;					/* sin TX-DONE a nivel HIF (stock :1718) */
+	h->ack_bip_rate = 0;
+	memcpy((u8 *)w->dlm + sizeof(*h), skb->data, frame_len);
+	/* dword-cero terminador de TX-aggregation: el stock lo mete en CADA TX de AMBOS puertos
+	 * (HAL_WRITE_TX_PORT, hal.h:307-309) — igual que wifi_tx_data en el puerto 0. */
+	*(__le32 *)((u8 *)w->dlm + ALIGN(total, 4)) = 0;
+	dev_info(w->dev, "EAPOL-TX pre-write (%u B) por TC4/puerto-1\n", frame_len);	/* si cuelga AQUI = write */
+	wifi_port1_write_pio(w, w->dlm, ALIGN(total, 4) + 4);	/* *** PUERTO 1 (TC4) — NO el data-port 0 *** */
+	w->ndev->stats.tx_packets++;
+	w->ndev->stats.tx_bytes += frame_len;
+	dev_info(w->dev, "*** EAPOL-TX OK por TC4/puerto-1 (%u B): ruta security-frame del stock ***\n",
+		 frame_len);
+}
+
 /* Fase 3 TX: enviar un paquete de DATOS (skb Ethernet) por WTDR0 (puerto 0, TC1, PKT_TYPE=DATA).
  * El FW full-MAC encapsula 802.3 -> 802.11. Caller con hif_lock (lo llama el rx_thread). */
 static void wifi_tx_data(struct mt6582_wifi *w, struct sk_buff *skb)
@@ -836,6 +872,12 @@ static void wifi_tx_data(struct mt6582_wifi *w, struct sk_buff *skb)
 
 	if (frame_len > 1600 || !w->ndev)
 		return;
+	/* EAPOL/1X: desviar a la ruta TC4/puerto-1 (fix del cifrado WPA2). Ver wifi_tx_eapol. */
+	if (frame_len >= ETH_HLEN &&
+	    ((struct ethhdr *)skb->data)->h_proto == htons(ETH_P_PAE)) {
+		wifi_tx_eapol(w, skb);
+		return;
+	}
 	memset(h, 0, sizeof(*h));
 	h->tx_byte_count_up = cpu_to_le16(total & 0x0fff);	/* incluye los 16B de cabecera HIF */
 	h->ether_type_offset = 14;				/* ((ETH_HLEN-2)+16)>>1 palabras, incl. HIF */
