@@ -218,6 +218,9 @@ BOOL kalDevPortRead(P_GLUE_INFO_T prGlueInfo, UINT_16 u2Port, UINT_16 u2Len,
 	if (target >= 0)
 		hif_hstcr(h, (u32)target, u2Len);	/* avanza el FIFO; para WHISR = read-clear enhance */
 
+	/* DIAG Fase3 (M1): PRE sin POST = cuelga en el readl del puerto (ACK de descarga o enhance). */
+	{ static u32 dr; if (dr++ < 12 && h->Dev)
+		dev_info(h->Dev, "DIAG portR #%u port=0x%x len=%u tgt=%d PRE\n", dr, u2Port, u2Len, target); }
 	words = (u2Len + 3) / 4;
 	for (i = 0; i < words; i++) {
 		/* audit 0624: re-sondear WCIR (registro estatico, no toca el FIFO) ANTES de cada
@@ -229,6 +232,8 @@ BOOL kalDevPortRead(P_GLUE_INFO_T prGlueInfo, UINT_16 u2Port, UINT_16 u2Len,
 		}
 		p[i] = hifrd(h, u2Port);	/* WRDR0/WRDR1/WHISR: stream del bloque */
 	}
+	{ static u32 drp; if (drp++ < 12 && h->Dev)
+		dev_info(h->Dev, "DIAG portR #%u POST (%u palabras) OK\n", drp, words); }
 	return true;
 }
 EXPORT_SYMBOL(kalDevPortRead);
@@ -255,9 +260,20 @@ BOOL kalDevPortWrite(P_GLUE_INFO_T prGlueInfo, UINT_16 u2Port, UINT_16 u2Len,
 	if (target >= 0)
 		hif_hstcr(h, (u32)target, u2Len);
 
+	/* DIAG Fase3 (M1): localizar el cuelgue de la descarga. PRE sin POST = cuelga en el writel.
+	 * En la 1a escritura, volcar la config del HIF para comparar con los valores buenos del driver A
+	 * (WHCR: MAX_HIF_RX_LEN_NUM bits4-7=0, RX_ENHANCE bit16=0, W_INT_CLR bit1=0). */
+	{ static u32 dw; if (dw++ < 12 && h->Dev) {
+		if (dw == 1)
+			dev_info(h->Dev, "DIAG HIF-cfg pre-DL: WHCR=0x%08x WHIER=0x%08x WHLPCR=0x%08x WHISR=0x%08x\n",
+				 hifrd(h, MCR_WHCR), hifrd(h, MCR_WHIER), hifrd(h, MCR_WHLPCR), hifrd(h, MCR_WHISR));
+		dev_info(h->Dev, "DIAG portW #%u port=0x%x len=%u tgt=%d PRE\n", dw, u2Port, u2Len, target);
+	} }
 	words = (u2Len + 3) / 4;
 	for (i = 0; i < words; i++)
 		hifwr(h, u2Port, p[i]);	/* WTDR0/WTDR1 */
+	{ static u32 dwp; if (dwp++ < 12 && h->Dev)
+		dev_info(h->Dev, "DIAG portW #%u POST (%u palabras) OK\n", dwp, words); }
 	return true;
 }
 EXPORT_SYMBOL(kalDevPortWrite);

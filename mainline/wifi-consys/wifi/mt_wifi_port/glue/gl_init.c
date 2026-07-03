@@ -453,6 +453,16 @@ static int mtk_wlanProbe(struct platform_device *pdev)
 	if (ret != 0)
 		dev_warn(&pdev->dev, "glBusSetIrq=%d -> RX por polling\n", ret);
 
+	/* M1 fix (0703): el driver A descarga el FW con el IRQ del HIF SIN armar. glBusSetIrq ya pidio
+	 * el IRQ + armo WHLPCR_INT_EN; con WHIER=0xffffff0f + WHISR pendiente, la ISR (glHifIsr) puede
+	 * dispararse A MITAD del burst WTDR0 de la descarga y tocar WHLPCR -> corrompe la transaccion
+	 * HSTCR -> el writel cuelga el bus AHB -> WDT. La descarga y el poll de WLAN_READY son SINCRONOS
+	 * (polled), NO necesitan IRQ. Enmascararlo en el GIC durante wlanAdapterStart y re-armar despues. */
+	if (prGlueInfo->rHifInfo.fgIrqOk && !prGlueInfo->rHifInfo.fgIrqDisabled) {
+		disable_irq(prGlueInfo->rHifInfo.Irq);
+		prGlueInfo->rHifInfo.fgIrqDisabled = true;
+	}
+
 	/* <5> ARRANCAR EL FW (hito M1): bloque FW-download STOCK.
 	 * wlanAdapterStart hace TODO el bring-up del HIF via HAL_x/kalDevX (chip-id, WHCR/WHIER,
 	 * descarga WIFI_RAM_CODE por WTDR0 como INIT_CMD_ID_DOWNLOAD_BUF, WIFI_START, poll WLAN_READY,
@@ -500,6 +510,13 @@ static int mtk_wlanProbe(struct platform_device *pdev)
 		goto err_freeirq;
 	}
 #endif
+
+	/* re-armar el IRQ del HIF ya con el FW arrancado (antes del tx_thread, que lo consume vía GLUE_FLAG_INT).
+	 * En los caminos de error (err_freeirq) NO hace falta: glBusFreeIrq re-habilita si fgIrqDisabled. */
+	if (prGlueInfo->rHifInfo.fgIrqOk && prGlueInfo->rHifInfo.fgIrqDisabled) {
+		enable_irq(prGlueInfo->rHifInfo.Irq);
+		prGlueInfo->rHifInfo.fgIrqDisabled = false;
+	}
 
 	/* main thread del core (procesa rCmdQueue/rTxQueue + IST despertado por el ISR) */
 	prGlueInfo->main_thread = kthread_run(tx_thread, prGlueInfo->prDevHandler, "tx_thread");
