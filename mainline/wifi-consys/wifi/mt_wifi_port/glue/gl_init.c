@@ -58,6 +58,7 @@
  * STP/WMT solo enciende la radio (func_on) y el rail RF (VCN33); el data-path va por el HIF. */
 extern bool mt6582_consys_ready;		/* el MCU del CONSYS corre y leyo chip-id 0x6582 */
 extern int  mt6582_consys_func_on(u8 type);	/* WMT func_on: 0=BT 1=FM 2=GPS 3=WIFI 4=WMT */
+extern int  mt6582_consys_func_off(u8 type);	/* WMT func_off (power-cycle diagnostico -> chip frio) */
 extern int  mt6582_consys_wifi_vcn33(bool on);	/* LDO RF del WiFi (VCN33_WIFI) */
 
 #define WMTDRV_TYPE_WIFI	3		/* type-id del func_on para la radio WiFi */
@@ -396,6 +397,15 @@ static int mtk_wlanProbe(struct platform_device *pdev)
 
 	dma_coerce_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
 
+	/* <1a.5> DIAG/CHIP-FRIO: el driver A ya arranco el FW al boot (chip CALIENTE) -> wlanAdapterStart
+	 * no re-inicia un FW vivo. Forzamos chip FRIO: func_off(WIFI)+VCN33 off, asentar, y el func_on de
+	 * abajo lo re-arranca en frio. (El flanco VCN33 off->on pierde la cal-RF -> el scan/TX no iran
+	 * finos, pero para el TEST del bring-up del FW da igual; esto es DIAGNOSTICO, se quita luego.) */
+	dev_info(&pdev->dev, "DIAG: power-cycle del consys WiFi (func_off+VCN33 off -> frio)\n");
+	mt6582_consys_func_off(WMTDRV_TYPE_WIFI);
+	mt6582_consys_wifi_vcn33(false);
+	msleep(120);
+
 	/* <1b> encender la radio WiFi por WMT (via btif). Deja el HIF accesible. */
 	ret = mt6582_consys_func_on(WMTDRV_TYPE_WIFI);
 	if (ret) {
@@ -627,8 +637,14 @@ static struct platform_driver mtk_mtwifi_driver = {
  * ======================================================================================= */
 static int __init mtk_mtwifi_init(void)
 {
+	int _i;
+
 	sema_init(&g_halt_sem, 1);
-	pr_info("mtk_mtwifi: cargado (Fase 3 — probe real sobre consys MT6582)\n");
+	/* DIAG: activar los DBGLOG del core (ERROR|WARN|STATE|EVENT|TRACE = 0x1F, sin LOUD/TEMP) para ver
+	 * el sub-paso EXACTO donde falla wlanAdapterStart (nicInitializeAdapter / Firmware download / ...). */
+	for (_i = 0; _i < DBG_MODULE_NUM; _i++)
+		aucDebugModule[_i] = 0x1F;
+	pr_info("mtk_mtwifi: cargado (Fase 3 — probe real sobre consys MT6582; DBGLOG on)\n");
 	return platform_driver_register(&mtk_mtwifi_driver);
 }
 
