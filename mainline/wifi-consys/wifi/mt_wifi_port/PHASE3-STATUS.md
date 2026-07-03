@@ -1,4 +1,23 @@
-# FASE 3 del PORT — PROBE REAL: mtk_mtwifi.ko con probe COMPILA+ENLAZA (0702, sesion .38)
+# FASE 3 del PORT — ★ M1 CONSEGUIDO ★ (0703, sesion Mac/.123)
+
+## M1 = insmod -> FW ARRANCA -> wlan0 registrado ✅ (2026-07-03)
+Con CHIP FRIO (driver A bindea el nodo pero SIN auto-descargar el FW — auto_bringup deshabilitado,
+kernel #233): `insmod mtk_mtwifi.ko` rc=0 →
+- descarga WIFI_RAM_CODE completa (12 chunks por WTDR0, cada uno ACK'd por WRDR0)
+- `Ready bit asserted` (WLAN_READY=1) → `wlanAdapterStart status=0x0 SUCCESS`
+- BASIC_CONFIG + GET_NIC_CAPABILITY + wlanLoadManufactureData OK (init-stream stock completo)
+- **wlan0 registrado y UP** (ndo_open rc=0; NO-CARRIER porque .scan = stub Fase 4)
+- tx_thread vivo + flow-control TX del core funcionando (`nicTxReleaseResource: TC4 Free=4`)
+- **CERO corrupcion** (la vista con of_ids-off era artefacto de aquel setup)
+REQUISITO: chip frio. VCN33 always-on impide enfriar en runtime (func_off(WIFI) deja WLAN_READY=1).
+En el producto final el port es el UNICO driver WiFi → chip frio nativo al boot. Para test con driver A
+presente: deshabilitar su auto_bringup (mt6582-wifi.c:2175) o su binding.
+SIGUIENTE = FASE 4: gl_cfg80211.c real (scan/connect/keys verbatim) → `iw scan` lista APs (M2).
+Detalle: HANDOFF-MTWIFI-PORT-M1-DIAG-0703.md
+
+---
+
+# (historico) FASE 3 — PROBE REAL: mtk_mtwifi.ko con probe COMPILA+ENLAZA (0702, sesion .38)
 
 ## HITO
 `gl_init.c` reescrito de stub minimo -> **PROBE REAL** (733L). `mtk_mtwifi.ko` = 1.91MB (crecio de
