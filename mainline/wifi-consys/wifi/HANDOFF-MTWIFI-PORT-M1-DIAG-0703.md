@@ -1,4 +1,35 @@
-# HANDOFF — Port mt_wifi Fase 3/M1: probe ARRANCA en profundidad, cuelga en la descarga por CHIP CALIENTE (Mac/.123, 2026-07-03)
+# HANDOFF — Port mt_wifi: **M1 CONSEGUIDO** ✅ (Mac/.123, 2026-07-03)
+
+## ★★★ M1 LOGRADO Y ESTABLE (0703 PM) ★★★
+Con **chip frío fiable** (driver A bindea el nodo pero NO auto-descarga el FW — schedule del
+auto_bringup deshabilitado, kernel #233), el port arranca el FW **de punta a punta, limpio**:
+```
+firmware-arrancado=0  (chip frio)
+portW #1..#12 POST OK  → descarga WIFI_RAM_CODE completa (12 chunks, cada uno ACK'd por portR de 8B)
+Waiting for Ready bit.. -> Ready bit asserted   (WLAN_READY=1, el FW ARRANCO)
+wlanAdapterStart status=0x00000000 (SUCCESS)
+nicTxReleaseResource: Release TC4 count 1, Free=4   (¡flow-control TX del core FUNCIONA!)
+*** mtk_mtwifi: wlan0 ARRIBA (FW arrancado, cfg80211 registrado) ***
+wlan0 UP (ndo_open rc=0)   — NO-CARRIER (scan = stub Fase 4)
+```
+- ✅ insmod rc=0, `mtk_mtwifi` cargado, **wlan0 registrado y UP**, tx_thread vivo, **CERO corrupción**
+  (userspace intacto, sin Oops/BUG). wlanAdapterStart COMPLETA (download + WIFI_START + WLAN_READY +
+  BASIC_CONFIG + GET_NIC_CAPABILITY + wlanLoadManufactureData, todo SUCCESS).
+- La "corrupción de memoria" que se vio con el enfoque of_ids-off era **un artefacto de aquel setup**
+  (chip mal calibrado/estado raro), NO un bug real. Con driver A bindeado-pero-idle (RF-cal del boot
+  presente + chip frío) todo va limpio. Overruns de buffer ya estaban descartados (RFB/coalescing bien
+  dimensionados, PIO sin DMA).
+- **CLAVE del chip frío**: el port NECESITA que nadie haya descargado el FW antes (VCN33 always-on impide
+  enfriarlo en runtime). En el producto final el port sera el UNICO driver WiFi (driver A fuera) -> chip
+  siempre frío al boot -> M1 nativo. Para tests con driver A presente: deshabilitar su auto_bringup
+  (`schedule_delayed_work(&w->auto_bringup...)` en mt6582-wifi.c:2175) o su binding.
+- **SIGUIENTE = Fase 4**: `gl_cfg80211.c` real (scan+connect+keys) para sustituir el `mtk_cfg80211_ops`
+  __weak stub → `iw dev wlan0 scan` lista APs (M2), luego connect+4-way por SECURITY_FRAME = DHCP (Fase 5).
+- Instrumentación DIAG (portW/portR PRE/POST + WCIR dump) en `mt6582-hif.c`: QUITAR ya (M1 validado).
+
+---
+
+# (histórico) Fase 3/M1: probe ARRANCA en profundidad, cuelga en la descarga por CHIP CALIENTE
 
 > Continúa `HANDOFF-MTWIFI-PORT-FASE3-PROBE-0702.md`. Sesión Mac (Fable 5) con el móvil en la .123.
 
