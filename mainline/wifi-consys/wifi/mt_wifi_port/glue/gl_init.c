@@ -113,39 +113,12 @@ static const struct ieee80211_regdomain mtk_regd = {
 };
 
 /* =======================================================================================
- *  mtk_cfg80211_ops — STUB MINIMO (TODO FASE 4: gl_cfg80211.c).
- *
- *  El gl_cfg80211.c real (con .scan/.connect/.disconnect/.add_key que HABLAN con el FW,
- *  como wifi_cfg_* del driver A) AUN NO EXISTE en el arbol. Para que ESTE fichero enlace
- *  y el probe llegue al hito M1 (insmod -> wlanAdapterStart completa -> el FW arranca),
- *  proveemos aqui un cfg80211_ops MINIMO cuyos handlers devuelven -EOPNOTSUPP. wiphy_new()
- *  solo necesita un ops valido; con esto wlan0 se registra y el FW corre, aunque scan/connect
- *  no funcionen hasta la Fase 4.
- *
- *  >>> Cuando exista gl_cfg80211.c, BORRAR este bloque y hacer `extern struct cfg80211_ops
- *      mtk_cfg80211_ops;` (o el nombre que exporte), y quitar el __weak de abajo. <<<
+ *  mtk_cfg80211_ops — FASE 4: los handlers REALES viven en gl_cfg80211.c (scan/connect/
+ *  disconnect/add_key/del_key/get_station/... portados verbatim del stock, hablan con el
+ *  FW via kalIoctl->wlanoid*). El stub __weak de M1 se elimino: dos definiciones (weak+
+ *  fuerte) en .o distintos dan "multiple definition" en algunos toolchains.
  * ======================================================================================= */
-static int mtk_stub_scan(struct wiphy *wiphy, struct cfg80211_scan_request *req)
-{ (void)wiphy; (void)req; return -EOPNOTSUPP; }
-static int mtk_stub_connect(struct wiphy *wiphy, struct net_device *ndev,
-			    struct cfg80211_connect_params *sme)
-{ (void)wiphy; (void)ndev; (void)sme; return -EOPNOTSUPP; }
-static int mtk_stub_disconnect(struct wiphy *wiphy, struct net_device *ndev, u16 reason)
-{ (void)wiphy; (void)ndev; (void)reason; return -EOPNOTSUPP; }
-static int mtk_stub_add_key(struct wiphy *wiphy, struct net_device *ndev, int link_id,
-			    u8 idx, bool pairwise, const u8 *mac,
-			    struct key_params *params)
-{ (void)wiphy; (void)ndev; (void)link_id; (void)idx; (void)pairwise; (void)mac; (void)params;
-  return -EOPNOTSUPP; }
-
-/* __weak: si Fase 4 define un mtk_cfg80211_ops NO-weak (mismo nombre) en gl_cfg80211.c,
- * el enlazador se queda con AQUEL y descarta este. Asi no hay que tocar gl_init.c al llegar Fase 4. */
-__weak struct cfg80211_ops mtk_cfg80211_ops = {
-	.scan       = mtk_stub_scan,
-	.connect    = mtk_stub_connect,
-	.disconnect = mtk_stub_disconnect,
-	.add_key    = mtk_stub_add_key,
-};
+extern struct cfg80211_ops mtk_cfg80211_ops;	/* definido en gl_cfg80211.c (Fase 4) */
 
 /* netdev_ops MINIMO: el TX/RX real de datos lo cablea Fase 4 (o el core via wlanHardStartXmit).
  * Para M1 solo hace falta que register_netdev tenga un ndo_open/stop/xmit no-NULL. */

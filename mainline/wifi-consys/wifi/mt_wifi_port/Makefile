@@ -149,3 +149,4 @@ ccflags-y += \
 	-DCFG_BUILT_IN_DRIVER=0
 ccflags-y += -Wno-error=date-time
 mtk_mtwifi-y += os/linux/glue/gl_init.o
+mtk_mtwifi-y += os/linux/glue/gl_cfg80211.o	# Fase 4: handlers cfg80211 reales (scan/connect/keys)
