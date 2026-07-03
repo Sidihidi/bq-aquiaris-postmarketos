@@ -124,12 +124,43 @@ extern struct cfg80211_ops mtk_cfg80211_ops;	/* definido en gl_cfg80211.c (Fase 
  * Para M1 solo hace falta que register_netdev tenga un ndo_open/stop/xmit no-NULL. */
 static int mtk_ndo_open(struct net_device *ndev)  { netif_start_queue(ndev); return 0; }
 static int mtk_ndo_stop(struct net_device *ndev)  { netif_stop_queue(ndev);  return 0; }
+/* FASE 5: TX de datos REAL — portado de wlanHardStartXmit del stock (gl_init.c:1682-1826),
+ * dieted STA-only (single-queue: alloc_netdev sin _mq). Clasifica el skb (wlanProcessSecurityFrame
+ * detecta EAPOL/1x -> ruta SECURITY_FRAME por cmd-queue/puerto1; si no, cola de datos normal),
+ * encola y despierta el tx_thread (kalSetEvent). Sin esto los EAPOL del 4-way se dropeaban. */
 static netdev_tx_t mtk_ndo_xmit(struct sk_buff *skb, struct net_device *ndev)
 {
-	/* TODO FASE 4: encolar en rTxQueue y despertar el tx_thread (wlanHardStartXmit del core).
-	 * Hasta entonces, drop silencioso para no colgar la pila. */
-	dev_kfree_skb(skb);
-	ndev->stats.tx_dropped++;
+	P_GLUE_INFO_T prGlueInfo = *((P_GLUE_INFO_T *) netdev_priv(ndev));
+	P_QUE_ENTRY_T prQueueEntry;
+	P_QUE_T prTxQueue;
+	GLUE_SPIN_LOCK_DECLARATION();
+
+	if (!prGlueInfo || (prGlueInfo->u4Flag & GLUE_FLAG_HALT)) {
+		dev_kfree_skb(skb);
+		ndev->stats.tx_dropped++;
+		return NETDEV_TX_OK;
+	}
+
+	prQueueEntry = (P_QUE_ENTRY_T) GLUE_GET_PKT_QUEUE_ENTRY(skb);
+	prTxQueue = &prGlueInfo->rTxQueue;
+
+	if (wlanProcessSecurityFrame(prGlueInfo->prAdapter, (P_NATIVE_PACKET) skb) == FALSE) {
+		/* paquete de datos normal -> cola TX (el tx_thread la drena al HIF) */
+		GLUE_INC_REF_CNT(prGlueInfo->i4TxPendingFrameNum);
+		GLUE_INC_REF_CNT(prGlueInfo->ai4TxPendingFrameNumPerQueue[NETWORK_TYPE_AIS_INDEX][0]);
+		GLUE_ACQUIRE_SPIN_LOCK(prGlueInfo, SPIN_LOCK_TX_QUE);
+		QUEUE_INSERT_TAIL(prTxQueue, prQueueEntry);
+		GLUE_RELEASE_SPIN_LOCK(prGlueInfo, SPIN_LOCK_TX_QUE);
+		if (prGlueInfo->i4TxPendingFrameNum >= CFG_TX_STOP_NETIF_QUEUE_THRESHOLD)
+			netif_stop_queue(ndev);
+	} else {
+		/* EAPOL/1x: wlanProcessSecurityFrame ya lo encolo por la ruta SECURITY_FRAME */
+		GLUE_INC_REF_CNT(prGlueInfo->i4TxPendingSecurityFrameNum);
+	}
+
+	prGlueInfo->rNetDevStats.tx_bytes += skb->len;
+	prGlueInfo->rNetDevStats.tx_packets++;
+	kalSetEvent(prGlueInfo);	/* despierta el tx_thread (dispatch GLUE_FLAG_TXREQ) */
 	return NETDEV_TX_OK;
 }
 static const struct net_device_ops mtk_netdev_ops = {

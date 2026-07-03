@@ -158,6 +158,18 @@ kalIndicateStatusAndComplete(
 		wlanQueryInformation(prGlueInfo->prAdapter,
 			wlanoidQueryBssid, &arBssid[0], sizeof(arBssid), &bufLen);
 
+		/* FASE 5 FIX (visto con wpa -dd): wlanoidQueryBssid devuelve 00:00:00:00:00:00 si rCurrBssId
+		 * aun no esta poblado en el instante de la indicacion MEDIA_CONNECT -> caer al BSSID del target
+		 * BSS desc (el AP real). Sin esto wpa deriva la PTK con A2=00:00:00 y manda el EAPOL-Key M2 al
+		 * BSSID nulo -> el AP no lo recibe -> el 4-way nunca completa. */
+		if ((arBssid[0] | arBssid[1] | arBssid[2] |
+		     arBssid[3] | arBssid[4] | arBssid[5]) == 0) {
+			prBssDesc = wlanGetTargetBssDescByNetwork(
+				prGlueInfo->prAdapter, NETWORK_TYPE_AIS_INDEX);
+			if (prBssDesc != NULL)
+				COPY_MAC_ADDR(arBssid, prBssDesc->aucBSSID);
+		}
+
 		kalMemZero(&ssid, sizeof(ssid));
 		wlanQueryInformation(prGlueInfo->prAdapter,
 			wlanoidQuerySsid, &ssid, sizeof(ssid), &bufLen);
