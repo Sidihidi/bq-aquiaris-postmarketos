@@ -58,7 +58,6 @@
  * STP/WMT solo enciende la radio (func_on) y el rail RF (VCN33); el data-path va por el HIF. */
 extern bool mt6582_consys_ready;		/* el MCU del CONSYS corre y leyo chip-id 0x6582 */
 extern int  mt6582_consys_func_on(u8 type);	/* WMT func_on: 0=BT 1=FM 2=GPS 3=WIFI 4=WMT */
-extern int  mt6582_consys_func_off(u8 type);	/* WMT func_off (power-cycle diagnostico -> chip frio) */
 extern int  mt6582_consys_wifi_vcn33(bool on);	/* LDO RF del WiFi (VCN33_WIFI) */
 
 #define WMTDRV_TYPE_WIFI	3		/* type-id del func_on para la radio WiFi */
@@ -401,18 +400,11 @@ static int mtk_wlanProbe(struct platform_device *pdev)
 
 	dma_coerce_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
 
-	/* <1a.5> DIAG/CHIP-FRIO: el driver A ya arranco el FW al boot (chip CALIENTE) -> wlanAdapterStart
-	 * no re-inicia un FW vivo. Forzamos chip FRIO: func_off(WIFI)+VCN33 off, asentar, y el func_on de
-	 * abajo lo re-arranca en frio. (El flanco VCN33 off->on pierde la cal-RF -> el scan/TX no iran
-	 * finos, pero para el TEST del bring-up del FW da igual; esto es DIAGNOSTICO, se quita luego.) */
-	dev_info(&pdev->dev, "DIAG: power-cycle del consys WiFi (func_off+VCN33 off -> frio)\n");
-	{
-		int roff = mt6582_consys_func_off(WMTDRV_TYPE_WIFI);
-		int rvcn = mt6582_consys_wifi_vcn33(false);
-		dev_info(&pdev->dev, "DIAG: func_off(WIFI)=%d vcn33(false)=%d (si WLAN_READY sigue 1 en pre-DL, no enfrio)\n",
-			 roff, rvcn);
-	}
-	msleep(120);
+	/* NOTA sobre el chip frio: wlanAdapterStart re-descarga el FW y eso solo va limpio con el chip
+	 * FRIO (sin un FW vivo previo). Como el port es el UNICO driver WiFi (driver A deshabilitado),
+	 * al boot nadie ha descargado el FW -> chip frio nativo -> no hace falta power-cycle aqui.
+	 * (El reset del consys en runtime es inviable: VCN33 es regulator-always-on y cortarlo pierde
+	 * la RF-cal del boot; ver HANDOFF-MTWIFI-PORT-M1-DIAG-0703.md.) */
 
 	/* <1b> encender la radio WiFi por WMT (via btif). Deja el HIF accesible. */
 	ret = mt6582_consys_func_on(WMTDRV_TYPE_WIFI);
@@ -492,18 +484,17 @@ static int mtk_wlanProbe(struct platform_device *pdev)
 		prRegInfo->fgEnArpFilter = TRUE;
 
 		if (kalFirmwareImageMapping(prGlueInfo, &prFwBuffer, &u4FwSize) == NULL) {
-			dev_err(&pdev->dev, "DIAG: kalFirmwareImageMapping FALLO (fw no mapeado)\n");
+			dev_err(&pdev->dev, "firmware WIFI_RAM_CODE no mapeado\n");
 			i4Status = -EIO;
 		} else {
 			WLAN_STATUS st;
 
-			dev_info(&pdev->dev, "DIAG: FW mapeado OK (%u bytes) -> wlanAdapterStart...\n",
-				 (unsigned int)u4FwSize);
 			st = wlanAdapterStart(prAdapter, prRegInfo, prFwBuffer, u4FwSize);
-			dev_info(&pdev->dev, "DIAG: wlanAdapterStart status=0x%08x (0=SUCCESS)\n",
-				 (unsigned int)st);
-			if (st != WLAN_STATUS_SUCCESS)
+			if (st != WLAN_STATUS_SUCCESS) {
+				dev_err(&pdev->dev, "wlanAdapterStart fallo (0x%08x)\n",
+					(unsigned int)st);
 				i4Status = -EIO;
+			}
 			kalFirmwareImageUnmapping(prGlueInfo, NULL, prFwBuffer);
 		}
 		if (i4Status < 0)
@@ -665,11 +656,10 @@ static int __init mtk_mtwifi_init(void)
 	int _i;
 
 	sema_init(&g_halt_sem, 1);
-	/* DIAG: activar los DBGLOG del core (ERROR|WARN|STATE|EVENT|TRACE = 0x1F, sin LOUD/TEMP) para ver
-	 * el sub-paso EXACTO donde falla wlanAdapterStart (nicInitializeAdapter / Firmware download / ...). */
+	/* Log del core (DBGLOG) SOLO a nivel ERROR (bit0) — sin flood. Subir a 0x1F para depurar. */
 	for (_i = 0; _i < DBG_MODULE_NUM; _i++)
-		aucDebugModule[_i] = 0x1F;
-	pr_info("mtk_mtwifi: cargado (Fase 3 — probe real sobre consys MT6582; DBGLOG on)\n");
+		aucDebugModule[_i] = DBG_CLASS_ERROR;
+	pr_info("mtk_mtwifi: MT6582 full-MAC WiFi (port mt_wifi -> 7.0.12) cargado\n");
 	return platform_driver_register(&mtk_mtwifi_driver);
 }
 
