@@ -264,9 +264,14 @@ BOOL kalDevPortWrite(P_GLUE_INFO_T prGlueInfo, UINT_16 u2Port, UINT_16 u2Len,
 	 * En la 1a escritura, volcar la config del HIF para comparar con los valores buenos del driver A
 	 * (WHCR: MAX_HIF_RX_LEN_NUM bits4-7=0, RX_ENHANCE bit16=0, W_INT_CLR bit1=0). */
 	{ static u32 dw; if (dw++ < 12 && h->Dev) {
-		if (dw == 1)
-			dev_info(h->Dev, "DIAG HIF-cfg pre-DL: WHCR=0x%08x WHIER=0x%08x WHLPCR=0x%08x WHISR=0x%08x\n",
+		if (dw == 1) {
+			u32 wcir = hifrd(h, MCR_WCIR);
+			/* WCIR_WLAN_READY: si sigue a 1 aqui, el power-cycle NO enfrio el chip (FW vivo) -> la
+			 * re-descarga cuelga. =0 => chip frio y el cuelgue es otra cosa. */
+			dev_info(h->Dev, "DIAG pre-DL: WCIR=0x%08x (chip=0x%04x WLAN_READY=%d) WHCR=0x%08x WHIER=0x%08x WHLPCR=0x%08x WHISR=0x%08x\n",
+				 wcir, (u32)(wcir & 0xffff), !!(wcir & WCIR_WLAN_READY),
 				 hifrd(h, MCR_WHCR), hifrd(h, MCR_WHIER), hifrd(h, MCR_WHLPCR), hifrd(h, MCR_WHISR));
+		}
 		dev_info(h->Dev, "DIAG portW #%u port=0x%x len=%u tgt=%d PRE\n", dw, u2Port, u2Len, target);
 	} }
 	words = (u2Len + 3) / 4;

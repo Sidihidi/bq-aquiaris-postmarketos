@@ -40,7 +40,29 @@ Este confounder está en TODAS las tentativas por `insmod` (el driver A siempre 
 Descartado en el proceso: la ISR disparándose a mitad del burst (probé enmascarar el IRQ del HIF durante
 `wlanAdapterStart` — commit incluido, correcto vs driver A pero NO era el bloqueo de M1).
 
-## SIGUIENTE = Opción A (cold-boot, la definitiva)
+## RESET RUNTIME BLOQUEADO (probado 0703 PM) — el reset fiable es a nivel BOOT
+Instrumenté el power-cycle del probe + un dump de WCIR pre-descarga. Resultado en HW:
+```
+func_off(WIFI)=0   vcn33(false)=-5
+pre-DL: WCIR=0x00306582 (chip=0x6582 WLAN_READY=1) WHCR=0 WHIER=0xffffff0f WHLPCR=0x100 WHISR=0x13
+```
+**`func_off(WIFI)` devuelve OK pero WLAN_READY SIGUE A 1** → el WMT apaga la *función* WIFI pero
+**VCN33 `regulator-always-on` mantiene el MAC alimentado → el FW sigue vivo → la re-descarga cuelga.**
+Cortar VCN33 para enfriar de verdad está bloqueado: (a) `regulator_disable` falla (-EIO, always-on),
+(b) cortar VCN33 pierde la cal-RF que NO es re-emitible en runtime (lección driver A) → WLAN_READY nunca.
+**=> El reset de CONSYS en RUNTIME es físicamente inviable. El único chip frío+calibrado fiable es el del
+ARRANQUE** (bring_up_chip hace la RF-cal con VCN33 on, ANTES de cualquier descarga de FW).
+
+## SIGUIENTE (revisado) = chip frío por BOOT + depurar la corrupción de memoria
+Ruta fiable: que driver A **NO descargue el FW al boot** (deshabilitar su auto-bringup, o su binding) →
+el port descarga a un chip frío+calibrado (PROBADO: la escritura WTDR0 NO cuelga en ese caso). El bloqueo
+real que queda entonces es la **corrupción de memoria** tras el inicio de la descarga (segfaults, ramoops
+vaciado) → hace falta captura a prueba de corrupción (dmesg -w en vivo, YA usado) + depurar el overrun
+(candidatos: RX-aggregation del core stock sobre nuestro HIF PIO, o un buffer del path de descarga).
+GOTCHA: al deshabilitar driver A el móvil arranca sin WiFi; si el SD-boot crashea cae a boot INTERNO
+(driver A on) → reflashear SD tras tests.
+
+## (obsoleto) Opción A (cold-boot, la definitiva)
 Kernel con **driver A deshabilitado** → chip genuinamente frío al boot (nadie carga el FW) → nodo libre →
 `insmod` port → `wlanAdapterStart` descarga a chip frío → **debería completar = M1**.
 - Deshabilitar driver A: `CONFIG_MT6582_WIFI=n` (o vaciar su `of_device_id`) → rebuild zImage → flash → boot.

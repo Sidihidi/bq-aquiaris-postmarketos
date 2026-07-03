@@ -402,8 +402,12 @@ static int mtk_wlanProbe(struct platform_device *pdev)
 	 * abajo lo re-arranca en frio. (El flanco VCN33 off->on pierde la cal-RF -> el scan/TX no iran
 	 * finos, pero para el TEST del bring-up del FW da igual; esto es DIAGNOSTICO, se quita luego.) */
 	dev_info(&pdev->dev, "DIAG: power-cycle del consys WiFi (func_off+VCN33 off -> frio)\n");
-	mt6582_consys_func_off(WMTDRV_TYPE_WIFI);
-	mt6582_consys_wifi_vcn33(false);
+	{
+		int roff = mt6582_consys_func_off(WMTDRV_TYPE_WIFI);
+		int rvcn = mt6582_consys_wifi_vcn33(false);
+		dev_info(&pdev->dev, "DIAG: func_off(WIFI)=%d vcn33(false)=%d (si WLAN_READY sigue 1 en pre-DL, no enfrio)\n",
+			 roff, rvcn);
+	}
 	msleep(120);
 
 	/* <1b> encender la radio WiFi por WMT (via btif). Deja el HIF accesible. */
