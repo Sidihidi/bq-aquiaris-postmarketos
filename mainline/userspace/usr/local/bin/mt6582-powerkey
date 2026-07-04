@@ -21,6 +21,7 @@ import struct, glob, os, time, select, subprocess, pwd
 BL = "/sys/class/backlight/backlight"
 BR = BL + "/brightness"
 MX = BL + "/max_brightness"
+BLP = BL + "/bl_power"        # FB_BLANK: 0=encendido, 4=POWERDOWN. brightness=0 NO apaga este panel.
 KEY_POWER = 116
 EV_KEY = 1
 FMT = "llHHi"                 # input_event armv7 (32-bit): time(2*long)=8 + type,code(H,H) + value(i) = 16B
@@ -43,6 +44,27 @@ def read_int(p, d=0):
         return int(open(p).read().strip())
     except Exception:
         return d
+
+
+def set_blp(v):
+    try:
+        open(BLP, "w").write(str(v))
+    except Exception:
+        pass
+
+
+def screen_is_on():
+    return read_int(BLP, 0) == 0     # bl_power==0 => backlight alimentado (pantalla ON)
+
+
+def screen_off():
+    set_bl(0)                        # brillo 0 (belt-and-suspenders)
+    set_blp(4)                       # FB_BLANK_POWERDOWN -> backlight OFF de verdad
+
+
+def screen_on(level):
+    set_blp(0)                       # FB_BLANK_UNBLANK -> backlight ON
+    set_bl(level or read_int(MX, 10))
 
 
 def set_bl(v):
@@ -124,18 +146,19 @@ def main():
 
         if wait_release_or_long(fd):
             # PULSACION LARGA -> apagar
-            set_bl(saved or read_int(MX, 10))    # enciende el LCD como feedback
+            screen_on(saved)                     # enciende el LCD como feedback
             time.sleep(0.15)
             subprocess.run(["poweroff"])
         else:
-            # PULSACION CORTA -> toggle pantalla + bloqueo
-            cur = read_int(BR, 0)
-            if cur > 0:
-                saved = cur
-                set_bl(0)                        # LCD OFF
+            # PULSACION CORTA -> toggle pantalla (bl_power) + bloqueo
+            if screen_is_on():
+                cur = read_int(BR, 0)
+                if cur > 0:
+                    saved = cur                  # recordar el brillo para restaurarlo
+                screen_off()                     # backlight OFF de verdad (bl_power=4)
                 phosh_lock(True)                 # bloquear la sesion
             else:
-                set_bl(saved or read_int(MX, 10))  # LCD ON (Phosh muestra el lockscreen)
+                screen_on(saved)                 # backlight ON (Phosh muestra el lockscreen)
 
 
 if __name__ == "__main__":
