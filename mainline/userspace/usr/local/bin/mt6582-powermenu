@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+# mt6582-powermenu — "menu de apagado" del BQ krillin como NOTIFICACION con acciones.
+#
+# Phosh renderiza las acciones de una notificacion como BOTONES (GetCapabilities incluye 'actions'),
+# asi que esto muestra una notificacion con botones [Apagar] [Reiniciar] y espera a que el usuario
+# pulse uno. Imprime en stdout la accion elegida: "poweroff" | "reboot" | "cancel".
+#
+# Corre EN LA SESION (como el usuario de Phosh, con su DBUS_SESSION_BUS_ADDRESS) porque el bus de
+# notificaciones es el de la sesion. Lo lanza mt6582-powerkey en la pulsacion LARGA; ese (root) lee
+# esta salida y ejecuta poweroff/reboot (que necesitan root). Timeout de seguridad -> "cancel".
+
+import sys
+import gi
+gi.require_version("Gio", "2.0")
+gi.require_version("GLib", "2.0")
+from gi.repository import Gio, GLib
+
+TIMEOUT_MS = 30000
+result = {"action": "cancel"}
+loop = GLib.MainLoop()
+
+bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+
+# Notify(app_name, replaces_id, app_icon, summary, body, actions[], hints, expire_timeout)
+#   actions = pares (key, etiqueta): [key1, label1, key2, label2, ...]
+actions = ["poweroff", "Apagar", "reboot", "Reiniciar"]
+hints = {"urgency": GLib.Variant("y", 2)}          # critica -> Phosh la muestra prominente
+params = GLib.Variant("(susssasa{sv}i)", (
+    "Sistema", 0, "system-shutdown-symbolic",
+    "Apagar el telefono", "Elige una opcion",
+    actions, hints, TIMEOUT_MS))
+try:
+    ret = bus.call_sync("org.freedesktop.Notifications", "/org/freedesktop/Notifications",
+                        "org.freedesktop.Notifications", "Notify", params, None,
+                        Gio.DBusCallFlags.NONE, -1, None)
+    notif_id = ret.unpack()[0]
+except Exception:
+    print("cancel")
+    sys.exit(0)
+
+
+def on_signal(conn, sender, path, iface, signal, sparams):
+    p = sparams.unpack()
+    if not p or p[0] != notif_id:
+        return
+    if signal == "ActionInvoked":
+        result["action"] = p[1]        # "poweroff" | "reboot"
+        loop.quit()
+    elif signal == "NotificationClosed":
+        # cerrada sin pulsar accion (swipe / expira) -> cancelar
+        loop.quit()
+
+
+bus.signal_subscribe("org.freedesktop.Notifications", "org.freedesktop.Notifications",
+                     None, "/org/freedesktop/Notifications", None,
+                     Gio.DBusSignalFlags.NONE, on_signal)
+
+
+def _timeout():
+    loop.quit()
+    return False
+
+
+GLib.timeout_add(TIMEOUT_MS + 2000, _timeout)     # red de seguridad
+loop.run()
+print(result["action"])

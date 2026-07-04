@@ -129,6 +129,35 @@ def wait_release_or_long(fd):
         # val==2 (autorepeat) u otros: seguir esperando
 
 
+def power_menu():
+    """Menu de apagado: lanza el helper (notificacion con botones) EN LA SESION, lee la accion
+    elegida por stdout y la ejecuta como root (poweroff/reboot). 'cancel' -> no hace nada."""
+    screen_on(read_int(MX, 10))              # asegurar pantalla ON para ver el menu
+    e = phosh_env()
+    if not e:
+        subprocess.run(["poweroff"])          # sin sesion Phosh -> apagar directo (fallback)
+        return
+    bus, xdg, user = e
+    action = "cancel"
+    try:
+        r = subprocess.run(
+            ["su", user, "-s", "/bin/sh", "-c",
+             "export DBUS_SESSION_BUS_ADDRESS='%s'; export XDG_RUNTIME_DIR='%s'; "
+             "python3 /usr/local/bin/mt6582-powermenu" % (bus, xdg)],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            universal_newlines=True, timeout=45)
+        out = [l for l in (r.stdout or "").strip().splitlines() if l.strip()]
+        if out:
+            action = out[-1].strip()
+    except Exception:
+        action = "cancel"
+    if action == "poweroff":
+        subprocess.run(["poweroff"])
+    elif action == "reboot":
+        subprocess.run(["reboot"])
+    # cancel -> no hacer nada
+
+
 def main():
     ev = find_ev()
     while ev is None:                        # esperar a que el kernel registre el input
@@ -145,10 +174,8 @@ def main():
             continue                         # solo actuamos desde el PRESS
 
         if wait_release_or_long(fd):
-            # PULSACION LARGA -> apagar
-            screen_on(saved)                     # enciende el LCD como feedback
-            time.sleep(0.15)
-            subprocess.run(["poweroff"])
+            # PULSACION LARGA -> menu de apagado (notificacion con botones Apagar/Reiniciar)
+            power_menu()
         else:
             # PULSACION CORTA -> toggle pantalla (bl_power) + bloqueo
             if screen_is_on():
