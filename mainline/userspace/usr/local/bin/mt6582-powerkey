@@ -21,7 +21,9 @@ import struct, glob, os, time, select, subprocess, pwd
 BL = "/sys/class/backlight/backlight"
 BR = BL + "/brightness"
 MX = BL + "/max_brightness"
-BLP = BL + "/bl_power"        # FB_BLANK: 0=encendido, 4=POWERDOWN. brightness=0 NO apaga este panel.
+# El backlight lo maneja mt6582-backlight.py (PWM por /dev/mem). Apaga la pantalla SOLO si existe este
+# flag (pone el duty del PWM a 0); NO honra bl_power ni brightness=0. Crear/borrar el flag = off/on.
+SCREEN_OFF_FLAG = "/run/mt6582-screen-off"
 KEY_POWER = 116
 EV_KEY = 1
 FMT = "llHHi"                 # input_event armv7 (32-bit): time(2*long)=8 + type,code(H,H) + value(i) = 16B
@@ -46,25 +48,22 @@ def read_int(p, d=0):
         return d
 
 
-def set_blp(v):
+def screen_is_on():
+    return not os.path.exists(SCREEN_OFF_FLAG)   # el flag existe => backlight OFF
+
+
+def screen_off():
     try:
-        open(BLP, "w").write(str(v))
+        open(SCREEN_OFF_FLAG, "w").close()       # mt6582-backlight.py pone el PWM a 0
     except Exception:
         pass
 
 
-def screen_is_on():
-    return read_int(BLP, 0) == 0     # bl_power==0 => backlight alimentado (pantalla ON)
-
-
-def screen_off():
-    set_bl(0)                        # brillo 0 (belt-and-suspenders)
-    set_blp(4)                       # FB_BLANK_POWERDOWN -> backlight OFF de verdad
-
-
-def screen_on(level):
-    set_blp(0)                       # FB_BLANK_UNBLANK -> backlight ON
-    set_bl(level or read_int(MX, 10))
+def screen_on(level=None):
+    try:
+        os.remove(SCREEN_OFF_FLAG)               # mt6582-backlight.py restaura el brillo de /sys
+    except Exception:
+        pass
 
 
 def set_bl(v):
