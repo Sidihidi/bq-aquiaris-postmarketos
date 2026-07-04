@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
-# mt6582-powerkey — botón de encendido del BQ Aquaris E4.5 (krillin).
+# mt6582-powerkey — boton de encendido del BQ Aquaris E4.5 (krillin), comportamiento "movil normal":
 #
-# Lee KEY_POWER del DRIVER KERNEL (mtk-pmic-keys, /dev/input/eventN) y hace toggle
-# del LCD (PWM backlight a 0 / restaurar). Pulsación corta = pantalla off/on.
+#   Pulsacion CORTA (< LONG s):
+#       - pantalla ENCENDIDA -> BLOQUEAR (lockscreen de Phosh) + apagar el LCD.
+#       - pantalla APAGADA   -> encender el LCD (Phosh muestra el lockscreen para desbloquear).
+#   Pulsacion LARGA (>= LONG s):
+#       - APAGAR el movil (poweroff).
 #
-# Sustituye al daemon viejo que SONDEABA el registro INT0 del PMIC (bit 0x20) por
-# pwrap y lo limpiaba: eso se PELEABA con el driver kernel (que ahora posee ese IRQ)
-# y dejaba el botón flaky. Además, aquí sí APAGAMOS el backlight (bug: "bloquear
-# dejaba el LCD encendido" — Phosh bloquea la sesión pero el PWM del backlight, que
-# es un daemon aparte, no se apagaba). read() bloqueante -> 0 CPU en reposo.
+# Lee KEY_POWER (116) del driver kernel mtk-pmic-keys (/dev/input/eventN). El bloqueo se hace por el
+# D-Bus de la SESION de Phosh (org.gnome.ScreenSaver.SetActive), alcanzada leyendo el
+# DBUS_SESSION_BUS_ADDRESS del proceso phosh (corre en un dbus-run-session aislado: elogind no ve la
+# sesion, por eso no vale loginctl). Corre como root desde /etc/local.d; read()/select() bloqueante = 0 CPU.
 #
-# NOTA: esto solo apaga/enciende el LCD. El bloqueo de sesión / lockscreen lo hace
-# Phosh por su cuenta. Si algún día se quiere pulsación-larga = menú de apagado,
-# ver docs/bitacora (opción "Phosh nativo": elogind + gsd-power).
+# Historia: el daemon viejo solo hacia toggle del backlight en el press y no bloqueaba; y antes de eso
+# uno que sondeaba el registro INT0 del PMIC por pwrap se peleaba con el driver kernel. Este usa el
+# input del kernel y coordina el bloqueo con Phosh.
 
-import struct, glob, os, time
+import struct, glob, os, time, select, subprocess, pwd
 
 BL = "/sys/class/backlight/backlight"
 BR = BL + "/brightness"
@@ -23,6 +25,7 @@ KEY_POWER = 116
 EV_KEY = 1
 FMT = "llHHi"                 # input_event armv7 (32-bit): time(2*long)=8 + type,code(H,H) + value(i) = 16B
 SZ = struct.calcsize(FMT)
+LONG = 1.5                    # s: umbral corto/largo (largo = apagar)
 
 
 def find_ev():
@@ -49,9 +52,64 @@ def set_bl(v):
         pass
 
 
+def phosh_env():
+    """(bus, xdg_runtime, user) del proceso phosh, o None."""
+    for p in glob.glob("/proc/[0-9]*"):
+        try:
+            comm = open(p + "/comm").read().strip()
+            cmd = open(p + "/cmdline").read()
+            if comm != "phosh" and "libexec/phosh" not in cmd:
+                continue
+            env = dict(x.split("=", 1) for x in open(p + "/environ").read().split("\0") if "=" in x)
+            bus = env.get("DBUS_SESSION_BUS_ADDRESS")
+            if not bus:
+                continue
+            uid = os.stat(p).st_uid
+            return bus, env.get("XDG_RUNTIME_DIR", "/run/user/%d" % uid), pwd.getpwuid(uid).pw_name
+        except Exception:
+            pass
+    return None
+
+
+def phosh_lock(active):
+    e = phosh_env()
+    if not e:
+        return
+    bus, xdg, user = e
+    g = ("gdbus call --session --dest org.gnome.ScreenSaver "
+         "--object-path /org/gnome/ScreenSaver "
+         "--method org.gnome.ScreenSaver.SetActive %s") % ("true" if active else "false")
+    try:
+        subprocess.run(
+            ["su", user, "-s", "/bin/sh", "-c",
+             "export DBUS_SESSION_BUS_ADDRESS='%s'; export XDG_RUNTIME_DIR='%s'; %s" % (bus, xdg, g)],
+            timeout=5)
+    except Exception:
+        pass
+
+
+def wait_release_or_long(fd):
+    """Tras un press, espera el release (val==0) hasta LONG s. True = pulsacion LARGA."""
+    t0 = time.monotonic()
+    while True:
+        rem = LONG - (time.monotonic() - t0)
+        if rem <= 0:
+            return True                      # sigue pulsado tras LONG s -> largo
+        r, _, _ = select.select([fd], [], [], rem)
+        if not r:
+            return True
+        d = fd.read(SZ)
+        if not d or len(d) < SZ:
+            continue
+        _, _, typ, code, val = struct.unpack(FMT, d)
+        if typ == EV_KEY and code == KEY_POWER and val == 0:
+            return False                     # release antes de LONG -> corto
+        # val==2 (autorepeat) u otros: seguir esperando
+
+
 def main():
     ev = find_ev()
-    while ev is None:                       # esperar a que el driver kernel registre el input
+    while ev is None:                        # esperar a que el kernel registre el input
         time.sleep(2)
         ev = find_ev()
     saved = read_int(MX, 10) or 10
@@ -61,13 +119,23 @@ def main():
         if not d or len(d) < SZ:
             continue
         _, _, typ, code, val = struct.unpack(FMT, d)
-        if typ == EV_KEY and code == KEY_POWER and val == 1:   # solo el press
+        if typ != EV_KEY or code != KEY_POWER or val != 1:
+            continue                         # solo actuamos desde el PRESS
+
+        if wait_release_or_long(fd):
+            # PULSACION LARGA -> apagar
+            set_bl(saved or read_int(MX, 10))    # enciende el LCD como feedback
+            time.sleep(0.15)
+            subprocess.run(["poweroff"])
+        else:
+            # PULSACION CORTA -> toggle pantalla + bloqueo
             cur = read_int(BR, 0)
             if cur > 0:
                 saved = cur
-                set_bl(0)                    # LCD OFF
+                set_bl(0)                        # LCD OFF
+                phosh_lock(True)                 # bloquear la sesion
             else:
-                set_bl(saved or read_int(MX, 10))   # LCD ON
+                set_bl(saved or read_int(MX, 10))  # LCD ON (Phosh muestra el lockscreen)
 
 
 if __name__ == "__main__":
