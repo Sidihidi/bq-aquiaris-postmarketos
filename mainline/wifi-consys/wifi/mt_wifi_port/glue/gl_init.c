@@ -384,9 +384,11 @@ static void wlanNetDestroy(struct wireless_dev *prWdev)
 }
 
 /* =======================================================================================
- *  wlanProbe — PORTADO del stock (2913). glBusInit/func_on-SDIO -> consys de nuestro driver A.
+ *  wlanProbe_bringup — la bring-up REAL (portada del stock 2913). La invoca un delayed_work
+ *  con reintentos (mtk_wlanProbe de abajo), porque el WMT/btif levanta el consys ~28s tras el
+ *  boot y func_on(WIFI) falla (-EIO) antes de eso. Devuelve 0 = OK, !=0 = reintentar.
  * ======================================================================================= */
-static int mtk_wlanProbe(struct platform_device *pdev)
+static int mtk_wlanProbe_bringup(struct platform_device *pdev)
 {
 	struct wireless_dev *prWdev = NULL;
 	P_GLUE_INFO_T prGlueInfo = NULL;
@@ -573,6 +575,38 @@ err_funcoff:
 	return i4Status;
 }
 
+/* --- bring-up DIFERIDA: el WMT/btif levanta el consys ~28s tras el boot; func_on(WIFI) falla
+ *     (-EIO) antes. Diferimos la bring-up a un delayed_work con reintentos (patron del
+ *     auto_bringup del driver A) en vez de fallar el probe -> wlan0 aparece sola al arrancar. --- */
+static struct platform_device *g_bringup_pdev;
+static struct delayed_work      g_bringup_work;
+static int                      g_bringup_tries;
+
+static void mtk_bringup_work_fn(struct work_struct *w)
+{
+	int ret = mtk_wlanProbe_bringup(g_bringup_pdev);
+
+	if (ret) {
+		if (++g_bringup_tries < 40)
+			schedule_delayed_work(&g_bringup_work, msecs_to_jiffies(3000));
+		else
+			dev_err(&g_bringup_pdev->dev,
+				"bring-up abandonada tras %d intentos (WMT/func_on nunca listo)\n",
+				g_bringup_tries);
+	}
+}
+
+static int mtk_wlanProbe(struct platform_device *pdev)
+{
+	g_bringup_pdev  = pdev;
+	g_bringup_tries = 0;
+	INIT_DELAYED_WORK(&g_bringup_work, mtk_bringup_work_fn);
+	/* 10s inicial (da tiempo al btif a parchear+levantar el consys), luego reintenta cada 3s. */
+	schedule_delayed_work(&g_bringup_work, msecs_to_jiffies(10000));
+	dev_info(&pdev->dev, "probe: bring-up diferida al WMT (delayed_work con reintentos)\n");
+	return 0;
+}
+
 /* =======================================================================================
  *  wlanRemove — PORTADO del stock (3232), dieted STA-only.
  * ======================================================================================= */
@@ -581,6 +615,8 @@ static void mtk_wlanRemove(struct platform_device *pdev)	/* 7.0.12: remove devue
 	struct wireless_dev *prWdev = platform_get_drvdata(pdev);
 	P_GLUE_INFO_T prGlueInfo;
 	P_ADAPTER_T prAdapter;
+
+	cancel_delayed_work_sync(&g_bringup_work);	/* parar los reintentos de bring-up */
 
 	if (!prWdev)
 		return;
