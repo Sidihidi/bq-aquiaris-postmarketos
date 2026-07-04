@@ -26,9 +26,15 @@ estable en el kernel mainline** (linux-7.0.12, postmarketOS). Vía: el **port de
 - **`mt6582-wifi.c` (driver A) = FALLBACK deshabilitado.** Se conserva conmutable por Kconfig (descomentar
   `obj-y += mt6582-wifi.o` + `CONFIG_MTK_MTWIFI=n`) por si hiciera falta revertir. NO se desarrolla más.
 
+## Connect por la GUI de Phosh/SXMO — RESUELTO (no era el driver)
+Síntoma: la GUI escaneaba redes pero no conectaba (el `nmcli` CLI SÍ conectaba). Causa: la regla polkit
+`50-org.freedesktop.NetworkManager.rules` autoriza el control de NM a `subject.isInGroup("netdev")`, pero
+el usuario de la sesión (`sxmo`) **no estaba en `netdev`** (sí en wheel/audio/input/video...) → el connect
+de la GUI se denegaba por polkit. **Fix: `addgroup sxmo netdev`** (aplica al próximo login/reboot de la
+sesión). Además la conexión guardada se puso a **`connection.autoconnect yes` + permisos all-users**, así
+el WiFi sube solo al boot sin depender del connect manual de la GUI. NADA de esto es del driver.
+
 ## Pendiente (no bloqueante)
-- **Connect por la GUI de Phosh**: escanea redes pero no completa el connect (el `nmcli` CLI SÍ conecta →
-  es tema del agente de secretos / perfil de la GUI, NO del driver). En investigación.
 - Estabilidad avanzada: roaming, suspend/resume, sesiones largas; TX-power/rate finos.
 
 ## Docs de la saga
