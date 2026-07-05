@@ -28,14 +28,17 @@ la foto completa: qué está al 100%, qué está a medias, y qué falta — con 
 | **Botón: fluidez** | El lock/wake tarda ~1-2s (cada acción = `su`+gdbus nuevos) | Daemon-hijo persistente EN la sesión (socket) para latencia ~0; debounce fino |
 | **Bloqueo por inactividad** | Con el parche no-DPMS, el idle-blank de phosh ya no oscurece (solo marca estado); idle-delay dejado a 0 | Mini-listener de `ActiveChanged`→flag del backlight → idle-off completo |
 | **Vibración** | `regulator-haptic` existe (event2) | Cablear con feedbackd/phosh y validar |
+| **Vídeo/YouTube** | ✅ FUNCIONA (0705): `mpv <url>` o **Livi** (GUI móvil) reproducen YouTube 360p h264 fluido (yt-dlp + nodejs + gst completo instalados; captura de prueba verificada). SIN SONIDO hasta que el driver de audio esté. El player web de YouTube en Epiphany sigue siendo demasiado pesado para esta CPU — usar Livi/mpv | Al llegar el audio: quitar `--no-audio` y validar A/V sync |
 
 ## ❌ PENDIENTE (por portear/implementar)
 
 En orden de ataque sugerido (impacto/dificultad):
 
-1. **Audio (ALSA para MT6582-AFE)** — LA gran pieza restante de "teléfono". Hoy `callaudiod: No
-   suitable card found`. Sin audio no hay llamadas ni multimedia. Port del downstream
-   (`~/mainline/downstream/sound/soc/mediatek/`) o driver mtk-afe mainline como base.
+1. **Audio (ALSA para MT6582-AFE)** — EN CURSO (0705): validación HW completada — INFRA_AUDIO ya
+   encendido por LK, AFE @0x11220000 lee/escribe sin colgar, PDN_AFE/I2S=0 de fábrica, IRQ=GIC_SPI
+   104 confirmado. Esqueleto Fase A en `sound/soc/mediatek/mt6582/` (árbol Pi). Siguiente: PCM DL1
+   + IRQ + nodo DT (Fase A.2), luego codec ANA por pwrap (Fase B) y machine driver (C).
+   Plan/estado: `mainline/audio/HANDOFF-AUDIO-PORT-0702.md`.
 2. **Suspend/resume** — bloquea la autonomía real. Hoy `enable-suspend false`. Requiere validar
    suspend de: WiFi (port), consys/BT, panel, pwrap. Tocará el driver WiFi (suspend hooks).
 3. **Módem 2G/3G (llamadas/SMS/datos)** — el hueso más gordo (CCCI/EEMCS del downstream +

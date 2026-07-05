@@ -55,3 +55,26 @@ devmem 11220000 <val>      # ¿se puede poner AFE_EN? releer
 *Sesión Mac, 2026-07-02. Mapa por subagente Explore (afc49e8) con spot-checks manuales de los datos
 load-bearing (base AFE ✓, GPIO118 ✓, power_init ✓; IRQ pendiente). Siguiente: validar reloj AFE en
 HW y completar Fase A.*
+
+---
+
+## ✅ VALIDACIÓN HW COMPLETADA (2026-07-05) — riesgo nº1 (clocks) DESPEJADO
+
+Ejecutada en el móvil (kernel #236, uptime estable):
+- **IRQ CONFIRMADO**: `AudDrv_Kernel.c:127 → HW_AFE_MCU_IRQ_LINE (104+32)` = **GIC_SPI 104** (el
+  dato del agente era correcto).
+- **Cadena de relojes mapeada**: gate `MT_CG_INFRA_AUDIO` = **bit 5 de INFRA_PDN_STA @0x10001048**
+  (SET 0x1040 / CLR 0x1044); gates locales en `AUDIO_TOP_CON0 @0x11220000`: PDN_AFE=bit2,
+  PDN_I2S=bit6 (headers del downstream: `AudDrv_Afe.h:594-596`, `mt_clkmgr.h:145`).
+- **Medido en HW**: `INFRA_PDN_STA = 0x0` → **INFRA_AUDIO ya viene ENCENDIDO del LK** (mismo patrón
+  que display/AUXADC; `clk_ignore_unused` lo preserva). `AUDIO_TOP_CON0 = 0x80394038` → **PDN_AFE=0
+  y PDN_I2S=0: el AFE está alimentado y sin gatear de fábrica**. Lecturas Y escrituras al bloque
+  responden sin colgar el bus (I2S_CON=0x0, IRQ_MCU_CON=0x0, MEMIF_PBUF=0xff0000ff — valores sanos).
+- **Implicación**: la Fase A puede hacer probe+ioremap+register-bang sin bring-up de clocks propio
+  (basta un `clocks`-menos DT node o fixed-clock dummy). El esqueleto
+  `sound/soc/mediatek/mt6582/` del árbol de la Pi es el punto de partida.
+
+**SIGUIENTE (Fase A.2)**: completar `mt6582-afe-pcm.c`: PCM DL1 (BASE/CUR/END @0x40/44/48),
+IRQ MCU (CON @0x3A0, CNT1 @0x3AC, GIC_SPI 104), formato del buffer, `snd_pcm_hardware`, nodo DT
+`audio@11220000`. Criterio: `/proc/asound/cards` muestra la tarjeta y `aplay` corre sin XRUN
+(aún sin sonido audible hasta Fase B, el codec ANA).
