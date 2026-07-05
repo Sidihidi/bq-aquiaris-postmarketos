@@ -1,0 +1,10 @@
+#!/bin/sh
+# Restaura las host-keys persistentes si faltan al boot (evita el ssh-keygen flaky que tumba sshd).
+# v2: la version anterior era un NO-OP — las $vars se evaporaron en el deploy (heredoc sin quotear)
+# y quedo '[ -e "" ] || continue', que salta siempre. Corregido.
+for k in /etc/ssh-keys-persist/ssh_host_*; do
+  [ -e "$k" ] || continue
+  b=${k##*/}
+  [ -f "/etc/ssh/$b" ] || cp -a "$k" "/etc/ssh/$b"
+done
+chmod 600 /etc/ssh/ssh_host_*key 2>/dev/null

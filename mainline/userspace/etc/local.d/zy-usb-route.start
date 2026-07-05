@@ -1,0 +1,13 @@
+#!/bin/sh
+# Internet por el tethering USB a la Pi (NAT en la Pi @172.16.42.2).
+# Espera a usb0 y fija ruta default + DNS. Solo aplica con esta Pi conectada.
+# v2: en BACKGROUND — antes esperaba hasta 15s en serie y retrasaba toda la cadena local.d.
+(
+  i=0
+  while [ $i -lt 30 ]; do
+    ip addr show usb0 2>/dev/null | grep -q "172.16.42.1" && break
+    sleep 1; i=$((i + 1))
+  done
+  ip route replace default via 172.16.42.2 2>/dev/null
+  grep -q "8.8.8.8" /etc/resolv.conf 2>/dev/null || echo "nameserver 8.8.8.8" >> /etc/resolv.conf
+) &

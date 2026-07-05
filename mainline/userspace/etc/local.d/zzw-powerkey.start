@@ -1,0 +1,8 @@
+#!/bin/sh
+# power key del MT6323 -> KEY_POWER (mt6582-powerkey). HandlePowerKey=ignore en logind.conf.
+# v2: el sleep 8 va en BACKGROUND — antes retrasaba 8s en serie el resto de la cadena (Phosh).
+(
+  sleep 8
+  start-stop-daemon --start --background --make-pidfile --pidfile /run/mt6582-powerkey.pid \
+    --exec /usr/bin/python3 -- /usr/local/bin/mt6582-powerkey
+) &

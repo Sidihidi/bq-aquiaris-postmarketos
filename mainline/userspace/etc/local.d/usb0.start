@@ -1,0 +1,24 @@
+#!/bin/sh
+# usb0 (gadget g_ether) = red de RESCATE por USB a la Pi. Sin esto no hay SSH al movil.
+# v2: antes era un ifconfig one-shot; si fallaba ese instante, el movil quedaba inaccesible
+# ("No route to host") hasta power-cycle. Ahora: reintenta hasta ponerla y VIGILA 10 min
+# re-poniendo IP+link si se pierden. Todo en background (no bloquea la cadena local.d).
+(
+  i=0
+  while [ $i -lt 30 ]; do
+    ip link set usb0 up 2>/dev/null
+    ip addr show usb0 2>/dev/null | grep -q "172.16.42.1" && break
+    ip addr add 172.16.42.1/24 dev usb0 2>/dev/null
+    sleep 2; i=$((i + 1))
+  done
+  # guardia: durante los primeros 10 min re-asegurar link+IP cada 10s
+  j=0
+  while [ $j -lt 60 ]; do
+    if ! ip addr show usb0 2>/dev/null | grep -q "172.16.42.1"; then
+      ip link set usb0 up 2>/dev/null
+      ip addr add 172.16.42.1/24 dev usb0 2>/dev/null
+      logger -t usb0-guard "IP de usb0 re-puesta" 2>/dev/null
+    fi
+    sleep 10; j=$((j + 1))
+  done
+) &

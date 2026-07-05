@@ -1,0 +1,17 @@
+#!/bin/sh
+# Re-guarda una semilla ACREDITABLE del RNG en cuanto el crng este inicializado.
+#
+# Por que: seedrng (openrc, runlevel boot) carga y acredita seed.credit al arrancar, y en ese
+# momento re-guarda la semilla para el siguiente boot. Pero si la semilla previa faltaba o era
+# no-acreditable, en el momento del re-guardado el crng AUN no esta inicializado -> guarda otra
+# no-acreditable -> TODOS los boots siguientes tardan ~230s en "crng init done" y todo lo que usa
+# getrandom() (sshd, ssh-keygen, wpa_supplicant) se bloquea minutos. La cadena solo se auto-repara
+# con un apagado LIMPIO (stop() del servicio) — y este movil se apaga en sucio a menudo.
+#
+# Este script cierra el ciclo sin depender del apagado: head -c1 /dev/random BLOQUEA exactamente
+# hasta crng-init (kernel >=5.6) y entonces re-guarda una semilla ya acreditable.
+(
+  head -c1 /dev/random >/dev/null 2>&1
+  /usr/libexec/rc/sbin/seedrng >/dev/null 2>&1
+  logger -t rng-resave "semilla acreditable re-guardada tras crng init" 2>/dev/null
+) &
