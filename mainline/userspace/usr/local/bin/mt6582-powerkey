@@ -82,15 +82,12 @@ def screen_on(level=None):
         os.remove(SCREEN_OFF_FLAG)               # mt6582-backlight.py restaura el brillo de /sys
     except Exception:
         pass
-    # Despertar = panel On + sesion DESBLOQUEADA (a proposito). Medido 0705: phosh funde el
-    # panel al bloquear y NO hay forma externa de "despertar al lockscreen": wlr-randr --on
-    # (mode-set) tira el shield; wlopm no puede (phosh posee el control output-power en
-    # exclusiva); re-asertar el lock re-funde a Off; el tactil inyectado no despierta.
-    # Como sxmo no tiene PIN (lockscreen = swipe, sin seguridad real), despertar directo a la
-    # sesion es equivalente. El fix de verdad = registrar la sesion en elogind (PAM/greetd)
-    # para que phosh maneje el boton nativo — pendiente.
-    phosh_lock(False)
-    output_on()                                  # forzar el panel DRM (unico wake que funciona)
+    # Despertar = quitar el flag (el backlight vuelve) y LISTO: phosh esta parcheado para
+    # NO apagar nunca el panel (monitor-manager ignora POWER_SAVE_OFF, 0705), asi que el
+    # lockscreen sigue renderizado y al volver la luz se ve — bloqueado, como un movil normal.
+    # output_on() queda solo como red de seguridad por si algo dejo el dpms en Off
+    # (p.ej. un phosh sin el parche); wlr-randr tira el shield, por eso solo si hace falta.
+    output_on()
 
 
 def phosh_env():
@@ -142,9 +139,19 @@ def output_on():
 
 
 def phosh_lock(active):
-    run_in_session("gdbus call --session --dest org.gnome.ScreenSaver "
-                   "--object-path /org/gnome/ScreenSaver "
-                   "--method org.gnome.ScreenSaver.SetActive %s" % ("true" if active else "false"))
+    # BLOQUEAR: metodo Lock (fuerza el lockscreen via lockscreen-manager, INDEPENDIENTE del
+    # gsetting lock-enabled que suele estar en false; SetActive(true) solo hace blank, no bloquea
+    # — ESE era el bug de "apaga pero no bloquea"). Verificado con grim 0705: Lock muestra el
+    # lockscreen (reloj + "Slide up to unlock") sobre el panel encendido (parche monitor.c).
+    # DESBLOQUEAR: SetActive(false) baja el screensaver (el usuario normalmente desliza).
+    if active:
+        run_in_session("gdbus call --session --dest org.gnome.ScreenSaver "
+                       "--object-path /org/gnome/ScreenSaver "
+                       "--method org.gnome.ScreenSaver.Lock")
+    else:
+        run_in_session("gdbus call --session --dest org.gnome.ScreenSaver "
+                       "--object-path /org/gnome/ScreenSaver "
+                       "--method org.gnome.ScreenSaver.SetActive false")
 
 
 def wait_release_or_long(fd):

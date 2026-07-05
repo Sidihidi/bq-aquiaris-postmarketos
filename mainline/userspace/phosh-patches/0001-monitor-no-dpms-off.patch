@@ -1,0 +1,19 @@
+--- /root/build/phosh/src/monitor/monitor.c.bak-pre-noblank-0705	2026-07-05 20:39:00.541042218 +0000
++++ /root/build/phosh/src/monitor/monitor.c	2026-07-05 20:39:00.542454812 +0000
+@@ -638,7 +638,15 @@
+     g_return_if_reached ();
+   }
+ 
+-  zwlr_output_power_v1_set_mode (self->wlr_output_power, wl_mode);
++  /* krillin: no mandar DPMS real a phoc (apagar el panel rompe el unico wake
++   * externo posible; la oscuridad la pone el daemon del backlight). Actualizamos
++   * SOLO el estado interno -> el tracking de "screensaver active" y el lockscreen
++   * de phosh funcionan igual, pero el panel sigue fisicamente encendido. 2026-07-05. */
++  (void) wl_mode;
++  if (self->power_mode != mode) {
++    self->power_mode = mode;
++    g_object_notify_by_pspec (G_OBJECT (self), props[PHOSH_MONITOR_PROP_POWER_MODE]);
++  }
+ }
+ 
+ /**
