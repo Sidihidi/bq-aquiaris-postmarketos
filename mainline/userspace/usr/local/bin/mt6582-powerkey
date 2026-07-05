@@ -2,33 +2,41 @@
 # mt6582-powerkey — boton de encendido del BQ Aquaris E4.5 (krillin), comportamiento "movil normal":
 #
 #   Pulsacion CORTA (< LONG s):
-#       - pantalla ENCENDIDA -> BLOQUEAR (lockscreen de Phosh) + apagar el LCD.
-#       - pantalla APAGADA   -> encender el LCD (Phosh muestra el lockscreen para desbloquear).
+#       - pantalla ENCENDIDA -> BLOQUEAR (lockscreen de Phosh) + apagar el LCD (PWM a 0).
+#       - pantalla APAGADA   -> encender el LCD + FORZAR el panel DRM a On (wlr-randr).
 #   Pulsacion LARGA (>= LONG s):
-#       - APAGAR el movil (poweroff).
+#       - menu de apagado (notificacion con botones; si hay lockscreen, pide desbloquear antes).
+#
+# v3 — DUEÑO UNICO del boton (fix del "no vuelve la GUI"):
+#   * EVIOCGRAB en el evdev: Phosh/phoc/gsd-power YA NO ven KEY_POWER. Antes habia 3 actores
+#     (este daemon, phosh y gsd-power con power-button-action=suspend) pisandose: phosh apagaba
+#     el panel (dpms Off) al primer toque y NUNCA lo re-encendia al segundo (su inhibit de logind
+#     falla con AccessDenied en esta sesion aislada) -> backlight encendido con panel negro.
+#     Medido con press-monitor 2026-07-05: flag/PWM correctos, dpms Off de un solo sentido.
+#   * screen_on() ademas fuerza el output con wlr-randr --on (por si phosh apago el panel por su
+#     cuenta, p.ej. el fade del lockscreen).
+#   * gsd-power: power-button-action=nothing (dconf, persistente) — puesto el 2026-07-05.
 #
 # Lee KEY_POWER (116) del driver kernel mtk-pmic-keys (/dev/input/eventN). El bloqueo se hace por el
 # D-Bus de la SESION de Phosh (org.gnome.ScreenSaver.SetActive), alcanzada leyendo el
 # DBUS_SESSION_BUS_ADDRESS del proceso phosh (corre en un dbus-run-session aislado: elogind no ve la
-# sesion, por eso no vale loginctl). Corre como root desde /etc/local.d; read()/select() bloqueante = 0 CPU.
-#
-# Historia: el daemon viejo solo hacia toggle del backlight en el press y no bloqueaba; y antes de eso
-# uno que sondeaba el registro INT0 del PMIC por pwrap se peleaba con el driver kernel. Este usa el
-# input del kernel y coordina el bloqueo con Phosh.
+# sesion, por eso no vale loginctl). Corre como root desde /etc/local.d; read() bloqueante = 0 CPU.
 
-import struct, glob, os, time, select, subprocess, pwd
+import struct, glob, os, time, select, subprocess, pwd, fcntl
 
 BL = "/sys/class/backlight/backlight"
 BR = BL + "/brightness"
 MX = BL + "/max_brightness"
-# El backlight lo maneja mt6582-backlight.py (PWM por /dev/mem). Apaga la pantalla SOLO si existe este
-# flag (pone el duty del PWM a 0); NO honra bl_power ni brightness=0. Crear/borrar el flag = off/on.
+# El backlight lo maneja mt6582-backlight.py (PWM por /dev/mem). Apaga la pantalla SOLO si existe
+# este flag (duty del PWM a 0); NO honra bl_power ni brightness=0. Crear/borrar el flag = off/on.
 SCREEN_OFF_FLAG = "/run/mt6582-screen-off"
 KEY_POWER = 116
 EV_KEY = 1
 FMT = "llHHi"                 # input_event armv7 (32-bit): time(2*long)=8 + type,code(H,H) + value(i) = 16B
 SZ = struct.calcsize(FMT)
-LONG = 1.5                    # s: umbral corto/largo (largo = apagar)
+LONG = 1.5                    # s: umbral corto/largo
+DEBOUNCE = 0.35               # s: ignorar pulsaciones-metralleta
+EVIOCGRAB = 0x40044590        # _IOW('E', 0x90, int)
 
 
 def find_ev():
@@ -64,17 +72,11 @@ def screen_on(level=None):
         os.remove(SCREEN_OFF_FLAG)               # mt6582-backlight.py restaura el brillo de /sys
     except Exception:
         pass
-
-
-def set_bl(v):
-    try:
-        open(BR, "w").write(str(v))
-    except Exception:
-        pass
+    output_on()                                  # y forzar el panel DRM por si phosh lo apago
 
 
 def phosh_env():
-    """(bus, xdg_runtime, user) del proceso phosh, o None."""
+    """(bus, xdg_runtime, user, wayland_display) del proceso phosh, o None."""
     for p in glob.glob("/proc/[0-9]*"):
         try:
             comm = open(p + "/comm").read().strip()
@@ -86,27 +88,38 @@ def phosh_env():
             if not bus:
                 continue
             uid = os.stat(p).st_uid
-            return bus, env.get("XDG_RUNTIME_DIR", "/run/user/%d" % uid), pwd.getpwuid(uid).pw_name
+            return (bus, env.get("XDG_RUNTIME_DIR", "/run/user/%d" % uid),
+                    pwd.getpwuid(uid).pw_name, env.get("WAYLAND_DISPLAY", "wayland-0"))
         except Exception:
             pass
     return None
 
 
-def phosh_lock(active):
+def run_in_session(cmdline, timeout=6, capture=False):
+    """Ejecuta cmdline como el usuario de la sesion Phosh con su bus/wayland. None si no hay sesion."""
     e = phosh_env()
     if not e:
-        return
-    bus, xdg, user = e
-    g = ("gdbus call --session --dest org.gnome.ScreenSaver "
-         "--object-path /org/gnome/ScreenSaver "
-         "--method org.gnome.ScreenSaver.SetActive %s") % ("true" if active else "false")
+        return None
+    bus, xdg, user, wld = e
+    envs = ("export DBUS_SESSION_BUS_ADDRESS='%s' XDG_RUNTIME_DIR='%s' WAYLAND_DISPLAY='%s'; "
+            % (bus, xdg, wld))
     try:
-        subprocess.run(
-            ["su", user, "-s", "/bin/sh", "-c",
-             "export DBUS_SESSION_BUS_ADDRESS='%s'; export XDG_RUNTIME_DIR='%s'; %s" % (bus, xdg, g)],
-            timeout=5)
+        return subprocess.run(["su", user, "-s", "/bin/sh", "-c", envs + cmdline],
+                              stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, universal_newlines=True, timeout=timeout)
     except Exception:
-        pass
+        return None
+
+
+def output_on():
+    # re-enciende el panel DRM (phosh lo apaga en el fade del lockscreen y no lo devuelve)
+    run_in_session("wlr-randr --output DSI-1 --on")
+
+
+def phosh_lock(active):
+    run_in_session("gdbus call --session --dest org.gnome.ScreenSaver "
+                   "--object-path /org/gnome/ScreenSaver "
+                   "--method org.gnome.ScreenSaver.SetActive %s" % ("true" if active else "false"))
 
 
 def wait_release_or_long(fd):
@@ -115,7 +128,7 @@ def wait_release_or_long(fd):
     while True:
         rem = LONG - (time.monotonic() - t0)
         if rem <= 0:
-            return True                      # sigue pulsado tras LONG s -> largo
+            return True
         r, _, _ = select.select([fd], [], [], rem)
         if not r:
             return True
@@ -124,37 +137,25 @@ def wait_release_or_long(fd):
             continue
         _, _, typ, code, val = struct.unpack(FMT, d)
         if typ == EV_KEY and code == KEY_POWER and val == 0:
-            return False                     # release antes de LONG -> corto
+            return False
         # val==2 (autorepeat) u otros: seguir esperando
 
 
 def power_menu():
-    """Menu de apagado: lanza el helper (notificacion con botones) EN LA SESION, lee la accion
-    elegida por stdout y la ejecuta como root (poweroff/reboot). 'cancel' -> no hace nada."""
-    screen_on(read_int(MX, 10))              # asegurar pantalla ON para ver el menu
-    e = phosh_env()
-    if not e:
+    """Menu de apagado: pantalla ON + helper en la sesion (el helper gestiona el lockscreen:
+    si esta bloqueado pide desbloquear y espera). stdout final: poweroff|reboot|cancel."""
+    screen_on(read_int(MX, 10))
+    r = run_in_session("python3 /usr/local/bin/mt6582-powermenu", timeout=75, capture=True)
+    if r is None:
         subprocess.run(["poweroff"])          # sin sesion Phosh -> apagar directo (fallback)
         return
-    bus, xdg, user = e
-    action = "cancel"
-    try:
-        r = subprocess.run(
-            ["su", user, "-s", "/bin/sh", "-c",
-             "export DBUS_SESSION_BUS_ADDRESS='%s'; export XDG_RUNTIME_DIR='%s'; "
-             "python3 /usr/local/bin/mt6582-powermenu" % (bus, xdg)],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            universal_newlines=True, timeout=45)
-        out = [l for l in (r.stdout or "").strip().splitlines() if l.strip()]
-        if out:
-            action = out[-1].strip()
-    except Exception:
-        action = "cancel"
+    out = [l for l in (r.stdout or "").strip().splitlines() if l.strip()]
+    action = out[-1].strip() if out else "cancel"
     if action == "poweroff":
         subprocess.run(["poweroff"])
     elif action == "reboot":
         subprocess.run(["reboot"])
-    # cancel -> no hacer nada
+    # cancel -> nada
 
 
 def main():
@@ -164,6 +165,12 @@ def main():
         ev = find_ev()
     saved = read_int(MX, 10) or 10
     fd = open(ev, "rb", buffering=0)
+    # DUEÑO UNICO: nadie mas (phosh/phoc/gsd) recibe KEY_POWER a partir de aqui
+    try:
+        fcntl.ioctl(fd, EVIOCGRAB, 1)
+    except Exception:
+        pass
+    last = 0.0
     while True:
         d = fd.read(SZ)
         if not d or len(d) < SZ:
@@ -171,20 +178,21 @@ def main():
         _, _, typ, code, val = struct.unpack(FMT, d)
         if typ != EV_KEY or code != KEY_POWER or val != 1:
             continue                         # solo actuamos desde el PRESS
+        if time.monotonic() - last < DEBOUNCE:
+            continue                         # metralleta: ignorar
 
         if wait_release_or_long(fd):
-            # PULSACION LARGA -> menu de apagado (notificacion con botones Apagar/Reiniciar)
-            power_menu()
+            power_menu()                     # LARGA -> menu de apagado
         else:
-            # PULSACION CORTA -> toggle pantalla (bl_power) + bloqueo
-            if screen_is_on():
+            if screen_is_on():               # CORTA -> toggle pantalla + bloqueo
                 cur = read_int(BR, 0)
                 if cur > 0:
-                    saved = cur                  # recordar el brillo para restaurarlo
-                screen_off()                     # backlight OFF de verdad (bl_power=4)
-                phosh_lock(True)                 # bloquear la sesion
+                    saved = cur
+                screen_off()
+                phosh_lock(True)
             else:
-                screen_on(saved)                 # backlight ON (Phosh muestra el lockscreen)
+                screen_on(saved)
+        last = time.monotonic()
 
 
 if __name__ == "__main__":
