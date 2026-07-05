@@ -24,6 +24,16 @@
 
 import struct, glob, os, time, select, subprocess, pwd, fcntl
 
+LOGF = "/tmp/powerkey.log"
+
+
+def log(msg):
+    try:
+        with open(LOGF, "a") as f:
+            f.write("%.2f %s\n" % (time.monotonic(), msg))
+    except Exception:
+        pass
+
 BL = "/sys/class/backlight/backlight"
 BR = BL + "/brightness"
 MX = BL + "/max_brightness"
@@ -72,7 +82,15 @@ def screen_on(level=None):
         os.remove(SCREEN_OFF_FLAG)               # mt6582-backlight.py restaura el brillo de /sys
     except Exception:
         pass
-    output_on()                                  # y forzar el panel DRM por si phosh lo apago
+    # Despertar = panel On + sesion DESBLOQUEADA (a proposito). Medido 0705: phosh funde el
+    # panel al bloquear y NO hay forma externa de "despertar al lockscreen": wlr-randr --on
+    # (mode-set) tira el shield; wlopm no puede (phosh posee el control output-power en
+    # exclusiva); re-asertar el lock re-funde a Off; el tactil inyectado no despierta.
+    # Como sxmo no tiene PIN (lockscreen = swipe, sin seguridad real), despertar directo a la
+    # sesion es equivalente. El fix de verdad = registrar la sesion en elogind (PAM/greetd)
+    # para que phosh maneje el boton nativo — pendiente.
+    phosh_lock(False)
+    output_on()                                  # forzar el panel DRM (unico wake que funciona)
 
 
 def phosh_env():
@@ -112,8 +130,15 @@ def run_in_session(cmdline, timeout=6, capture=False):
 
 
 def output_on():
-    # re-enciende el panel DRM (phosh lo apaga en el fade del lockscreen y no lo devuelve)
-    run_in_session("wlr-randr --output DSI-1 --on")
+    # re-enciende el panel DRM (phosh lo apaga en el fade del lockscreen y no lo devuelve).
+    # SOLO si esta realmente Off: llamar a wlr-randr durante el fade de phosh roza una
+    # carrera de capas en phoc (CRITICAL top-panel, visto 0705) — no tocar si no hace falta.
+    try:
+        dpms = open("/sys/class/drm/card1-DSI-1/dpms").read().strip()
+    except Exception:
+        dpms = "Off"
+    if dpms == "Off":
+        run_in_session("wlr-randr --output DSI-1 --on")
 
 
 def phosh_lock(active):
@@ -128,15 +153,18 @@ def wait_release_or_long(fd):
     while True:
         rem = LONG - (time.monotonic() - t0)
         if rem <= 0:
+            log("LARGA (sin release en %.2fs)" % LONG)
             return True
         r, _, _ = select.select([fd], [], [], rem)
         if not r:
+            log("LARGA (select timeout, %.2fs)" % (time.monotonic() - t0))
             return True
         d = fd.read(SZ)
         if not d or len(d) < SZ:
             continue
         _, _, typ, code, val = struct.unpack(FMT, d)
         if typ == EV_KEY and code == KEY_POWER and val == 0:
+            log("CORTA (release a %.2fs)" % (time.monotonic() - t0))
             return False
         # val==2 (autorepeat) u otros: seguir esperando
 
@@ -182,6 +210,7 @@ def main():
             continue                         # metralleta: ignorar
 
         if wait_release_or_long(fd):
+            log("accion: MENU apagado (env=%s)" % bool(phosh_env()))
             power_menu()                     # LARGA -> menu de apagado
         else:
             if screen_is_on():               # CORTA -> toggle pantalla + bloqueo
@@ -189,8 +218,10 @@ def main():
                 if cur > 0:
                     saved = cur
                 screen_off()
+                log("accion: OFF+lock (env=%s)" % bool(phosh_env()))
                 phosh_lock(True)
             else:
+                log("accion: ON/wake (env=%s)" % bool(phosh_env()))
                 screen_on(saved)
         last = time.monotonic()
 
