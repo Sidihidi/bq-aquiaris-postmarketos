@@ -613,6 +613,10 @@ kalIndicateMgmtTxStatus(
 		return;
 	}
 
+	if (prGlueInfo->prDevHandler == NULL ||
+	    prGlueInfo->prDevHandler->ieee80211_ptr == NULL)
+		return;		/* mismo patron que el OOPS de kalIndicateRxMgmtFrame */
+
 	cfg80211_mgmt_tx_status(prGlueInfo->prDevHandler->ieee80211_ptr,
 		u8Cookie,
 		pucFrameBuf,
@@ -636,15 +640,32 @@ kalIndicateRxMgmtFrame(
 	INT_32 i4Freq;
 	UINT_8 ucChnlNum;
 
+	struct net_device *prDev;
+	struct wireless_dev *prWdev;
+
 	if (prGlueInfo == NULL || prSwRfb == NULL) {
 		ASSERT(FALSE);
 		return;
 	}
 
+	/* OOPS visto en HW (0705, kernel #235): mgmt frame RX en plena carrera de
+	 * reconexion con el AP desaparecido -> NULL deref en cfg80211_rx_mgmt_ext
+	 * (tx_thread, PC cfg80211_rx_mgmt_ext+0x48, LR aqui). Guardar TODO antes. */
+	prDev = prGlueInfo->prDevHandler;
+	if (prDev == NULL || prSwRfb->pvHeader == NULL || prSwRfb->u2PacketLen == 0)
+		return;
+	prWdev = prDev->ieee80211_ptr;
+	if (prWdev == NULL || prWdev->wiphy == NULL)
+		return;
+	if (prSwRfb->prHifRxHdr == NULL)
+		return;
+
 	ucChnlNum = prSwRfb->prHifRxHdr->ucHwChannelNum;
 	i4Freq = nicChannelNum2Freq(ucChnlNum) / 1000;
+	if (i4Freq <= 0)
+		return;		/* canal invalido: sin freq no hay a que atribuir la trama */
 
-	cfg80211_rx_mgmt(prGlueInfo->prDevHandler->ieee80211_ptr,
+	cfg80211_rx_mgmt(prWdev,
 		i4Freq,
 		RCPI_TO_dBm(prSwRfb->prHifRxHdr->ucRcpi),
 		prSwRfb->pvHeader,

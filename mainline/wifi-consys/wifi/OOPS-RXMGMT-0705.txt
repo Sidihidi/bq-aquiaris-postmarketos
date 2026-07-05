@@ -1,0 +1,60 @@
+[ 3725.098473] Unable to handle kernel NULL pointer dereference at virtual address 0000000a when read
+[ 3725.099657] [0000000a] *pgd=00000000
+[ 3725.100152] Internal error: Oops: 17 [#1] SMP ARM
+[ 3725.100784] Modules linked in: test_power
+[ 3725.101337] CPU: 0 UID: 0 PID: 876 Comm: tx_thread Not tainted 7.0.12 #235 VOLUNTARY 
+[ 3725.102378] Hardware name: Mediatek Cortex-A7 (Device Tree)
+[ 3725.103118] PC is at cfg80211_rx_mgmt_ext+0x48/0x304
+[ 3725.103792] LR is at kalIndicateRxMgmtFrame+0xe8/0x130
+[ 3725.104482] pc : [<c146e54c>]    lr : [<c0ef6844>]    psr: 60030013
+[ 3725.105314] sp : f1819e10  ip : f1819e70  fp : c35c4800
+[ 3725.106010] r10: f1819e48  r9 : c17ff030  r8 : c6cc9fcc
+[ 3725.106706] r7 : c6cc9fcc  r6 : c30e4240  r5 : 000000d0  r4 : 00000008
+[ 3725.107572] r3 : 00021cc0  r2 : 000003e8  r1 : 00000000  r0 : 000000d0
+[ 3725.108438] Flags: nZCv  IRQs on  FIQs on  Mode SVC_32  ISA ARM  Segment none
+[ 3725.109385] Control: 10c5387d  Table: 86ef806a  DAC: 00000051
+[ 3725.110147] Register r0 information: non-paged memory
+[ 3725.110827] Register r1 information: NULL pointer
+[ 3725.111460] Register r2 information: non-paged memory
+[ 3725.112137] Register r3 information: non-paged memory
+[ 3725.112815] Register r4 information: non-paged memory
+[ 3725.113493] Register r5 information: non-paged memory
+[ 3725.114170] Register r6 information: slab kmalloc-8k start c30e4000 pointer offset 576 size 8192
+[ 3725.115359] Register r7 information: non-slab/vmalloc memory
+[ 3725.116116] Register r8 information: non-slab/vmalloc memory
+[ 3725.116873] Register r9 information: non-slab/vmalloc memory
+[ 3725.117630] Register r10 information: 2-page vmalloc region starting at 0xf1818000 allocated at kernel_clone+0xa4/0x3ec
+[ 3725.119069] Register r11 information: slab kmalloc-2k start c35c4800 pointer offset 0 size 2048
+[ 3725.120244] Register r12 information: 2-page vmalloc region starting at 0xf1818000 allocated at kernel_clone+0xa4/0x3ec
+[ 3725.121679] Process tx_thread (pid: 876, stack limit = 0x8eb594d3)
+[ 3725.122503] Stack: (0xf1819e10 to 0xf181a000)
+[ 3725.123090] 9e00:                                     f1819e94 c14d91dc c335ec00 c03a95c8
+[ 3725.124174] 9e20: 00000a80 0000002a 0025b840 ffffffd1 c35c4800 c6cc9fcc c17ff030 c000009a
+[ 3725.125258] 9e40: 00000000 c0ef6844 0025b840 ffffffd1 00000000 c6cc9fcc 0000002a 00000000
+[ 3725.126341] 9e60: 00000000 00000000 00000000 00000000 c220eabc 4a96c236 f17f60c0 f175b000
+[ 3725.127425] 9e80: c17ff8c8 0000000d c220eabc c0ee8ad4 f175b000 f17f60c0 c17ff8c8 c0eeabf4
+[ 3725.128508] 9ea0: f175b000 00000000 f175e240 c0eea34c f175e000 f17f60c0 f175b000 c17ff8c2
+[ 3725.129591] 9ec0: c220eabc c0eead9c 80030013 4a96c236 c214c1c4 00000012 f175e000 f175b000
+[ 3725.130675] 9ee0: c214c1cc c0ee1214 f175b000 00000012 f175e000 c30e4b04 c30e466c c220eabc
+[ 3725.131758] 9f00: c000009a c0ee13a4 00000012 4a96c236 c30e4b04 f175e9d0 f175b000 c0eb1224
+[ 3725.132842] 9f20: c30e45e0 c30e46e8 f1819f50 c0ef4850 f18b5ad4 c039f19c 00000002 c220e664
+[ 3725.133925] 9f40: c220e6b8 c30e4af8 c4a86400 01f21150 00000000 c335ec00 c03bad60 f1819f5c
+[ 3725.135009] 9f60: f1819f5c 4a96c236 c4a86400 edfec000 c335ec00 c0ef4644 c35c5000 c4a86400
+[ 3725.136092] 9f80: f0849e68 00000000 00000000 c038aa94 edfec000 c038a998 00000000 00000000
+[ 3725.137175] 9fa0: 00000000 00000000 00000000 c03001ac 00000000 00000000 00000000 00000000
+[ 3725.138258] 9fc0: 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+[ 3725.139341] 9fe0: 00000000 00000000 00000000 00000000 00000013 00000000 00000000 00000000
+[ 3725.140419] Call trace: 
+[ 3725.140429]  cfg80211_rx_mgmt_ext from kalIndicateRxMgmtFrame+0xe8/0x130
+[ 3725.141665]  kalIndicateRxMgmtFrame from nicRxProcessActionFrame+0x60/0x100
+[ 3725.142599]  nicRxProcessActionFrame from nicRxProcessMgmtPacket+0x10c/0x1ec
+[ 3725.143546]  nicRxProcessMgmtPacket from nicRxProcessRFBs+0xc8/0x2c4
+[ 3725.144402]  nicRxProcessRFBs from nicProcessIST_impl+0x58/0x18c
+[ 3725.145211]  nicProcessIST_impl from nicProcessIST+0x5c/0x188
+[ 3725.145983]  nicProcessIST from wlanIST+0x44/0x10c
+[ 3725.146634]  wlanIST from tx_thread+0x20c/0x590
+[ 3725.147254]  tx_thread from kthread+0xfc/0x12c
+[ 3725.147866]  kthread from ret_from_fork+0x14/0x28
+[ 3725.148504] Exception stack(0xf1819fb0 to 0xf1819ff8)
+[ 3725.149181] 9fa0:                                     00000000 00000000 00000000 00000000
+[ 3725.150264] 9fc0: 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
