@@ -78,3 +78,44 @@ Ejecutada en el móvil (kernel #236, uptime estable):
 IRQ MCU (CON @0x3A0, CNT1 @0x3AC, GIC_SPI 104), formato del buffer, `snd_pcm_hardware`, nodo DT
 `audio@11220000`. Criterio: `/proc/asound/cards` muestra la tarjeta y `aplay` corre sin XRUN
 (aún sin sonido audible hasta Fase B, el codec ANA).
+
+---
+
+## ✅✅ FASE A.2 COMPLETADA Y VERIFICADA EN HW (2026-07-06, kernel #238)
+
+El motor PCM DL1 funciona de punta a punta. `mt6582-afe-pcm.c` (repo `mainline/audio/`) implementa
+open/close/hw_params/prepare/trigger/pointer + IRQ handler + tarjeta mínima (codec dummy), siguiendo
+las secuencias extraídas del downstream (informe en el commit; DL1 registro a registro, dos
+codificaciones de fs distintas memif=9 vs adda=7 para 44k1, DL1_END inclusivo, IRQ level-low con
+clear-all, orden CONN→IRQ→DL1 al arrancar e IRQ→DL1→CONN al parar).
+
+**Prueba definitiva**: `aplay` de un WAV de 2s/44100/estéreo con period=4096 → el IRQ del AFE
+(`/proc/interrupts` línea 212, GIC_SPI 104) incrementó **+22** — exactamente 44100·2/4096 ≈ 22
+periodos. Es decir: DMA corre, IRQ dispara 1×/periodo, `snd_pcm_period_elapsed` avanza el puntero,
+timing y sample-rate correctos, aplay completa sin XRUN ni crash. `/proc/asound/cards` = `0
+[mt6582audio]`, PCM DL1 registrado.
+
+**Bug clave resuelto (oops en .open)**: component y card comparten device → `register_card` pisa el
+drvdata del device → `snd_soc_component_get_drvdata` devolvía la card, no `afe` → `afe->base` basura
+→ oops (`mt6582_afe_open+0x60`, "exited with irqs disabled", visto con sysrq-w). FIX: recuperar
+`afe` desde `snd_soc_card_get_drvdata(rtd->card)` (campo propio de la card, inmune al pisado) +
+`snd_soc_card_set_drvdata(&card, afe)` en probe.
+
+**Config**: el stack ALSA va **built-in** (`=y`), NO módulos — el config tiene 896 módulos =m
+(herencia multi_v7) y hacer `make modules` es inviable. En `build-krillin/.config`:
+`CONFIG_SOUND=y CONFIG_SND=y CONFIG_SND_TIMER=y CONFIG_SND_PCM=y CONFIG_SND_SOC=y
+CONFIG_SND_SOC_MT6582=y`. zImage sube solo ~143KB (12.98→13.12MB), boot.img 14.71MB (margen OK).
+Build: `~/build-audio.sh` (zImage + dtb + package → boot-diag.img → dd mmcblk0 seek=83968).
+
+**Pendiente menor**: el IRQ del AFE dispara ~1/s espurio en reposo (277 en 273s de boot); nuestro
+handler los identifica (con&0x3==0) y limpia → inofensivo, pero investigar la fuente (¿línea
+compartida? ¿otra fuente del AFE?) en un pulido.
+
+**SIGUIENTE = Fase B (codec ANA, el primer SONIDO AUDIBLE)**: encender el codec analógico del PMIC
+MT6323 vía pwrap + el amplificador externo por GPIO118. Las secuencias están extraídas: `power_init`
+(AUDTOP_CON0/1/5/6 con clksq), el tren de pulsos del GPIO118 (1,u2,0,u2,1,u2,0,u2,1 + msleep 40), y
+las direcciones ANA (SPK_CON/AUDTOP_CON/ABB_AFE en `upmu_hw.h`). INCERTIDUMBRE de Fase B: la ruta
+analógica completa del MT6323 (encendido DAC/HP/LOL + SPK_CON) la hacía el HAL Android en userspace,
+no está en el kernel de la Pi → fuente alternativa: HAL `AudioAnalogControl.cpp` de un árbol
+Android MT6582/MT6323, o el codec mainline mt6397/mt6323 como aproximación (ver INCERTIDUMBRES del
+informe de extracción).

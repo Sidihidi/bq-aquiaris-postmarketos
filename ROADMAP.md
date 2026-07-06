@@ -34,11 +34,14 @@ la foto completa: qué está al 100%, qué está a medias, y qué falta — con 
 
 En orden de ataque sugerido (impacto/dificultad):
 
-1. **Audio (ALSA para MT6582-AFE)** — EN CURSO (0705): validación HW completada — INFRA_AUDIO ya
-   encendido por LK, AFE @0x11220000 lee/escribe sin colgar, PDN_AFE/I2S=0 de fábrica, IRQ=GIC_SPI
-   104 confirmado. Esqueleto Fase A en `sound/soc/mediatek/mt6582/` (árbol Pi). Siguiente: PCM DL1
-   + IRQ + nodo DT (Fase A.2), luego codec ANA por pwrap (Fase B) y machine driver (C).
-   Plan/estado: `mainline/audio/HANDOFF-AUDIO-PORT-0702.md`.
+1. **Audio (ALSA para MT6582-AFE)** — **Fase A.2 ✅ HECHA Y VERIFICADA (0706, kernel #238)**: el
+   motor PCM DL1 funciona (tarjeta `0 [mt6582audio]`, `aplay` corre sin XRUN ni crash, el IRQ del
+   AFE incrementa exactamente 1×/periodo → DMA/timing/sample-rate correctos). Driver built-in
+   (`CONFIG_SND*=y`; los 896 módulos =m hacen inviable el modo módulo). **Sin sonido audible aún**
+   (eso es Fase B). **SIGUIENTE = Fase B**: codec analógico del PMIC MT6323 por pwrap + amplificador
+   de altavoz por GPIO118 = el primer sonido. Secuencias ya extraídas del downstream; incertidumbre:
+   la ruta analógica completa la hacía el HAL Android (fuente alternativa en el handoff).
+   Estado: `mainline/audio/HANDOFF-AUDIO-PORT-0702.md`.
 2. **Suspend/resume** — bloquea la autonomía real. Hoy `enable-suspend false`. Requiere validar
    suspend de: WiFi (port), consys/BT, panel, pwrap. Tocará el driver WiFi (suspend hooks).
 3. **Módem 2G/3G (llamadas/SMS/datos)** — el hueso más gordo (CCCI/EEMCS del downstream +

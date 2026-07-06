@@ -1,51 +1,60 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Registros del AFE MT6582 (offsets sobre 0x11220000).
- * Fuente: downstream AudDrv_Afe.h (sound/mt6582), verificados los load-bearing.
+ * Fuente: downstream AudDrv_Afe.h (sound/mt6582) + mt_soc_audio_v1 (mismo AFE),
+ * verificados los load-bearing (extracción 2026-07-06).
  */
 #ifndef _MT6582_AFE_REGS_H_
 #define _MT6582_AFE_REGS_H_
 
-#define AUDIOAFE_TOP_CON0	0x0000	/* bit2 = AFE_ON, bit6 = I2S clk */
-#define AFE_DAC_CON0		0x0010	/* enables DL1/VUL/... */
-#define AFE_DAC_CON1		0x0014	/* sample rates por memif */
+#define AUDIOAFE_TOP_CON0	0x0000	/* bit2 = PDN_AFE, bit6 = PDN_I2S; clk-on stock = 0x60004000 */
+#define AFE_DAC_CON0		0x0010	/* bit0 AFE_ON, bit1 DL1_ON, bit3 VUL_ON */
+#define AFE_DAC_CON1		0x0014	/* [3:0] fs DL1, [11:8] fs I2S-out, bit21 DL1 mono */
 #define AFE_I2S_CON		0x0018
-#define AFE_CONN0		0x0020	/* mixer: interconexiones I05/I06->O03/O04 */
-#define AFE_CONN1		0x0024
-#define AFE_CONN2		0x0028
+#define AFE_CONN0		0x0020	/* mixer/interconexiones */
+#define AFE_CONN1		0x0024	/* bit21 = I05(DL1-L) -> O03(DAC-L) */
+#define AFE_CONN2		0x0028	/* bit6  = I06(DL1-R) -> O04(DAC-R) */
 #define AFE_CONN3		0x002C
 #define AFE_CONN4		0x0030
-#define AFE_I2S_CON1		0x0034
+#define AFE_I2S_CON1		0x0034	/* I2S-DAC out: bit0 EN, bit3 fmt I2S, [11:8] fs */
 #define AFE_I2S_CON2		0x0038
 
-#define AFE_DL1_BASE		0x0040	/* buffer DMA playback (phys) */
-#define AFE_DL1_CUR		0x0044	/* puntero HW (RO) */
-#define AFE_DL1_END		0x0048
+#define AFE_DL1_BASE		0x0040	/* fisica, alineada a 32B */
+#define AFE_DL1_CUR		0x0044	/* puntero HW (RO) — DIRECCION FISICA ABSOLUTA */
+#define AFE_DL1_END		0x0048	/* INCLUSIVE: base + len - 1 */
 #define AFE_DL2_BASE		0x0050
 #define AFE_DL2_CUR		0x0054
 #define AFE_DL2_END		0x0058
 #define AFE_AWB_BASE		0x0070
 #define AFE_AWB_END		0x0078
 #define AFE_AWB_CUR		0x007C
-#define AFE_VUL_BASE		0x0080	/* buffer DMA captura */
+#define AFE_VUL_BASE		0x0080
 #define AFE_VUL_END		0x0088
 #define AFE_VUL_CUR		0x008C
 
-#define AFE_ADDA_DL_SRC2_CON0	0x0108
-#define AFE_ADDA_DL_SRC2_CON1	0x010C
+#define AFE_ADDA_DL_SRC2_CON0	0x0108	/* [31:28] fs ADDA, bit1 -0.3dB, bit0 EN */
+#define AFE_ADDA_DL_SRC2_CON1	0x010C	/* ganancia DL: 0xF74F0000 */
 #define AFE_ADDA_UL_SRC_CON0	0x0114
 #define AFE_ADDA_UL_SRC_CON1	0x0118
 #define AFE_ADDA_TOP_CON0	0x0120
-#define AFE_ADDA_UL_DL_CON0	0x0124
+#define AFE_ADDA_UL_DL_CON0	0x0124	/* bit0 = ADDA interface ON */
 #define AFE_ADDA_NEWIF_CFG0	0x0138
 #define AFE_ADDA_NEWIF_CFG1	0x013C
 
-#define AFE_IRQ_MCU_CON		0x03A0	/* enable/modo IRQ1/IRQ2 */
-#define AFE_IRQ_MCU_STATUS	0x03A4
-#define AFE_IRQ_MCU_CLR		0x03A8
-#define AFE_IRQ_MCU_CNT1	0x03AC	/* samples entre IRQs (DL) */
+#define AFE_PREDIS_CON0		0x0260	/* pre-distorsion: limpiar a 0 antes del DAC */
+#define AFE_PREDIS_CON1		0x0264
+
+#define AFE_IRQ_MCU_CON		0x03A0	/* bit0 IRQ1(DL) en, bit1 IRQ2(UL) en, [7:4] fs IRQ1 */
+#define AFE_IRQ_MCU_STATUS	0x03A4	/* & 0xF: bit0=IRQ1, bit1=IRQ2 */
+#define AFE_IRQ_MCU_CLR		0x03A8	/* write-1-clear; bit6 = clear-all */
+#define AFE_IRQ_MCU_CNT1	0x03AC	/* frames por IRQ1 (periodo) */
 #define AFE_IRQ_MCU_CNT2	0x03B0
 #define AFE_IRQ_MCU_EN		0x03B4
-#define AFE_MEMIF_PBUF_SIZE	0x03D8
+#define AFE_MEMIF_MAXLEN	0x03D4	/* bit0: 0=buffer en SRAM interna, 1=DRAM */
+#define AFE_MEMIF_PBUF_SIZE	0x03D8	/* (nunca escrito por el stock) */
+
+/* SRAM interna de audio (opcion de buffer sin DMA coherente) */
+#define MT6582_AFE_SRAM_PHYS	0x11221000
+#define MT6582_AFE_SRAM_SIZE	0x4000
 
 #endif /* _MT6582_AFE_REGS_H_ */
