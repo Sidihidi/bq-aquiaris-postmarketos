@@ -11,6 +11,10 @@ gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/
 gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type nothing 2>/dev/null
 gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-battery-type nothing 2>/dev/null
 gsettings set org.gnome.settings-daemon.plugins.power idle-dim false 2>/dev/null
+# Vibracion/haptico: feedbackd trae el perfil por defecto en 'silent' (no vibra NADA).
+# 'quiet' = haptico en notificaciones/eventos, sin sonidos. ('full' anade sonidos +
+# haptico al pulsar botones/teclado; el motor es regulator-haptic FF en event2.)
+gsettings set org.sigxcpu.feedbackd profile quiet 2>/dev/null
 /usr/libexec/gsd-power &
 # Brillo por slider: el shim D-Bus provee org.gnome.SettingsDaemon.Power.Screen (Brightness)
 # en ESTA sesion -> slider -> /run/mt6582-bl-pct -> daemon mt6582-backlight -> PWM.
