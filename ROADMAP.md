@@ -34,14 +34,14 @@ la foto completa: qué está al 100%, qué está a medias, y qué falta — con 
 
 En orden de ataque sugerido (impacto/dificultad):
 
-1. **Audio (ALSA para MT6582-AFE)** — **Fase A.2 ✅ HECHA Y VERIFICADA (0706, kernel #238)**: el
-   motor PCM DL1 funciona (tarjeta `0 [mt6582audio]`, `aplay` corre sin XRUN ni crash, el IRQ del
-   AFE incrementa exactamente 1×/periodo → DMA/timing/sample-rate correctos). Driver built-in
-   (`CONFIG_SND*=y`; los 896 módulos =m hacen inviable el modo módulo). **Sin sonido audible aún**
-   (eso es Fase B). **SIGUIENTE = Fase B**: codec analógico del PMIC MT6323 por pwrap + amplificador
-   de altavoz por GPIO118 = el primer sonido. Secuencias ya extraídas del downstream; incertidumbre:
-   la ruta analógica completa la hacía el HAL Android (fuente alternativa en el handoff).
-   Estado: `mainline/audio/HANDOFF-AUDIO-PORT-0702.md`.
+1. **Audio (ALSA para MT6582)** — **✅✅ FUNCIONA (0706): AURICULARES + ALTAVOZ en HW.** Fase A.2
+   (motor PCM del AFE) + secuencia analógica del codec MT6323 (RE del HAL Android `audio.primary.
+   mt6582.so` — la pieza clave era un `usleep(10ms)` de bias-settle + el ORDEN, que el poke plano no
+   tenía) + amp externo GPIO118 (tren de pulsos). Validado sonando. Secuencias en
+   `mainline/audio/codec-sequence/`; hito en `MILESTONE-AUDIO-FUNCIONA-0706.md`. **PENDIENTE (pulido)**:
+   bakear las secuencias en el driver (deltas SoC AFE en `mt6582-afe-pcm.c` + un codec ASoC que
+   ejecute el power-up analógico con el delay + GPIO118 por DAPM/pinctrl) para que `aplay`/Phosh
+   suenen sin scripts. Ahora mismo suena aplicando los scripts tras `aplay`.
 2. **Suspend/resume** — bloquea la autonomía real. Hoy `enable-suspend false`. Requiere validar
    suspend de: WiFi (port), consys/BT, panel, pwrap. Tocará el driver WiFi (suspend hooks).
 3. **Módem 2G/3G (llamadas/SMS/datos)** — el hueso más gordo (CCCI/EEMCS del downstream +
