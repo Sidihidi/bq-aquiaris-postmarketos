@@ -40,12 +40,28 @@ AUDTOP_CON4=0x7c CON5=0x4414 CON6=0xf5ba CON0=0x7012; ABB_AFE_CON0=0x1 CON1=0x9 
 CON10=0x1 CON11=0x303 NEWIF_CFG0=0x7330; SoC AFE_DAC_CON0=0x13043 I2S_CON=0x8000000d
 ADDA_NEWIF_CFG0=0x3f87200.
 
-## SIGUIENTE (formalizar en el driver)
-Estas secuencias están como scripts (pwrap/devmem) que se aplican tras `aplay`. El paso limpio es
-bakearlas en el driver: (a) los deltas del SoC AFE (I2S_CON, DAC_CON0 completo, NEWIF, CONN2) en
-`mt6582-afe-pcm.c` (prepare/trigger); (b) un **codec ASoC** que en su power-up ejecute la secuencia
-analógica con el `usleep(10000)` + el amp GPIO118 (vía DAPM/pinctrl). Con eso, `aplay`/Phosh suenan
-sin scripts. RE del HAL en `~/audio-hal/` de la Pi; disasm en el scratchpad.
+## ✅✅ FORMALIZADO EN EL DRIVER (0706, kernel #241) — aplay suena SOLO, sin scripts
+`mt6582-afe-pcm.c` ahora hace TODO en `.prepare`/`.close`:
+- Obtiene el **regmap del MT6323** vía el phandle DT `mediatek,pmic = <&pmic>` (el mt6323 es hijo del
+  MFD mt6397; `dev_get_drvdata(mt6323_dev)` = `mt6397_chip`, con `chip->regmap` del pwrap,
+  `max_register=0xffff` → alcanza AUDTOP @0x700 y ABB_AFE @0x4000). EPROBE_DEFER si no está listo.
+- `mt6582_codec_dl_on()`: la secuencia analógica EXACTA por `regmap_write`/`regmap_update_bits` con el
+  **`usleep_range(10000,12000)`** de bias-settle (la clave). `mt6582_codec_dl_off()` al cerrar.
+- `mt6582_spk_amp()`: amp externo GPIO118 por `ioremap(0x10005000)` — tren de pulsos con `udelay(2)`
+  + `msleep(40)`. On en prepare, off en close.
+- Deltas del SoC AFE (I2S_CON=0x8000000d, NEWIF0/1, DAC_CON0 bits 6/12/16, DAC_CON1, CONN2) en prepare.
+
+**Validado en HW**: con `aplay` solo (sin scripts), el driver deja AUDTOP_CON4=0x7c, CON6=0xf5ba,
+ABB_CON0=0x1, GPIO118=ON, I2S_CON=0x8000000d → suena por auriculares Y altavoz. Confirmado por el
+usuario. Los scripts de `codec-sequence/` quedan como referencia histórica.
+
+## PENDIENTE (no bloqueante)
+- **PulseAudio para la GUI**: `aplay` (ALSA directo) suena, pero PulseAudio no corre en la sesión
+  sxmo → apps GUI (Livi, YouTube) aún sin sonido. Arrancar/configurar pulseaudio (o pipewire) con la
+  card `mt6582audio` como sink por defecto. Es userspace, aparte del driver.
+- Jack detection (rutar HP vs SPK según auriculares enchufados) — ahora enciende ambas rutas a la vez.
+- Captura (mic/VUL) = Fase D. TX-power/rate finos.
+- Limpieza pendiente: organizar `~/home/cpcd` de la Pi (audio-hal, builds, logs dispersos).
 
 *El audio del krillin, de imposible en mainline a auriculares+altavoz sonando. Vía: Fase A.2 (AFE)
 + ground truth de LineageOS + RE del HAL de Android (usleep de bias-settle) + amp GPIO118.*

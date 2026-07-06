@@ -536,6 +536,7 @@
 		compatible = "mediatek,mt6582-afe";
 		reg = <0x11220000 0x1000>;
 		interrupts = <GIC_SPI 104 IRQ_TYPE_LEVEL_LOW>;
+		mediatek,pmic = <&pmic>;   /* MT6323: codec analogico (regmap del pwrap) */
 	};
 };
 

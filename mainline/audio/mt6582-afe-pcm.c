@@ -27,11 +27,15 @@
  * stock en TOP_CON0 (0x60004000) igual que hace AudDrv_Clk_On.
  */
 
+#include <linux/delay.h>
 #include <linux/dma-mapping.h>
 #include <linux/interrupt.h>
+#include <linux/mfd/mt6397/core.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/of_platform.h>
 #include <linux/platform_device.h>
+#include <linux/regmap.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
@@ -41,8 +45,19 @@
 #define MT6582_AFE_BUFFER_BYTES_MAX	(64 * 1024)
 #define MT6582_AFE_PERIOD_BYTES_MIN	512
 
+/* GPIO del SoC MT6582 (0x10005000): DIR base 0x000, DOUT base 0x400 (SET +4, RST +8),
+ * stride 0x10 por registro de 16 GPIOs. GPIO118 (amp de altavoz externo) = reg7, bit6. */
+#define MT6582_GPIO_PHYS	0x10005000
+#define MT6582_GPIO_SIZE	0x1000
+#define GPIO118_DIR_SET		0x074	/* DIR reg7 SET  -> dir out */
+#define GPIO118_DOUT_SET	0x474	/* DOUT reg7 SET -> HIGH */
+#define GPIO118_DOUT_RST	0x478	/* DOUT reg7 RST -> LOW */
+#define GPIO118_BIT		0x40	/* 118 % 16 = 6 */
+
 struct mt6582_afe {
-	void __iomem *base;
+	void __iomem *base;			/* AFE del SoC @0x11220000 */
+	void __iomem *gpio;			/* GPIO @0x10005000 (amp altavoz) */
+	struct regmap *pmic;			/* MT6323 (codec analogico) via pwrap */
 	struct device *dev;
 	spinlock_t lock;			/* RMW de registros */
 	struct snd_pcm_substream *dl1_substream;
@@ -80,6 +95,66 @@ static struct mt6582_afe *afe_from_substream(struct snd_pcm_substream *substream
 	struct snd_soc_pcm_runtime *rtd = substream->private_data;
 
 	return snd_soc_card_get_drvdata(rtd->card);
+}
+
+/* Amplificador EXTERNO del altavoz por GPIO118 (yusu_android_speaker.c:Sound_Speaker_Turnon).
+ * Tren de pulsos 1-0-1-0-1 (udelay 2) + 40 ms warm-up, queda HIGH = selecciona modo/ganancia
+ * del chip amp por conteo de flancos. El altavoz del krillin NO usa el class-D interno del
+ * MT6323 (SPK_CON queda a 0x200) sino este amp externo (confirmado por RE del HAL). */
+static void mt6582_spk_amp(struct mt6582_afe *afe, bool on)
+{
+	if (!afe->gpio)
+		return;
+	writel(GPIO118_BIT, afe->gpio + GPIO118_DIR_SET);	/* dir out */
+	if (on) {
+		writel(GPIO118_BIT, afe->gpio + GPIO118_DOUT_SET); udelay(2);
+		writel(GPIO118_BIT, afe->gpio + GPIO118_DOUT_RST); udelay(2);
+		writel(GPIO118_BIT, afe->gpio + GPIO118_DOUT_SET); udelay(2);
+		writel(GPIO118_BIT, afe->gpio + GPIO118_DOUT_RST); udelay(2);
+		writel(GPIO118_BIT, afe->gpio + GPIO118_DOUT_SET);	/* queda HIGH */
+		msleep(40);						/* SPK_WARM_UP_TIME */
+	} else {
+		writel(GPIO118_BIT, afe->gpio + GPIO118_DOUT_RST);	/* LOW */
+	}
+}
+
+/* Enciende el codec analogico del MT6323 (via pwrap regmap). Secuencia EXACTA reconstruida
+ * por RE del HAL de Android (audio.primary.mt6582.so, AudioAnalogControl::AnalogOpen dev 2/3).
+ * LA CLAVE = el ORDEN + el usleep(10ms) de asentamiento del bias entre AUDTOP_CON4=0x7c y
+ * AUDTOP_CON6=0xf5ba; un write plano del estado final NO suena. Registros del PMIC:
+ * banco ABB_AFE @0x4000 (digital) + AUDTOP_CON @0x0700 (analogico) + reloj @0x010c. */
+static void mt6582_codec_dl_on(struct mt6582_afe *afe)
+{
+	struct regmap *r = afe->pmic;
+
+	/* --- §2 AFE/downlink digital del PMIC --- */
+	regmap_update_bits(r, 0x010c, 0x0100, 0x0100);	/* reloj del bloque AFE del PMIC */
+	regmap_write(r, 0x4024, 0x7330);		/* ABB_AFE_PMIC_NEWIF_CFG0 (freq ADDA=7) */
+	regmap_update_bits(r, 0x4002, 0x000f, 0x0009);	/* ABB_AFE_CON1 (sample-rate) */
+	regmap_update_bits(r, 0x4000, 0x0001, 0x0001);	/* ABB_AFE_CON0 = AFE_ON */
+	regmap_write(r, 0x4006, 0x0253);		/* CON3 */
+	regmap_write(r, 0x4008, 0x0274);		/* CON4 */
+	regmap_write(r, 0x4014, 0x0001);		/* CON10 */
+	regmap_write(r, 0x4016, 0x0303);		/* CON11 */
+
+	/* --- §3 secuencia ANALOGICA de auriculares (ORDEN LITERAL + delay de bias) --- */
+	regmap_write(r, 0x070c, 0xf7f2);		/* AUDTOP_CON6: bias/LDO/refgen HP (pre-depop) */
+	regmap_update_bits(r, 0x0700, 0xf000, 0x7000);	/* AUDTOP_CON0 bits[15:12] */
+	regmap_write(r, 0x070a, 0x0014);		/* AUDTOP_CON5 */
+	regmap_write(r, 0x0708, 0x007c);		/* AUDTOP_CON4 = bias + L/R DAC */
+	usleep_range(10000, 12000);			/* 10 ms ASENTAMIENTO DEL BIAS (LO CLAVE) */
+	regmap_write(r, 0x070c, 0xf5ba);		/* AUDTOP_CON6: enciende drivers HP L/R */
+	regmap_write(r, 0x070a, 0x2214);		/* AUDTOP_CON5 */
+	regmap_update_bits(r, 0x070a, 0x7000, 0x4000);	/* ganancia HP-L */
+	regmap_update_bits(r, 0x070a, 0x0700, 0x0400);	/* ganancia HP-R */
+}
+
+static void mt6582_codec_dl_off(struct mt6582_afe *afe)
+{
+	struct regmap *r = afe->pmic;
+
+	regmap_write(r, 0x0708, 0x0000);		/* AUDTOP_CON4: disable bias + L-DAC */
+	regmap_update_bits(r, 0x4000, 0x0001, 0x0000);	/* ABB_AFE_CON0 off */
 }
 
 /* fs para memif/I2S-out/IRQ (AFE_DAC_CON1, AFE_I2S_CON1, AFE_IRQ_MCU_CON).
@@ -188,6 +263,11 @@ static int mt6582_afe_close(struct snd_soc_component *component,
 
 	afe->dl1_substream = NULL;
 
+	/* apagar el amp del altavoz + el codec analogico (antes que el AFE digital) */
+	mt6582_spk_amp(afe, false);
+	if (afe->pmic)
+		mt6582_codec_dl_off(afe);
+
 	/* cierre (mt_soc_pcm_dl1 close): apagar SRC2/I2S-DAC/ADDA y el AFE.
 	 * Sin captura implementada podemos apagar ADDA sin mirar el ADC. */
 	afe_rmw(afe, AFE_ADDA_DL_SRC2_CON0, BIT(0), 0);
@@ -258,6 +338,21 @@ static int mt6582_afe_prepare(struct snd_soc_component *component,
 	/* IRQ1: periodo en FRAMES + fs en IRQ_MCU_CON[7:4] (enable en trigger) */
 	afe_wr(afe, AFE_IRQ_MCU_CNT1, runtime->period_size);
 	afe_rmw(afe, AFE_IRQ_MCU_CON, 0xf << 4, (u32)fs << 4);
+
+	/* --- deltas del SoC AFE (ground truth de LineageOS sonando): el enlace serie
+	 * NEWIF al PMIC + los bits que faltaban de DAC_CON0/1 y CONN2 --- */
+	afe_wr(afe, AFE_I2S_CON, 0x8000000d);
+	afe_wr(afe, AFE_ADDA_NEWIF_CFG0, 0x03f87200);
+	afe_wr(afe, AFE_ADDA_NEWIF_CFG1, 0x03117180);
+	afe_rmw(afe, AFE_DAC_CON0, 0x13040, 0x13040);	/* bits 6,12,16 (el trigger anade 0,1) */
+	afe_rmw(afe, AFE_DAC_CON1, 0x9000, 0x9000);
+	afe_rmw(afe, AFE_CONN2, 0x410000, 0x410000);	/* bits 16,22 (el trigger anade el 6) */
+
+	/* --- encender el codec analogico del MT6323 (secuencia con delay de bias) + el
+	 * amplificador externo del altavoz. Con esto aplay/Phosh suenan solos. --- */
+	if (afe->pmic)
+		mt6582_codec_dl_on(afe);
+	mt6582_spk_amp(afe, true);
 
 	return 0;
 }
@@ -384,6 +479,7 @@ static struct snd_soc_card mt6582_afe_card = {
 
 static int mt6582_afe_probe(struct platform_device *pdev)
 {
+	struct device_node *pmic_np;
 	struct mt6582_afe *afe;
 	int irq, ret;
 	u32 top;
@@ -397,6 +493,32 @@ static int mt6582_afe_probe(struct platform_device *pdev)
 	afe->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(afe->base))
 		return PTR_ERR(afe->base);
+
+	/* codec analogico: regmap del MT6323 via el phandle mediatek,pmic. El mt6323 es
+	 * hijo del MFD mt6397; su drvdata es el mt6397_chip, que expone el regmap del pwrap
+	 * (max_register 0xffff -> alcanza AUDTOP @0x700 y ABB_AFE @0x4000). */
+	pmic_np = of_parse_phandle(pdev->dev.of_node, "mediatek,pmic", 0);
+	if (pmic_np) {
+		struct platform_device *pmic_pdev = of_find_device_by_node(pmic_np);
+		struct mt6397_chip *chip;
+
+		of_node_put(pmic_np);
+		if (pmic_pdev) {
+			chip = dev_get_drvdata(&pmic_pdev->dev);
+			if (chip)
+				afe->pmic = chip->regmap;
+			put_device(&pmic_pdev->dev);
+		}
+		if (!afe->pmic)
+			return dev_err_probe(&pdev->dev, -EPROBE_DEFER,
+					     "MT6323 aun no listo\n");
+		/* GPIO del amplificador externo del altavoz (GPIO118) */
+		afe->gpio = devm_ioremap(&pdev->dev, MT6582_GPIO_PHYS, MT6582_GPIO_SIZE);
+		if (!afe->gpio)
+			dev_warn(&pdev->dev, "sin ioremap GPIO: altavoz no funcionara\n");
+	} else {
+		dev_warn(&pdev->dev, "sin mediatek,pmic: solo PCM digital (sin sonido)\n");
+	}
 
 	ret = dma_coerce_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
 	if (ret)
