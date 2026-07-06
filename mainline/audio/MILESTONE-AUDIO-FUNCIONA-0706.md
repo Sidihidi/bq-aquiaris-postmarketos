@@ -56,9 +56,13 @@ ABB_CON0=0x1, GPIO118=ON, I2S_CON=0x8000000d → suena por auriculares Y altavoz
 usuario. Los scripts de `codec-sequence/` quedan como referencia histórica.
 
 ## PENDIENTE (no bloqueante)
-- **PulseAudio para la GUI**: `aplay` (ALSA directo) suena, pero PulseAudio no corre en la sesión
-  sxmo → apps GUI (Livi, YouTube) aún sin sonido. Arrancar/configurar pulseaudio (o pipewire) con la
-  card `mt6582audio` como sink por defecto. Es userspace, aparte del driver.
+- **Audio en la GUI (Phosh/PulseAudio)**: `aplay` (ALSA directo) suena; Livi/mpv por GStreamer
+  probablemente también (fallback a ALSA). Pero PulseAudio/callaudiod **descartan la card**:
+  `Card 'alsa_card.platform-11220000.audio-controller' lacks speaker and/or earpiece port, skipping`.
+  Causa: la card usa codec **dummy** → sin puertos con nombre (Speaker/Headphones/Earpiece) que
+  necesita el mapeo de PulseAudio/UCM. **Fix (userspace, aparte del driver)**: un **perfil UCM**
+  (`/usr/share/alsa/ucm2/...` o ucm) que describa el path de playback + los puertos, O un codec ASoC
+  de verdad con DAPM widgets (Speaker/Headphones/Earpiece routes). Con eso la GUI/YouTube suenan.
 - Jack detection (rutar HP vs SPK según auriculares enchufados) — ahora enciende ambas rutas a la vez.
 - Captura (mic/VUL) = Fase D. TX-power/rate finos.
 - Limpieza pendiente: organizar `~/home/cpcd` de la Pi (audio-hal, builds, logs dispersos).
