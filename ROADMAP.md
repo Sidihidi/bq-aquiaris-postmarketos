@@ -49,7 +49,13 @@ En orden de ataque sugerido (impacto/dificultad):
 4. **Sensores** (acelerómetro/luz/proximidad, I2C) — para rotación y apagar pantalla en llamada.
    `net.hadess.SensorProxy` hoy ausente (warning de phosh-ambient). Drivers IIO pequeños.
 5. **Cámaras** — muy abajo en prioridad (ISP MTK complejo).
-6. **LED de notificaciones** (mt6323-led: "Failed to locate of_node" → añadir nodo al DT).
+6. **LED de notificaciones** — 🟡 DIAGNOSTICADO (0706), fix compilado, pendiente flash+validar.
+   Los LEDs RGB (`{red,green,blue}:indicator`) YA existen y encienden en HW (nodo DT ya presente; el
+   "Failed to locate of_node" del dmesg es de `mt6323-pwrc`, NO del LED — red herring). Causa real de que
+   Phosh no los use: **al kernel le falta `CONFIG_LEDS_TRIGGER_PATTERN`** (feedbackd conduce los LEDs por
+   el trigger `pattern` vía `fbd-ledctrl`). Fix compilado en la .123 (`=y` + rebuild), falta flashear +
+   validar (perfil feedbackd a `full` + `fbcli -E notification-missed-generic`). Detalle:
+   `mainline/userspace/HANDOFF-LED-NOTIF-0706.md`.
 7. **Touch al DT** — retirar `touch-power.start` cuando edt-ft5x06 + regulador mt6323 estén en el
    DT (`vin-supply` + `reset-gpios`); hoy es un power-cycle userspace.
 8. **Sesión con elogind/PAM (greetd)** — el fix "de verdad" del aislamiento de la sesión
