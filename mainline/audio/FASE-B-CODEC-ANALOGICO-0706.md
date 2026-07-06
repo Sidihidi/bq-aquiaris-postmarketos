@@ -1,4 +1,10 @@
-# Fase B — codec analógico MT6323: mapeado 90%, bloqueado en 1 valor del HAL (2026-07-06)
+# Fase B — codec analógico MT6323: ✅ RESUELTO (2026-07-06) — ver MILESTONE-AUDIO-FUNCIONA-0706.md
+
+> **RESUELTO**: la clave era la SECUENCIA ORDENADA con un `usleep(10ms)` de bias-settle (RE del HAL),
+> no el estado final de los registros. Auriculares + altavoz (GPIO118) sonando. Este doc queda como
+> registro del proceso de diagnóstico.
+
+# (histórico) Fase B — codec analógico MT6323: mapeado 90%, bloqueado en 1 valor del HAL (2026-07-06)
 
 ## Objetivo
 Producir el primer SONIDO audible. La Fase A.2 (motor PCM DL1 del AFE del SoC) funciona y está
