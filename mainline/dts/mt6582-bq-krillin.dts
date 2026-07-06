@@ -186,6 +186,19 @@
 				       "1", "0", "0",
 				       "0", "0", "-1";
 		};
+
+		gyroscope@6b {
+			compatible = "st,lsm330-gyro";
+			reg = <0x6b>;
+			mount-matrix = "0", "1", "0",
+				       "1", "0", "0",
+				       "0", "0", "-1";
+		};
+
+		light-sensor@39 {
+			compatible = "amstaos,tmd2772";
+			reg = <0x39>;
+		};
 	};
 };
 

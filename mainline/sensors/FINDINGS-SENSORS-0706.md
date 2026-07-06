@@ -8,10 +8,10 @@ Los otros sensores (giro, magnetómetro, luz/proximidad) están identificados pe
 ## Chips (por scan I2C en bus 0, i2c-mt65xx @11007000)
 | Sensor | Chip | Addr | Estado |
 |---|---|---|---|
-| Acelerómetro | ST **LSM330** | 0x1d | ✅ IIO `st_accel` + rotación |
-| Giroscopio | ST LSM330 | 0x6b | pendiente (driver `st_gyro` existe) |
-| Magnetómetro | MEMSIC **MMC3516x** | 0x30 | pendiente (mainline `mmc35240` ≠ chip; verificar) |
-| Luz + Proximidad | AMS **TMD2772** | 0x39 | pendiente (driver `tsl2772` existe, =m→=y) |
+| Acelerómetro | ST **LSM330** | 0x1d | ✅ IIO `st_accel` + **auto-rotación** |
+| Giroscopio | ST LSM330 | 0x6b | ✅ IIO `st_gyro` (#243, lee velocidad angular) |
+| Luz + Proximidad | AMS **TMD2772** | 0x39 | ✅ `tsl2772` (#243): **luz detectada por iio-sensor-proxy**; proximidad lee a nivel kernel (`in_proximity0_raw`) pero iio-sensor-proxy NO la expone |
+| Magnetómetro | MEMSIC **MMC3516x** | 0x30 | ❌ sin driver mainline (`mmc35240`/`mmc5633` son chips distintos); queda sin bindear |
 | (Táctil FT5336) | — | 0x38 | ya funcionaba |
 | (Cargador FAN5405) | — | 0x6a | ya funcionaba |
 
@@ -47,9 +47,17 @@ Los otros sensores (giro, magnetómetro, luz/proximidad) están identificados pe
   (atributo `mount_matrix`, NO `in_accel_mount_matrix`).
 - La orientación es "undefined" con el móvil plano (normal); definida al inclinarlo.
 
+## Añadido en #243 (giro + luz/proximidad)
+- Config `=y`: `CONFIG_IIO_ST_GYRO_3AXIS`, `CONFIG_IIO_ST_GYRO_I2C_3AXIS`, `CONFIG_TSL2772`.
+- DTS: `gyroscope@6b` (`st,lsm330-gyro`, con la misma mount-matrix que el accel — mismo package) y
+  `light-sensor@39` (`amstaos,tmd2772`).
+
 ## Pendiente
-- **Lockscreen no rota**: es a propósito de Phosh (`fixup_lockscreen_orientation` fija el
-  lockscreen en portrait). Para permitirlo haría falta parchear Phosh (build en `/root/build/phosh`).
-- Portar el resto: giroscopio (`st_gyro` =y + nodo @0x6b), luz/proximidad (`tsl2772` =y + nodo @0x39
-  → auto-brillo + apagar pantalla en llamada), magnetómetro (brújula; verificar driver MMC3516x).
-- (Opcional) IRQ data-ready del accel para buffer con trigger HW (ahora polling).
+- **Auto-brillo**: la luz ambiente ya la detecta iio-sensor-proxy, pero falta que Phosh/gsd-power la use
+  para conducir el backlight custom (shim D-Bus mt6582). Integración userspace.
+- **Proximidad en iio-sensor-proxy**: lee a nivel kernel pero el proxy no la expone (¿necesita eventos/
+  umbral del tsl2772?). Uso principal (llamadas) irrelevante sin módem.
+- **Magnetómetro** (brújula): MMC3516x sin driver mainline — habría que portarlo/escribirlo.
+- **Lockscreen no rota**: a propósito de Phosh (`fixup_lockscreen_orientation` lo fija a portrait);
+  permitirlo = parchear Phosh (`/root/build/phosh`).
+- (Opcional) IRQ data-ready del accel/giro para buffer con trigger HW (ahora polling).

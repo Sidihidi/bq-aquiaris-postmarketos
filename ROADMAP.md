@@ -58,10 +58,11 @@ En orden de ataque sugerido (impacto/dificultad):
 4. **Sensores** (I2C) — 🟢 **AUTO-ROTACIÓN FUNCIONA (0706)**: acelerómetro **LSM330** @0x1d por IIO
    `st_accel` (=y) + nodo DT con **mount-matrix** calibrada (`[[0,1,0],[1,0,0],[0,0,-1]]`, de
    `direction=7`) + `iio-sensor-proxy` (rc default) + **regla polkit** que autoriza a sxmo a reclamar
-   sensores (sin ella la sesión aislada da AccessDenied). Validado en HW. **Pendiente**: lockscreen no
-   rota (Phosh lo fija a portrait a propósito — `fixup_lockscreen_orientation`); y portar giro
-   (`st_gyro` @0x6b), luz+proximidad (`tsl2772` @0x39 → auto-brillo/llamadas), magnetómetro (MMC3516x
-   @0x30, brújula). Detalle: `mainline/sensors/FINDINGS-SENSORS-0706.md`.
+   sensores (sin ella la sesión aislada da AccessDenied). Validado en HW. **Añadidos #243**: giroscopio
+   LSM330 @0x6b (`st_gyro`) + luz/proximidad TMD2772 @0x39 (`tsl2772`) — la **luz ambiente ya la detecta
+   iio-sensor-proxy**. **Pendiente**: auto-brillo (que Phosh use la ALS con el backlight custom), proximidad
+   en el proxy, magnetómetro (MMC3516x @0x30 sin driver mainline), lockscreen que no rota (Phosh lo fija a
+   portrait). Detalle: `mainline/sensors/FINDINGS-SENSORS-0706.md`.
 5. **Cámaras** — muy abajo en prioridad (ISP MTK complejo).
    - **Waydroid (apps Android)** — 🟡 VIABLE pero APARCADO por RAM (0706). Existe imagen armv7
      (`waydroid_arm`, LineageOS 20/Android 13 en SourceForge); pmOS empaqueta `waydroid` (falta añadir
