@@ -56,13 +56,15 @@ ABB_CON0=0x1, GPIO118=ON, I2S_CON=0x8000000d → suena por auriculares Y altavoz
 usuario. Los scripts de `codec-sequence/` quedan como referencia histórica.
 
 ## PENDIENTE (no bloqueante)
-- **Audio en la GUI (Phosh/PulseAudio)**: `aplay` (ALSA directo) suena; Livi/mpv por GStreamer
-  probablemente también (fallback a ALSA). Pero PulseAudio/callaudiod **descartan la card**:
-  `Card 'alsa_card.platform-11220000.audio-controller' lacks speaker and/or earpiece port, skipping`.
-  Causa: la card usa codec **dummy** → sin puertos con nombre (Speaker/Headphones/Earpiece) que
-  necesita el mapeo de PulseAudio/UCM. **Fix (userspace, aparte del driver)**: un **perfil UCM**
-  (`/usr/share/alsa/ucm2/...` o ucm) que describa el path de playback + los puertos, O un codec ASoC
-  de verdad con DAPM widgets (Speaker/Headphones/Earpiece routes). Con eso la GUI/YouTube suenan.
+- **Audio en la GUI (Phosh/PulseAudio) ✅ RESUELTO (0706)**: PulseAudio SÍ crea un sink para la card
+  (`alsa_output.platform-11220000.audio-controller.stereo-fallback`, s16le 2ch 44100) — el problema
+  era solo que **PA no arrancaba** en la sesión (antes crasheaba, pre-fix del codec). Validado:
+  `paplay` por PulseAudio suena (el driver enciende el codec+amp al abrir el sink). autospawn=yes →
+  las apps (Livi, YouTube-en-navegador por GStreamer pulsesink) auto-arrancan PA al reproducir. Para
+  robustez, `phosh-session.sh` arranca `pulseaudio --start` al boot (sink listo, sin retardo de
+  autospawn). El aviso de callaudiod ("lacks speaker/earpiece port") es solo para el ROUTING DE
+  LLAMADAS (sin módem, irrelevante); la reproducción de media va por el sink stereo-fallback. Un
+  perfil UCM con puertos con nombre queda pendiente SOLO si se quiere routing de llamadas fino.
 - Jack detection (rutar HP vs SPK según auriculares enchufados) — ahora enciende ambas rutas a la vez.
 - Captura (mic/VUL) = Fase D. TX-power/rate finos.
 - Limpieza pendiente: organizar `~/home/cpcd` de la Pi (audio-hal, builds, logs dispersos).

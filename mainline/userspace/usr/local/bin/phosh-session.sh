@@ -19,6 +19,10 @@ gsettings set org.sigxcpu.feedbackd profile quiet 2>/dev/null
 # Brillo por slider: el shim D-Bus provee org.gnome.SettingsDaemon.Power.Screen (Brightness)
 # en ESTA sesion -> slider -> /run/mt6582-bl-pct -> daemon mt6582-backlight -> PWM.
 [ -f /usr/local/bin/mt6582-bl-shim.py ] && python3 /usr/local/bin/mt6582-bl-shim.py >/dev/null 2>&1 &
+# Audio: arrancar PulseAudio (crea el sink de la card mt6582audio). Las apps tambien lo
+# autospawn-ean al reproducir, pero arrancarlo aqui deja el sink listo desde el boot y evita
+# el retardo del autospawn. El driver del AFE enciende el codec+amp al abrir el sink.
+command -v pulseaudio >/dev/null 2>&1 && pulseaudio --start --exit-idle-time=-1 >/dev/null 2>&1 &
 sleep 1
 # SIN exec: si phosh muere, phoc NO se entera solo (visto 0705: phosh muerto, phoc vivo,
 # sesion zombi sin lockscreen). Al salir phosh tumbamos phoc ($PPID) -> dbus-run-session

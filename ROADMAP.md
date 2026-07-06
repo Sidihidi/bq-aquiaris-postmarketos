@@ -38,10 +38,12 @@ En orden de ataque sugerido (impacto/dificultad):
    `aplay`/mpv suenan SOLOS (auriculares + altavoz), sin scripts.** `mt6582-afe-pcm.c` hace el codec
    MT6323 en `.prepare`/`.close` (regmap del pwrap vía phandle `mediatek,pmic`, con el `usleep(10ms)`
    de bias-settle — la clave del RE del HAL) + amp externo GPIO118. Hito en
-   `MILESTONE-AUDIO-FUNCIONA-0706.md`. **PENDIENTE audio-GUI (no bloqueante)**: la card usa codec
-   dummy → sin puertos con nombre → PulseAudio/callaudiod la descartan ("lacks speaker/earpiece port")
-   → falta un **perfil UCM** o un codec ASoC con DAPM (Speaker/Headphones routes) para que Phosh/
-   YouTube-en-navegador suenen. (Livi/mpv por ALSA directo sí.)
+   `MILESTONE-AUDIO-FUNCIONA-0706.md`. **Audio-GUI ✅ RESUELTO (0706)**: PulseAudio SÍ crea el sink
+   (`alsa_output.platform-11220000...stereo-fallback`); el problema era solo que PA no arrancaba en la
+   sesión. `paplay`/apps por PulseAudio suenan (validado). `phosh-session.sh` arranca `pulseaudio
+   --start` al boot + autospawn=yes para las apps (Livi/YouTube-en-navegador por pulsesink). El aviso
+   de callaudiod ("lacks speaker/earpiece port") es solo para el ROUTING DE LLAMADAS (sin módem);
+   un perfil UCM con puertos con nombre queda pendiente SOLO para eso.
 2. **Suspend/resume** — bloquea la autonomía real. Hoy `enable-suspend false`. Requiere validar
    suspend de: WiFi (port), consys/BT, panel, pwrap. Tocará el driver WiFi (suspend hooks).
 3. **Módem 2G/3G (llamadas/SMS/datos)** — el hueso más gordo (CCCI/EEMCS del downstream +
