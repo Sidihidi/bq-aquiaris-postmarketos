@@ -1,0 +1,20 @@
+#!/bin/sh
+# Robustez de boot: a veces udev no arranca (dep sysfs no satisfecha en la carrera del boot)
+# -> wlan0 no queda "inicializado por udev" -> NM lo marca unmanaged -> sin WiFi.
+# Este script (en background, no bloquea) asegura udevd + re-inicializa wlan0 + lo re-gestiona.
+(
+  # esperar a wlan0 (bring-up diferida del wifi al WMT, ~14s)
+  i=0; while [ ! -e /sys/class/net/wlan0 ] && [ $i -lt 45 ]; do sleep 1; i=$((i+1)); done
+  [ -e /sys/class/net/wlan0 ] || exit 0
+  # asegurar udevd corriendo (bypass de la dep openrc; solo necesita /sys montado)
+  pgrep -x udevd >/dev/null 2>&1 || /sbin/udevd --daemon >/dev/null 2>&1
+  udevadm trigger --action=add --subsystem-match=net >/dev/null 2>&1
+  udevadm settle --timeout=15 >/dev/null 2>&1
+  # si NM sigue viendo wlan0 unmanaged, forzarlo
+  sleep 3
+  if nmcli -t dev status 2>/dev/null | grep -q "wlan0:wifi:unmanaged"; then
+    logger -t wlan0-managed "wlan0 unmanaged tras boot -> re-gestionando" 2>/dev/null
+    nmcli dev set wlan0 managed yes >/dev/null 2>&1
+    rc-service networkmanager restart >/dev/null 2>&1
+  fi
+) &

@@ -83,6 +83,19 @@ kmod-libs libblkid libmount libuuid libsmartcols eudev` → udevadm vuelve (v251
 Lección: en este móvil, `apk add` de algo trivial puede tocar libs de core; tras un `apk add`
 verificar `udevadm --version` y `rc-status | grep crashed`.
 
+## 7. udev no estaba en ningún runlevel → wlan0 unmanaged (0706, kernel #240)
+Síntoma: tras un boot, `wlan0` sale `unmanaged` en NM (`REASON 71: link not initialized by udev`) →
+sin WiFi. Causa raíz: **`udev` NO estaba en ningún runlevel de OpenRC** (`sysfs`/`devfs` sí, en
+`sysinit`). Arrancaba solo por el intento manual de `zzzz-phosh.start` (`rc-service udev start`), que
+falla en la carrera del boot (`udev needs service(s) sysfs`). Como wlan0 aparece TARDE (bring-up
+diferida del WiFi al WMT, ~14s), si udev no corre no queda "inicializado" → NM no lo gestiona.
+**Fix de raíz**: `rc-update add udev sysinit` + `rc-update add udev-trigger sysinit` (persistente).
+**Red de seguridad**: [etc/local.d/zzz-wlan0-managed.start](etc/local.d/zzz-wlan0-managed.start) —
+en background, espera a wlan0, asegura udevd, `udevadm trigger --subsystem-match=net` + settle, y si
+NM sigue viéndolo unmanaged fuerza `nmcli dev set wlan0 managed yes` + restart de NM. Validado con
+reboot: WiFi conecta solo (`hola-test`, IP). (El `bluetooth [crashed]` de rc-status es cosmético —
+el openrc arranca antes de hci0; el bring-up real es async por `zz-consys-bt.start`.)
+
 ## Cómo verificar un boot sano
 ```
 dmesg | grep "random: crng"        # debe ser < 10s
