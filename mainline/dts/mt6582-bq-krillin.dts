@@ -178,6 +178,14 @@
 			touchscreen-size-x = <540>;
 			touchscreen-size-y = <960>;
 		};
+
+		accelerometer@1d {
+			compatible = "st,lsm330-accel";
+			reg = <0x1d>;
+			mount-matrix = "0", "1", "0",
+				       "1", "0", "0",
+				       "0", "0", "-1";
+		};
 	};
 };
 
@@ -527,16 +535,14 @@
 /* ============ AUDIO — AFE (Audio Front End) del SoC ============
  * Bloque digital de audio @0x11220000. El codec analogico (ANA) vive en el
  * PMIC MT6323 via pwrap (Fase B, driver aparte). Reloj: el LK deja INFRA_AUDIO
- * encendido (validado HW 0705: INFRA_PDN_STA bit5=0, AFE lee/escribe OK), sin
- * CCF -> sin propiedad clocks (clk_ignore_unused lo preserva).
- * IRQ: downstream HW_AFE_MCU_IRQ_LINE = 104+32, request_irq IRQF_TRIGGER_LOW
- * (AudDrv_Kernel.c:127,991) -> GIC_SPI 104 LEVEL_LOW. */
+ * encendido (validado HW 0705); sin CCF -> sin propiedad clocks.
+ * IRQ: downstream 104+32, IRQF_TRIGGER_LOW -> GIC_SPI 104 LEVEL_LOW. */
 &{/soc} {
 	afe: audio-controller@11220000 {
 		compatible = "mediatek,mt6582-afe";
 		reg = <0x11220000 0x1000>;
 		interrupts = <GIC_SPI 104 IRQ_TYPE_LEVEL_LOW>;
-		mediatek,pmic = <&pmic>;   /* MT6323: codec analogico (regmap del pwrap) */
+		mediatek,pmic = <&pmic>;   /* MT6323: codec analogico */
 	};
 };
 

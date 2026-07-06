@@ -55,8 +55,13 @@ En orden de ataque sugerido (impacto/dificultad):
    falta el SPM del mt6582 en mainline → proyecto propio. Detalle: `mainline/suspend/FINDINGS-SUSPEND-0706.md`.
 3. **Módem 2G/3G (llamadas/SMS/datos)** — el hueso más gordo (CCCI/EEMCS del downstream +
    integración ModemManager/ofono). Evaluar viabilidad tras audio.
-4. **Sensores** (acelerómetro/luz/proximidad, I2C) — para rotación y apagar pantalla en llamada.
-   `net.hadess.SensorProxy` hoy ausente (warning de phosh-ambient). Drivers IIO pequeños.
+4. **Sensores** (I2C) — 🟢 **AUTO-ROTACIÓN FUNCIONA (0706)**: acelerómetro **LSM330** @0x1d por IIO
+   `st_accel` (=y) + nodo DT con **mount-matrix** calibrada (`[[0,1,0],[1,0,0],[0,0,-1]]`, de
+   `direction=7`) + `iio-sensor-proxy` (rc default) + **regla polkit** que autoriza a sxmo a reclamar
+   sensores (sin ella la sesión aislada da AccessDenied). Validado en HW. **Pendiente**: lockscreen no
+   rota (Phosh lo fija a portrait a propósito — `fixup_lockscreen_orientation`); y portar giro
+   (`st_gyro` @0x6b), luz+proximidad (`tsl2772` @0x39 → auto-brillo/llamadas), magnetómetro (MMC3516x
+   @0x30, brújula). Detalle: `mainline/sensors/FINDINGS-SENSORS-0706.md`.
 5. **Cámaras** — muy abajo en prioridad (ISP MTK complejo).
    - **Waydroid (apps Android)** — 🟡 VIABLE pero APARCADO por RAM (0706). Existe imagen armv7
      (`waydroid_arm`, LineageOS 20/Android 13 en SourceForge); pmOS empaqueta `waydroid` (falta añadir

@@ -1,0 +1,17 @@
+// Permitir a la sesion aislada de phosh (usuario 'sxmo') reclamar sensores de
+// iio-sensor-proxy (acelerometro/luz/proximidad/brujula).
+//
+// La sesion de phosh corre bajo dbus-run-session SIN registrarse en elogind, asi
+// que para polkit NO es una sesion "activa" -> subject.active=false. La policy de
+// net.hadess.SensorProxy.claim-sensor tiene allow_active=yes pero allow_inactive=no
+// -> phosh recibe "AccessDenied: Not Authorized: Sensor claim not allowed" y NO hay
+// auto-rotacion ni brillo automatico. Esta regla lo autoriza explicitamente para sxmo.
+//
+// (El fix "de verdad" seria registrar la sesion en elogind/PAM -> ver ROADMAP; esto
+//  es el atajo pragmatico, igual que para otros permisos de la sesion aislada.)
+polkit.addRule(function(action, subject) {
+    if (action.id == "net.hadess.SensorProxy.claim-sensor" &&
+        subject.user == "sxmo") {
+        return polkit.Result.YES;
+    }
+});
