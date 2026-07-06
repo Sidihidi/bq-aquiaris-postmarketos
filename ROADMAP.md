@@ -34,14 +34,14 @@ la foto completa: qué está al 100%, qué está a medias, y qué falta — con 
 
 En orden de ataque sugerido (impacto/dificultad):
 
-1. **Audio (ALSA para MT6582)** — **✅✅ FUNCIONA (0706): AURICULARES + ALTAVOZ en HW.** Fase A.2
-   (motor PCM del AFE) + secuencia analógica del codec MT6323 (RE del HAL Android `audio.primary.
-   mt6582.so` — la pieza clave era un `usleep(10ms)` de bias-settle + el ORDEN, que el poke plano no
-   tenía) + amp externo GPIO118 (tren de pulsos). Validado sonando. Secuencias en
-   `mainline/audio/codec-sequence/`; hito en `MILESTONE-AUDIO-FUNCIONA-0706.md`. **PENDIENTE (pulido)**:
-   bakear las secuencias en el driver (deltas SoC AFE en `mt6582-afe-pcm.c` + un codec ASoC que
-   ejecute el power-up analógico con el delay + GPIO118 por DAPM/pinctrl) para que `aplay`/Phosh
-   suenen sin scripts. Ahora mismo suena aplicando los scripts tras `aplay`.
+1. **Audio (ALSA para MT6582)** — **✅✅✅ FUNCIONA Y FORMALIZADO EN EL DRIVER (0706, kernel #241):
+   `aplay`/mpv suenan SOLOS (auriculares + altavoz), sin scripts.** `mt6582-afe-pcm.c` hace el codec
+   MT6323 en `.prepare`/`.close` (regmap del pwrap vía phandle `mediatek,pmic`, con el `usleep(10ms)`
+   de bias-settle — la clave del RE del HAL) + amp externo GPIO118. Hito en
+   `MILESTONE-AUDIO-FUNCIONA-0706.md`. **PENDIENTE audio-GUI (no bloqueante)**: la card usa codec
+   dummy → sin puertos con nombre → PulseAudio/callaudiod la descartan ("lacks speaker/earpiece port")
+   → falta un **perfil UCM** o un codec ASoC con DAPM (Speaker/Headphones routes) para que Phosh/
+   YouTube-en-navegador suenen. (Livi/mpv por ALSA directo sí.)
 2. **Suspend/resume** — bloquea la autonomía real. Hoy `enable-suspend false`. Requiere validar
    suspend de: WiFi (port), consys/BT, panel, pwrap. Tocará el driver WiFi (suspend hooks).
 3. **Módem 2G/3G (llamadas/SMS/datos)** — el hueso más gordo (CCCI/EEMCS del downstream +
