@@ -1,0 +1,59 @@
+#!/bin/sh
+# /usr/local/bin/battery — lee VBAT del MT6323 (AUXADC canal 7 = BATSNS = AUXADC_ADC0)
+# por pwrap_poke y estima el % de carga.
+#   VBAT_mV = raw * 4 * 1800 / 32768   (divisor R_BAT_SENSE=4, ref 1800mV, ADC 15-bit).
+#   Validado: raw=18609 -> 4089 mV, coincide con la medida real cargando.
+#
+# COMPENSACION DE CARGA (0706): un gauge por-voltaje SIN sensado de corriente miente bajo
+# carga -> al CARGAR el VBAT esta inflado (caida I*R del cargador) y al DESCARGAR esta
+# hundido. Estimamos el OCV (voltaje en reposo) restando/sumando una caida I*R tipica antes
+# de la curva:
+#   - cargando:    OCV ~= VBAT - 100 mV  (~700 mA * ~140 mOhm, R interna del krilin r_profile_t2)
+#   - descargando: OCV ~= VBAT + 40 mV   (carga media tipica; pantalla on ~300 mA)
+# El % sale de una curva OCV de Li-ion en reposo (interina pero razonable).
+#
+# TRABAJO FUTURO (gauge preciso): usar la tabla ZCV real + coulomb-counting del HW fuel gauge
+# del MT6323. El downstream la tiene en arch/arm/mach-mt6582/krillin/power/krilin_cust_battery_
+# meter_table.h (battery_profile_t2 = 25C) + r_profile_t2, PERO es una curva CARGADA: necesita
+# leer la corriente de bateria (CAR/coulomb counter del MT6323 por pwrap) para compensarla bien.
+# Sin eso, la compensacion I*R fija de arriba es la mejor aproximacion.
+P=/usr/local/bin/pwrap_poke
+rd() { $P r "$1" | sed 's/.*= //'; }
+wr() { $P w "$1" "$(printf 0x%x $2)" >/dev/null; }
+
+# pedir canal 7 (CON22=0x076E bit7) + habilitar VBUF (CON11=0x0758 bit4)
+v=$(rd 0x076E); wr 0x076E $(( v | (1<<7) ))
+v=$(rd 0x0758); wr 0x0758 $(( v | (1<<4) ))
+sleep 1
+
+sum=0; n=0; i=0
+while [ $i -lt 8 ]; do
+  val=$(rd 0x0714)
+  if [ $(( (val >> 15) & 1 )) -eq 1 ]; then
+    raw=$(( val & 0x7FFF )); sum=$(( sum + raw )); n=$(( n + 1 ))
+  fi
+  i=$(( i + 1 ))
+done
+[ $n -eq 0 ] && { echo "battery: sin lecturas validas"; exit 1; }
+raw=$(( sum / n ))
+mv=$(( raw * 4 * 1800 / 32768 ))
+
+# estado de carga -> compensacion I*R para estimar OCV
+st=$(/usr/local/bin/charge-status 2>/dev/null | grep -o 'STAT=[A-Z]*' | head -1)
+case "$st" in
+  *CARGANDO*) ocv=$(( mv - 100 )); chg=chg ;;
+  *)          ocv=$(( mv + 40 )); chg=dis ;;
+esac
+
+# % piecewise por curva OCV (reposo) Li-ion
+if   [ $ocv -ge 4200 ]; then pct=100
+elif [ $ocv -ge 4000 ]; then pct=$(( 80 + (ocv-4000)*20/200 ))
+elif [ $ocv -ge 3850 ]; then pct=$(( 60 + (ocv-3850)*20/150 ))
+elif [ $ocv -ge 3700 ]; then pct=$(( 30 + (ocv-3700)*30/150 ))
+elif [ $ocv -ge 3400 ]; then pct=$(( (ocv-3400)*30/300 ))
+else pct=0; fi
+[ $pct -gt 100 ] && pct=100
+[ $pct -lt 0 ] && pct=0
+
+# VBAT = voltaje real medido (para el display); el % ya lleva la compensacion de carga.
+echo "VBAT: ${mv} mV  (~${pct}%)   [raw=${raw} ocv=${ocv} ${chg} avg de ${n}]"

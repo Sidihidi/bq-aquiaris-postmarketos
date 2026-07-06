@@ -23,7 +23,7 @@ la foto completa: qué está al 100%, qué está a medias, y qué falta — con 
 
 | Área | Qué falta | Siguiente paso |
 |---|---|---|
-| **Batería %** | El % que ve Phosh viene de `battery-upower`→`test_power`; la lectura VBAT por AUXADC (`/usr/local/bin/battery`) fallaba (0%) | Depurar la lectura AUXADC del MT6323 por pwrap |
+| **Batería %** | ✅ **FUNCIONA (0706)**: `battery` lee VBAT por AUXADC del MT6323 (canal 7, `raw*4*1800/32768`, validado 4088mV) + `charge-status` (FAN5405 i2c) → `battery-upower` alimenta `test_power.ko` → UPower → Phosh (%, voltaje, icono de carga). UPower decide cargando/descargando por el SIGNO de `current_now`. **Precisión mejorada (0706)**: compensación I·R de carga (OCV≈VBAT−100mV cargando / +40mV descargando) → cargando muestra ~78% en vez del 88% inflado. Scripts versionados en `mainline/rootfs/` | **Gauge preciso = trabajo futuro**: tabla ZCV real (`krilin_cust_battery_meter_table.h`) + coulomb-counting del HW FG del MT6323 (leer corriente de batería por pwrap) para compensar la curva cargada |
 | **GPS** | Cadena completa implementada (bridge stpgps→gpsd→geoclue) | Validar un fix real en exterior |
 | **Botón: fluidez** | El lock/wake tarda ~1-2s (cada acción = `su`+gdbus nuevos) | Daemon-hijo persistente EN la sesión (socket) para latencia ~0; debounce fino |
 | **Bloqueo por inactividad** | Con el parche no-DPMS, el idle-blank de phosh ya no oscurece (solo marca estado); idle-delay dejado a 0 | Mini-listener de `ActiveChanged`→flag del backlight → idle-off completo |
