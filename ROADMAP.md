@@ -44,8 +44,15 @@ En orden de ataque sugerido (impacto/dificultad):
    --start` al boot + autospawn=yes para las apps (Livi/YouTube-en-navegador por pulsesink). El aviso
    de callaudiod ("lacks speaker/earpiece port") es solo para el ROUTING DE LLAMADAS (sin módem);
    un perfil UCM con puertos con nombre queda pendiente SOLO para eso.
-2. **Suspend/resume** — bloquea la autonomía real. Hoy `enable-suspend false`. Requiere validar
-   suspend de: WiFi (port), consys/BT, panel, pwrap. Tocará el driver WiFi (suspend hooks).
+2. **Suspend/resume (s2idle)** — 🟢 **FUNCIONA + AUTO-SUSPEND ACTIVO (0706)**. s2idle suspende/resume
+   de punta a punta (todos los resume callbacks completan, confirmado por ramoops); RTC y **botón**
+   despiertan; **WiFi reconecta** tras resume. usb0/musb no re-enumera solo → wrapper `mt6582-suspend`
+   lo repara (unbind/rebind). Daemon `mt6582-autosuspend` (boot: `zzy-autosuspend.start`) suspende
+   con la pantalla 60s apagada salvo inhibidores (audio/SSH/flag `/run/mt6582-no-suspend`); wake por
+   botón. Validado end-to-end en HW (usuario confirmó: suspende→botón→pantalla). **PENDIENTE**: medir
+   el ahorro real (necesita batería) para decidir si s2idle basta; el nit de latencia al desbloquear
+   es la fluidez del botón (ya listada). **Deep suspend** (power-gating del SoC, ahorro grande) =
+   falta el SPM del mt6582 en mainline → proyecto propio. Detalle: `mainline/suspend/FINDINGS-SUSPEND-0706.md`.
 3. **Módem 2G/3G (llamadas/SMS/datos)** — el hueso más gordo (CCCI/EEMCS del downstream +
    integración ModemManager/ofono). Evaluar viabilidad tras audio.
 4. **Sensores** (acelerómetro/luz/proximidad, I2C) — para rotación y apagar pantalla en llamada.
