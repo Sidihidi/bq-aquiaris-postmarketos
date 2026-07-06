@@ -49,6 +49,13 @@ En orden de ataque sugerido (impacto/dificultad):
 4. **Sensores** (acelerómetro/luz/proximidad, I2C) — para rotación y apagar pantalla en llamada.
    `net.hadess.SensorProxy` hoy ausente (warning de phosh-ambient). Drivers IIO pequeños.
 5. **Cámaras** — muy abajo en prioridad (ISP MTK complejo).
+   - **Waydroid (apps Android)** — 🟡 VIABLE pero APARCADO por RAM (0706). Existe imagen armv7
+     (`waydroid_arm`, LineageOS 20/Android 13 en SourceForge); pmOS empaqueta `waydroid` (falta añadir
+     el repo pmOS — el móvil solo apunta a Alpine v3.24 main/community). Kernel necesita ~10 configs:
+     `ANDROID_BINDER_IPC`, `ANDROID_BINDERFS`, `FUSE_FS`, `OVERLAY_FS`, `TUN`, `BRIDGE`, `VETH`,
+     `MEMCG`, `CGROUP_PIDS`, `PSI` (namespaces/cgroups/squashfs/memfd YA están). **Bloqueo práctico:
+     1 GB de RAM** → Android 13 entero + pmOS+Phosh haría thrashing/OOM; A7 lento. Reevaluar si hay
+     un móvil con ≥2 GB. El usuario decidió saltarlo.
 6. **LED de notificaciones** — 🟡 DIAGNOSTICADO (0706), fix compilado, pendiente flash+validar.
    Los LEDs RGB (`{red,green,blue}:indicator`) YA existen y encienden en HW (nodo DT ya presente; el
    "Failed to locate of_node" del dmesg es de `mt6323-pwrc`, NO del LED — red herring). Causa real de que
