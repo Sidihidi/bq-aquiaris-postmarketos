@@ -1,0 +1,38 @@
+[   71.375579] (0)[84:bat_thread_kthr][mt_kpoc_power_off_check] , chr_vol=4674, boot_mode=0
+[   81.324305] (0)[84:bat_thread_kthr][mt_kpoc_power_off_check] , chr_vol=4683, boot_mode=0
+[   91.331194] (0)[84:bat_thread_kthr][mt_kpoc_power_off_check] , chr_vol=4655, boot_mode=0
+[  100.600485] (0)[721:PhotonicModulat]powerkey_kick:mt_mt65xx_led_set:1,1
+[  100.607687] (0)[721:PhotonicModulat]powerkey_kick:mt_mt65xx_led_set:1,1
+[  100.622339] (0)[721:PhotonicModulat]powerkey_kick:mt_mt65xx_led_set:1,1
+[  100.637278] (0)[721:PhotonicModulat]powerkey_kick:mt_mt65xx_led_set:1,1
+[  100.652287] (1)[721:PhotonicModulat]powerkey_kick:mt_mt65xx_led_set:1,1
+[  100.668532] (0)[721:PhotonicModulat]powerkey_kick:mt_mt65xx_led_set:1,1
+[  100.684490] (0)[721:PhotonicModulat]powerkey_kick:mt_mt65xx_led_set:1,1
+[  100.698151]-(0)[1241:RenderThread]powerkey_kick:mt_mt65xx_led_set:1,1
+[  100.713385] (1)[721:PhotonicModulat]powerkey_kick:mt_mt65xx_led_set:1,1
+[  100.730146]-(0)[31:kworker/0:1]powerkey_kick:mt_mt65xx_led_set:1,1
+[  100.743844]-(0)[81:kworker/u8:2]powerkey_kick:mt_mt65xx_led_set:1,1
+[  100.760200] (0)[721:PhotonicModulat]powerkey_kick:mt_mt65xx_led_set:1,1
+[  100.773618] (0)[721:PhotonicModulat]powerkey_kick:mt_mt65xx_led_set:1,1
+[  100.790916] (1)[721:PhotonicModulat]powerkey_kick:mt_mt65xx_led_set:1,1
+[  100.806256] (1)[721:PhotonicModulat]powerkey_kick:mt_mt65xx_led_set:1,1
+[  100.821514] (1)[721:PhotonicModulat]powerkey_kick:mt_mt65xx_led_set:1,1
+[  100.836324] (1)[721:PhotonicModulat]powerkey_kick:mt_mt65xx_led_set:1,1
+[  100.851437] (1)[721:PhotonicModulat]powerkey_kick:mt_mt65xx_led_set:1,1
+[  100.866291] (1)[721:PhotonicModulat]powerkey_kick:mt_mt65xx_led_set:1,1
+[  100.881292] (1)[721:PhotonicModulat]powerkey_kick:mt_mt65xx_led_set:1,1
+[  100.896452] (1)[721:PhotonicModulat]powerkey_kick:mt_mt65xx_led_set:1,1
+[  100.911297] (1)[721:PhotonicModulat]powerkey_kick:mt_mt65xx_led_set:1,1
+[  100.926348] (1)[721:PhotonicModulat]powerkey_kick:mt_mt65xx_led_set:1,1
+[  100.941384] (1)[721:PhotonicModulat]powerkey_kick:mt_mt65xx_led_set:1,1
+[  100.956365] (1)[721:PhotonicModulat]powerkey_kick:mt_mt65xx_led_set:1,1
+[  100.971509] (0)[721:PhotonicModulat]powerkey_kick:mt_mt65xx_led_set:1,1
+[  100.986284] (0)[76:disp_config_upd]powerkey_kick:mt_mt65xx_led_set:1,1
+[  101.337591] (0)[84:bat_thread_kthr][mt_kpoc_power_off_check] , chr_vol=4674, boot_mode=0
+[  106.579534] (1)[1991:AudioIn_16]+AudDrv AUD_SET_CLOCK(1) 
+[  106.579583] (1)[1991:AudioIn_16]+AudDrv AUD_SET_ANA_CLOCK(1), 
+[  106.595982] (0)[1991:AudioIn_16]+AudDrv AUD_SET_ANA_CLOCK(1), 
+[  106.596024] (0)[1991:AudioIn_16]+AudDrv AUD_SET_CLOCK(1) 
+[  106.618453] (1)[549:AudioOut_2]+AudDrv AUD_SET_ANA_CLOCK(1), 
+[  106.618491] (1)[549:AudioOut_2]+AudDrv AUD_SET_CLOCK(1) 
+[  106.619159] (1)[549:AudioOut_2]Ana_Set_Reg offset= 0x10c , value = 0x100 mask = 0xffff0100 ret = 0 Reg_Value = 0x0

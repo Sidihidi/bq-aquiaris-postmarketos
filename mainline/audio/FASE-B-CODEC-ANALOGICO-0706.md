@@ -59,6 +59,29 @@ está realmente produciendo analógico.
    `AUDTOP_CON4`/routing. Sin arrancar LineageOS pero es RE de un binario ARM.
 3. **Fuerza bruta empírica**: probar valores de `AUDTOP_CON4` de oído. Lento e incierto (16 bits).
 
+## ✅ GROUND TRUTH capturado de LineageOS + HAL extraído (0706 noche)
+Dual-boot a LineageOS (`fastboot`/`dd` del boot en `mmcblk0 seek=83968`; adb autorizado en la Pi) +
+reproducir sonido + `cat /proc/audio` (dump del AudDrv chardev) = **estado EXACTO del codec sonando**
+(`lineage-audio-registers-PLAYING-0706.txt`). El valor que faltaba: **AUDTOP_CON4=0x7c**. Repliqué
+por pwrap+devmem TODOS los registros (SoC AFE + PMIC) a los valores exactos de LineageOS —
+**y aún NO suena**. Diagnóstico: el estado FINAL coincide pero el encendido analógico necesita la
+SECUENCIA ORDENADA con ESPERAS (depop, asentamiento del bias), que un poke plano no reproduce.
+
+**La secuencia analógica vive SOLO en el HAL de Android** (no en el kernel — el driver del krillin es
+el chardev `sound/mt6582/`, que ya porteamos como la Fase A.2 digital; la parte analógica la hacía el
+HAL vía ioctl `SET_ANAAFE_REG`, y el kernel NO loguea esas escrituras). **EXTRAÍDO el binario del HAL**:
+`audio.primary.mt6582.so` (720KB, ELF ARM 32-bit, en `~/audio-hal/` de la Pi + scratchpad local),
+con la clase `AudioAnalogControl` y la escritora `AudioAnalogReg::SetAnalogReg(reg,val,mask)` @0x34ea4.
+**RE en curso** (agente, estilo firmware WiFi con Ghidra/objdump): extraer la secuencia ordenada de
+`AnalogOpen`/`AnalogOpenForAddSPK`@0x36d5c/`SetFrequency` con sus delays → esa es la secuencia a
+implementar 1:1 en el codec driver. Salida esperada: lista ordenada de SetAnalogReg + msleep.
+
+**SIGUIENTE (cuando el RE dé la secuencia)**: implementar la secuencia 1:1 (ordenada + delays) — como
+script pwrap para validar (¿suena?) y luego en el codec driver ASoC (DAPM que llama a la secuencia).
+Deltas SoC AFE ya conocidos (a meter en el driver AFE): `AFE_I2S_CON=0x8000000d`, `AFE_DAC_CON0=0x13043`
+(no 0x3), `AFE_ADDA_NEWIF_CFG0=0x3f87200`/`CFG1=0x3117180`, `AFE_CONN2=0x410040`, `ABB_AFE_NEWIF0=0x7330`
+(freq ADDA=7, no 9). El resto (AUDTOP/ABB/SPK) = PMIC, por la secuencia del HAL.
+
 ## Herramientas dejadas
 - `/tmp/audio-codec-test.sh` (en el móvil): poke de power_init + SPK.
 - `/tmp/tone30.wav`: tono 440Hz 30s estéreo para pruebas.
