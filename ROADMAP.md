@@ -58,12 +58,13 @@ En orden de ataque sugerido (impacto/dificultad):
      `MEMCG`, `CGROUP_PIDS`, `PSI` (namespaces/cgroups/squashfs/memfd YA están). **Bloqueo práctico:
      1 GB de RAM** → Android 13 entero + pmOS+Phosh haría thrashing/OOM; A7 lento. Reevaluar si hay
      un móvil con ≥2 GB. El usuario decidió saltarlo.
-6. **LED de notificaciones** — 🟡 DIAGNOSTICADO (0706), fix compilado, pendiente flash+validar.
-   Los LEDs RGB (`{red,green,blue}:indicator`) YA existen y encienden en HW (nodo DT ya presente; el
-   "Failed to locate of_node" del dmesg es de `mt6323-pwrc`, NO del LED — red herring). Causa real de que
-   Phosh no los use: **al kernel le falta `CONFIG_LEDS_TRIGGER_PATTERN`** (feedbackd conduce los LEDs por
-   el trigger `pattern` vía `fbd-ledctrl`). Fix compilado en la .123 (`=y` + rebuild), falta flashear +
-   validar (perfil feedbackd a `full` + `fbcli -E notification-missed-generic`). Detalle:
+6. **LED de notificaciones** — ✅✅ RESUELTO Y VALIDADO (0706): el LED **azul respira** en
+   `notification-missed-generic` accionado por feedbackd. Hicieron falta **3 piezas** (no solo el
+   trigger del kernel): (1) `CONFIG_LEDS_TRIGGER_PATTERN=y` (ya en #241), (2) **color por udev**
+   (`73-krillin-leds-color.rules`: `FEEDBACKD_LED_COLOR` por LED — la regla genérica no lo pone), y
+   (3) **`sxmo` en el grupo `feedbackd`** (los sysfs son `root:feedbackd` g+w; sin el grupo →
+   "Permission denied"; fix persistente + `local.d/led-feedbackd-group.start`). Funciona con el perfil
+   `quiet` (el feedback `Led` está a nivel `silent` en el tema). Detalle:
    `mainline/userspace/HANDOFF-LED-NOTIF-0706.md`.
 7. **Touch al DT** — retirar `touch-power.start` cuando edt-ft5x06 + regulador mt6323 estén en el
    DT (`vin-supply` + `reset-gpios`); hoy es un power-cycle userspace.

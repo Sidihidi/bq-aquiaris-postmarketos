@@ -1,0 +1,15 @@
+# krillin: dar COLOR a los LEDs del MT6323 para feedbackd.
+#
+# feedbackd (72-feedbackd.rules) marca los LEDs *:indicator con FEEDBACKD_TYPE=led
+# y les pone el trigger 'pattern', PERO no les asigna color -> sin color, feedbackd
+# no puede casar el color que pide un evento (p.ej. azul para notification-missed)
+# con ningun LED, y no enciende NADA. La regla generica no lo hace porque el color
+# no es deducible del nombre en el caso general; para LEDs mono con nombre de color
+# (como el lp5523:r/g/b del stock) hay que declararlo explicitamente.
+#
+# Nuestros LEDs: /devices/.../mt6323-led/leds/{red,green,blue}:indicator (mono, max=6).
+# Este fichero corre despues del 72 (numero mayor) -> anade FEEDBACKD_LED_COLOR a la
+# base de propiedades del device; feedbackd lo lee y ya sabe encender el LED correcto.
+SUBSYSTEM=="leds", DEVPATH=="*/red:indicator",   ENV{FEEDBACKD_LED_COLOR}="red"
+SUBSYSTEM=="leds", DEVPATH=="*/green:indicator", ENV{FEEDBACKD_LED_COLOR}="green"
+SUBSYSTEM=="leds", DEVPATH=="*/blue:indicator",  ENV{FEEDBACKD_LED_COLOR}="blue"

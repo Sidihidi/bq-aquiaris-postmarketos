@@ -1,10 +1,40 @@
-# HANDOFF — LED de notificaciones: diagnosticado + fix compilado, pendiente flash+validar (Mac/.123, 2026-07-06)
+# ✅ RESUELTO — LED de notificaciones FUNCIONA (2026-07-06)
 
-## TL;DR
+## TL;DR (resolución)
+El LED RGB de notificaciones **ya enciende con feedbackd** (validado: `notification-missed-generic`
+→ el LED **azul respira** 0↔6 accionado por feedbackd de punta a punta). Hicieron falta **3 piezas**,
+no solo el trigger del kernel que decía el diagnóstico original:
+
+1. **Kernel: `CONFIG_LEDS_TRIGGER_PATTERN=y`** — feedbackd conduce los LEDs por el trigger `pattern`.
+   Ya venía en el kernel **#241** (unificado audio+LED; `build-krillin/.config` de la Pi .38 lo tiene).
+2. **udev: color por LED** — la regla genérica de feedbackd (`72-feedbackd.rules:41`, `*/*:indicator`)
+   marca `FEEDBACKD_TYPE=led` y pone el trigger, pero **NO** asigna color. Sin color feedbackd no puede
+   casar el color que pide el evento (azul) con ningún LED → no enciende nada. Fix: **`73-krillin-leds-color.rules`**
+   (en el repo) añade `ENV{FEEDBACKD_LED_COLOR}=red|green|blue` por cada `{red,green,blue}:indicator`
+   (igual que las líneas `lp5523:r/g/b` del stock). Verificado: feedbackd loguea `LED ... usable for blue`,
+   `Discovered single color LED`.
+3. **Grupo: `sxmo` en `feedbackd`** — feedbackd corre como sxmo y escribe los sysfs de los LEDs, que
+   `fbd-ledctrl -G feedbackd` deja en `root:feedbackd rw-rw-r--`. sxmo NO estaba en ese grupo →
+   `WARNING Failed to set led pattern: .../pattern: Permission denied`. Fix: `addgroup sxmo feedbackd`
+   (persistente en `/etc/group`) + **`/etc/local.d/led-feedbackd-group.start`** (idempotente, corre como
+   root antes de la sesión; `dbus-run-session` hereda el grupo al lanzarse → feedbackd activado por D-Bus
+   lo tiene). Este era el bloqueo que el diagnóstico original NO había previsto (el paso 3 del diag SÍ
+   predijo el color).
+
+**Cómo probar** (el `-t` de fbcli es un timeout MÁX; con stdin cerrado fbcli recibe EOF y corta el
+feedback al instante → hay que dejar stdin abierto): en la sesión, como sxmo:
+`sleep 9 | fbcli -E notification-missed-generic -t 7` y mirar el LED (o muestrear
+`/sys/class/leds/blue:indicator/brightness` → rampa 0↔6). El feedback `Led` está en el tema a nivel
+`silent` → funciona con el perfil `quiet` (el que dejamos para la vibración), sin subir a `full`.
+
+---
+
+## (Diagnóstico original — histórico)
 El LED RGB de notificaciones NO se enciende con Phosh porque **al kernel le falta el trigger
 `pattern`** (`CONFIG_LEDS_TRIGGER_PATTERN`), que es *exactamente* por donde feedbackd conduce los LEDs.
 **Fix = habilitar ese config + rebuild + flash.** Ya está compilado en la .123 (falta SOLO flashear,
-la Pi se cayó de la red antes del `dd`).
+la Pi se cayó de la red antes del `dd`). *(Nota: el trigger era necesario pero NO suficiente — ver
+resolución arriba: además hicieron falta el color por udev y el grupo feedbackd.)*
 
 ## Lo que está BIEN (verificado en HW #238)
 - **Hardware RGB funciona**: `echo N > /sys/class/leds/{red,green,blue}:indicator/brightness` enciende

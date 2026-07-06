@@ -1,0 +1,12 @@
+#!/bin/sh
+# LED de notificaciones: feedbackd corre como el usuario de la sesion (sxmo) y
+# escribe los sysfs de los LEDs, que fbd-ledctrl (via 72-feedbackd.rules) deja en
+# grupo 'feedbackd' con g+w (root:feedbackd rw-rw-r--). Si sxmo NO esta en ese
+# grupo -> feedbackd falla con "Permission denied" al escribir pattern/brightness
+# y el LED NO enciende (aunque el color por udev y el trigger 'pattern' esten bien).
+#
+# Aseguramos la pertenencia ANTES de que arranque la sesion: dbus-run-session
+# (launch_phosh.sh) hereda los grupos del usuario al lanzarse, y feedbackd se
+# activa por D-Bus bajo ese dbus-daemon -> hereda el grupo 'feedbackd'. Idempotente.
+id -nG sxmo 2>/dev/null | grep -qw feedbackd || addgroup sxmo feedbackd 2>/dev/null
+exit 0
