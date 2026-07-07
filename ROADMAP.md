@@ -53,8 +53,11 @@ En orden de ataque sugerido (impacto/dificultad):
    el ahorro real (necesita batería) para decidir si s2idle basta; el nit de latencia al desbloquear
    es la fluidez del botón (ya listada). **Deep suspend** (power-gating del SoC, ahorro grande) =
    falta el SPM del mt6582 en mainline → proyecto propio. Detalle: `mainline/suspend/FINDINGS-SUSPEND-0706.md`.
-3. **Módem 2G/3G (llamadas/SMS/datos)** — el hueso más gordo (CCCI/EEMCS del downstream +
-   integración ModemManager/ofono). Evaluar viabilidad tras audio.
+3. **Módem 2G/3G (llamadas/SMS/datos)** — 🔴 **NO-GO (estudio 0707)**: MD en core separado con firmware
+   MOLY propietario + CCCI (memoria compartida); **cero soporte en mainline** para esta clase de módem MTK
+   (el único WWAN MTK mainline, t7xx, es 5G-PCIe, no aplica); **ningún MT65xx tiene llamadas en mainline**.
+   Requiere port del eccci + boot del MD + puente RIL↔ModemManager (sin framework destino) = moonshot de
+   meses, baja probabilidad. Límite conocido, como la cámara. Detalle: `mainline/modem/FEASIBILITY-MODEM-0707.md`.
 4. **Sensores** (I2C) — 🟢 **AUTO-ROTACIÓN FUNCIONA (0706)**: acelerómetro **LSM330** @0x1d por IIO
    `st_accel` (=y) + nodo DT con **mount-matrix** calibrada (`[[0,1,0],[1,0,0],[0,0,-1]]`, de
    `direction=7`) + `iio-sensor-proxy` (rc default) + **regla polkit** que autoriza a sxmo a reclamar
