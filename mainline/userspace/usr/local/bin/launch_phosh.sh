@@ -10,6 +10,15 @@ export PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 n=0
 while :; do
   t0=$(cut -d. -f1 /proc/uptime)
+  # Limpiar sockets dbus huerfanos antes de (re)lanzar phoc. Cada dbus-run-session
+  # crea un socket /tmp/dbus-*; si la sesion muere y se relanza, el socket viejo
+  # queda huerfanos. Visto en HW: 328 acumulados tras dias de crashes/reboots del
+  # WiFi -> phosh_env() del mt6582-powerkey los escanea y la GUI degrada. Solo
+  # borramos los que NINGUN proceso tiene abierto como fd (los vivos se quedan).
+  find /tmp -maxdepth 1 -name 'dbus-*' -type s 2>/dev/null | while read s; do
+    alive=$(find /proc/[0-9]*/fd -lname "$s" 2>/dev/null | head -1)
+    [ -z "$alive" ] && rm -f "$s"
+  done
   echo "[launch_phosh] lanzando phoc (intento tras $n fallos, uptime ${t0}s)"
   dbus-run-session phoc -E /usr/local/bin/phosh-session.sh
   rc=$?

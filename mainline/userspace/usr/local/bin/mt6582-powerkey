@@ -78,8 +78,10 @@ def screen_off():
 
 
 def screen_on(level=None):
+    t0 = time.monotonic()
     try:
         os.remove(SCREEN_OFF_FLAG)               # mt6582-backlight.py restaura el brillo de /sys
+        log("screen_on: flag quitado en %.3fs" % (time.monotonic()-t0))
     except Exception:
         pass
     # Despertar = quitar el flag (el backlight vuelve) y LISTO: phosh esta parcheado para
@@ -88,6 +90,7 @@ def screen_on(level=None):
     # output_on() queda solo como red de seguridad por si algo dejo el dpms en Off
     # (p.ej. un phosh sin el parche); wlr-randr tira el shield, por eso solo si hace falta.
     output_on()
+    log("screen_on: TOTAL %.3fs" % (time.monotonic()-t0))
 
 
 def phosh_env():
@@ -130,12 +133,16 @@ def output_on():
     # re-enciende el panel DRM (phosh lo apaga en el fade del lockscreen y no lo devuelve).
     # SOLO si esta realmente Off: llamar a wlr-randr durante el fade de phosh roza una
     # carrera de capas en phoc (CRITICAL top-panel, visto 0705) — no tocar si no hace falta.
+    t0 = time.monotonic()
     try:
         dpms = open("/sys/class/drm/card1-DSI-1/dpms").read().strip()
     except Exception:
         dpms = "Off"
+    log("output_on: dpms=%s (leido en %.3fs)" % (dpms, time.monotonic()-t0))
     if dpms == "Off":
+        t1 = time.monotonic()
         run_in_session("wlr-randr --output DSI-1 --on")
+        log("output_on: wlr-randr tardo %.3fs" % (time.monotonic()-t1))
 
 
 def phosh_lock(active):
@@ -199,21 +206,50 @@ def main():
         time.sleep(2)
         ev = find_ev()
     saved = read_int(MX, 10) or 10
-    fd = open(ev, "rb", buffering=0)
-    # DUEÑO UNICO: nadie mas (phosh/phoc/gsd) recibe KEY_POWER a partir de aqui
-    try:
-        fcntl.ioctl(fd, EVIOCGRAB, 1)
-    except Exception:
-        pass
+
+    # DUEÑO UNICO del boton via EVIOCGRAB. Dos problemas reales encontrados en HW:
+    #  (1) phoc al (re)iniciarse puede robar el EVIOCGRAB.
+    #  (2) BUG DE FONDO: tras idle prolongado con el grab activo, el driver mtk-pmic-keys
+    #      deja de entregar eventos KEY_POWER a ESTE fd (el grab sigue siendo nuestro,
+    #      pero el driver no propaga el IRQ->input event). Reabrir el fd lo arregla al
+    #      instante (confirmado en HW 0707).
+    # Fix: cada REOPEN_INTERVAL s, cerrar y reabrir el fd + re-hacer el grab. Eso
+    # garantiza que el driver siempre tenga un fd "fresco" y entregue eventos. Coste:
+    # ~0 (un close/open por minuto). El select con timeout permite hacer esto sin
+    # quedar bloqueado en un read().
+    REOPEN_INTERVAL = 30.0
+    def open_and_grab():
+        fd = open(ev, "rb", buffering=0)
+        try:
+            fcntl.ioctl(fd, EVIOCGRAB, 1)
+        except Exception:
+            pass
+        return fd
+    fd = open_and_grab()
     last = 0.0
+    last_reopen = time.monotonic()
     while True:
+        # Espera con timeout para reabrir el fd periodicamente.
+        r, _, _ = select.select([fd], [], [], REOPEN_INTERVAL)
+        if time.monotonic() - last_reopen >= REOPEN_INTERVAL:
+            # Reabrir el fd: soluciona el bug del driver que deja de entregar eventos
+            # tras idle con grab activo. Close libera el grab; open+grab lo retoma.
+            try:
+                fd.close()
+            except Exception:
+                pass
+            fd = open_and_grab()
+            last_reopen = time.monotonic()
+        if not r:
+            continue                          # timeout: solo reopen, volver a esperar
         d = fd.read(SZ)
         if not d or len(d) < SZ:
             continue
         _, _, typ, code, val = struct.unpack(FMT, d)
         if typ != EV_KEY or code != KEY_POWER or val != 1:
             continue                         # solo actuamos desde el PRESS
-        if time.monotonic() - last < DEBOUNCE:
+        t_press = time.monotonic()
+        if t_press - last < DEBOUNCE:
             continue                         # metralleta: ignorar
 
         if wait_release_or_long(fd):
@@ -228,7 +264,7 @@ def main():
                 log("accion: OFF+lock (env=%s)" % bool(phosh_env()))
                 phosh_lock(True)
             else:
-                log("accion: ON/wake (env=%s)" % bool(phosh_env()))
+                log("accion: ON/wake (env=%s, press-recibido hace %.2fs)" % (bool(phosh_env()), t_press))
                 screen_on(saved)
         last = time.monotonic()
 
