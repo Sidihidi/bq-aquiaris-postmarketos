@@ -38,7 +38,7 @@ Repo: [github.com/Sidihidi/bq-aquiaris-postmarketos](https://github.com/Sidihidi
 | **STP (robustez BT)** | 🟡 | Analizado; parche de resync RX listo (handoff), sin integrar (no romper el BT que ya va). |
 | **Audio** | 🟡 | Mapeado + esqueleto AFE compilando; port de ~6-8 sem (ALSA SoC de cero). |
 | Botones vol | ✅ | Keypad matriz (`mt6779-keypad`). |
-| FM · cámara · módem 3G | ⬜ | FM = mucho por poco; cámara/módem = propietarios (muy difícil). |
+| FM · cámara · módem 3G | ⬜ | **Investigados a fondo (07-07)**: [ver informe](mainline/CAMARA-MODEM-FM-INVESTIGACION-0707.md). FM = **CONDITIONAL GO** (~1-2 sem, reusa CONSYS); módem M1 (arrancar MD) = **GO** (~3-5 sem, playbook WiFi); cámara = **NO-GO confirmado** (HAL cerrada imprescindible). |
 
 *(El **CONSYS** — combo WiFi/BT/GPS/FM del MT6582, que mainline nunca soportó — se levanta entero por
 drivers propios en `mainline/wifi-consys/`. Es la frontera técnica del proyecto.)*
