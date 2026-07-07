@@ -643,21 +643,49 @@ kalIndicateRxMgmtFrame(
 	struct net_device *prDev;
 	struct wireless_dev *prWdev;
 
+	/* Capturar el frame en locales antes de pasarlo a cfg80211: evita que el
+	 * SW_RFB se recicle (pool RX devolviendolo al FW) entre nuestros checks y
+	 * la llamada, dejando pvHeader colgando. */
+	const u8 *pucFrame;
+	u32 u4FrameLen;
+
 	if (prGlueInfo == NULL || prSwRfb == NULL) {
 		ASSERT(FALSE);
 		return;
 	}
 
-	/* OOPS visto en HW (0705, kernel #235): mgmt frame RX en plena carrera de
-	 * reconexion con el AP desaparecido -> NULL deref en cfg80211_rx_mgmt_ext
-	 * (tx_thread, PC cfg80211_rx_mgmt_ext+0x48, LR aqui). Guardar TODO antes. */
+	/* OOPS recurrente en HW (0705 kernel #235, 0707 kernel #238):
+	 * NULL deref en cfg80211_rx_mgmt_ext+0x48 (ldrh [r4,#10] = mgmt->sa)
+	 * al indicar un action frame al stack. Causas identificadas:
+	 *  - frame demasiado corto (<24B header mgmt) -> cfg80211 lee fuera del buf
+	 *  - pvHeader reciclado por el SW_RFB en carrera del pool RX
+	 *  - wdev con iftype fuera de rango -> mgmt_stypes[iftype] OOB en cfg80211
+	 * Guards adicionales: longitud minima + iftype STA + snapshot en locales. */
 	prDev = prGlueInfo->prDevHandler;
 	if (prDev == NULL || prSwRfb->pvHeader == NULL || prSwRfb->u2PacketLen == 0)
 		return;
 	prWdev = prDev->ieee80211_ptr;
 	if (prWdev == NULL || prWdev->wiphy == NULL)
 		return;
+	/* Solo indicar mgmt en modo STA (el unico iftype que soportamos). En otro
+	 * iftype (o sin iftype valido/OOB), mgmt_stypes[wdev->iftype] en cfg80211
+	 * seria un acceso fuera de rango -> NULL deref como el visto. */
+	if (prWdev->iftype != NL80211_IFTYPE_STATION)
+		return;
 	if (prSwRfb->prHifRxHdr == NULL)
+		return;
+	/* Longitud minima de un frame mgmt 802.11: 24 bytes de header. Si el FW nos
+	 * pasa algo mas corto (fragmento, basura, o probe shorter de 4B), cfg80211
+	 * lo dereferenciara fuera del buffer al leer mgmt->sa (offset 10). */
+	if (prSwRfb->u2PacketLen < 24)
+		return;
+
+	/* Snapshot en locales: a partir de aqui NO tocamos prSwRfb (que el pool RX
+	 * puede reciclar) -- solo nuestros locales, que son los que pasamos a cfg80211. */
+	pucFrame = (const u8 *)prSwRfb->pvHeader;
+	u4FrameLen = (u32)prSwRfb->u2PacketLen;
+	/* Sanity final de los punteros capturados (no-NULL y alineado). */
+	if (pucFrame == NULL || ((unsigned long)pucFrame & 1))
 		return;
 
 	ucChnlNum = prSwRfb->prHifRxHdr->ucHwChannelNum;
@@ -668,7 +696,7 @@ kalIndicateRxMgmtFrame(
 	cfg80211_rx_mgmt(prWdev,
 		i4Freq,
 		RCPI_TO_dBm(prSwRfb->prHifRxHdr->ucRcpi),
-		prSwRfb->pvHeader,
-		prSwRfb->u2PacketLen,
+		pucFrame,
+		u4FrameLen,
 		0);	/* flags: 7.0.12 exige el arg extra (0 = ninguno) */
 }
