@@ -4,11 +4,11 @@ Reviviendo el **BQ Aquaris E4.5** (MediaTek MT6582, Cortex-A7 ×4 armv7, Mali-40
 540×960; *el primer Ubuntu Phone, 2014*) con **Linux mainline 7.0.12 + postmarketOS/Alpine + Phosh**,
 escribiendo y portando los drivers que upstream nunca tuvo para este SoC.
 
-> **Estado (2026-07-02):** un teléfono de 2014 con **Linux mainline 7.0.12 + Alpine** y **Phosh
+> **Estado (2026-07-07):** un teléfono de 2014 con **Linux mainline 7.0.12 + Alpine** y **Phosh
 > acelerado por GPU (lima/Mali-400)**, arrancando desde **SD**, con **táctil multitouch (kernel),
-> carga, batería en la UI, brillo por slider, Bluetooth y WiFi (red abierta navega)**. En curso:
-> **WPA2** (portando el driver stock) y una **tanda de drivers nuevos** (vibrador, LEDs, botón
-> power, RTC, thermal, audio).
+> carga, batería en la UI, brillo por slider, Bluetooth y **WiFi WPA2 con DHCP + datos + HTTPS
+> funcionando** (port del driver stock `mt_wifi` = `mtk_mtwifi`). Vibrador, LEDs, botón power y RTC
+> code-complete. En curso: **audio** y una **tanda de drivers de pulido** (thermal, accdet, GPS).
 
 📍 **Puntos de entrada:** historia técnica → [mainline/HITOS.md](mainline/HITOS.md) · plan de drivers
 vigente → [PLAN-PORTS-DRIVERS.md](PLAN-PORTS-DRIVERS.md).
@@ -31,7 +31,7 @@ Repo: [github.com/Sidihidi/bq-aquiaris-postmarketos](https://github.com/Sidihidi
 | Brillo (slider) | ✅ | Slider de Phosh → logind → `/sys/class/backlight` → daemon PWM. |
 | Bluetooth (hci0) | ✅ | Empareja (probado con un S24) + toggle en Phosh. Vía CONSYS/BTIF. |
 | WiFi — scan + red abierta | ✅ | Escanea redes reales; **red abierta navega** (lease + ping). |
-| **WiFi — WPA2** | 🟡 | Asocia y completa el 4-way, pero el FW no cifra el data-path (DHCP falla). **Se está portando el driver stock `mt_wifi`** (8 hipótesis de parcheo agotadas). |
+| **WiFi — WPA2 + DHCP + datos** | ✅ | **Handshake + cifrado L2 + DHCP + datos a internet + HTTPS** (port del stock `mt_wifi` = `mtk_mtwifi`, probado 07-07). El "DHCP falla" de handoffs previos era un malentendido de rutas de red (ver [bitácora 07-07](docs/bitacora/2026-07-07-wifi-funciona.md)). |
 | GPS | 🟡 | Protocolo `0xAAF0` decodificado; cadena gpsd→geoclue→Phosh validada. Falta el `START_SEQ` de `mnld`. |
 | **Vibrador · LEDs RGB · botón power · RTC** | 🟡 | **Code-complete** (drivers mainline + DT+config); compilan, **falta 1 flash de verificación**. |
 | **Thermal** | 🟡 | AUXADC del SoC **validado en HW**; falta el rail del NTC (lee 0 mV). |
@@ -45,18 +45,16 @@ drivers propios en `mainline/wifi-consys/`. Es la frontera técnica del proyecto
 
 ---
 
-## 🔀 Dos frentes en paralelo
+## 🔀 Frentes
 
-El trabajo va en dos sesiones coordinadas por este repo:
-
-1. **WiFi WPA2** — port del driver stock `mt_wifi` a 7.0.12
-   (`mainline/wifi-consys/wifi/mt_wifi_port/`, Fase 1 KAL). Plan y estado:
-   [HANDOFF-MTWIFI-PORT-PLAN-0702.md](mainline/wifi-consys/wifi/HANDOFF-MTWIFI-PORT-PLAN-0702.md) ·
-   [HANDOFF-MTWIFI-PORT-STATE-0702.md](mainline/wifi-consys/wifi/HANDOFF-MTWIFI-PORT-STATE-0702.md).
-   Por qué se abandonó el parcheo del driver A:
-   [HANDOFF-BLINDPOKE-REFUTADO-0702.md](mainline/wifi-consys/wifi/HANDOFF-BLINDPOKE-REFUTADO-0702.md).
-2. **Resto de drivers** — vibrador/LEDs/power/RTC/thermal/STP/audio, plan e estado en
-   [PLAN-PORTS-DRIVERS.md](PLAN-PORTS-DRIVERS.md).
+1. **WiFi WPA2** — ✅ **RESUELTO** (2026-07-07). El port del driver stock `mt_wifi` a 7.0.12
+   (`mainline/wifi-consys/wifi/mt_wifi_port/`) funciona con datos cifrados reales. Historia y
+   por qué el "DHCP falla" era un falso diagnóstico:
+   [bitácora 07-07](docs/bitacora/2026-07-07-wifi-funciona.md). (Los handoffs previos sobre el
+   port y el blind-poke quedan en `docs/archive/` como histórico.)
+2. **Resto de drivers** — vibrador/LEDs/power/RTC/thermal/STP/audio/GPS. Plan y estado en
+   [PLAN-PORTS-DRIVERS.md](PLAN-PORTS-DRIVERS.md) y estrategia por subsistema en
+   [mainline/PORT-STRATEGY-DRIVERS-0707.md](mainline/PORT-STRATEGY-DRIVERS-0707.md).
 
 ---
 

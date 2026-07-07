@@ -136,7 +136,7 @@ static netdev_tx_t mtk_ndo_xmit(struct sk_buff *skb, struct net_device *ndev)
 
 	if (!prGlueInfo || (prGlueInfo->u4Flag & GLUE_FLAG_HALT)) {
 		dev_kfree_skb(skb);
-		ndev->stats.tx_dropped++;
+		prGlueInfo->rNetDevStats.tx_dropped++;
 		return NETDEV_TX_OK;
 	}
 
@@ -162,10 +162,25 @@ static netdev_tx_t mtk_ndo_xmit(struct sk_buff *skb, struct net_device *ndev)
 	kalSetEvent(prGlueInfo);	/* despierta el tx_thread (dispatch GLUE_FLAG_TXREQ) */
 	return NETDEV_TX_OK;
 }
+
+/* El driver acumula rx/tx bytes/packets en prGlueInfo->rNetDevStat (paths RX en
+ * kalRxIndicatePkts y TX arriba). Sin .ndo_get_stats el kernel cae a dev->stats
+ * (que nadie toca) y /sys/class/net/wlan0/statistics/* queda siempre en 0 — parece
+ * que "no hay trafico" aunque el WiFi funcione. Devolvemos nuestro struct. */
+static struct net_device_stats *mtk_ndo_get_stats(struct net_device *ndev)
+{
+	P_GLUE_INFO_T prGlueInfo = *((P_GLUE_INFO_T *) netdev_priv(ndev));
+
+	if (!prGlueInfo)
+		return &ndev->stats;
+	return &prGlueInfo->rNetDevStats;
+}
+
 static const struct net_device_ops mtk_netdev_ops = {
 	.ndo_open       = mtk_ndo_open,
 	.ndo_stop       = mtk_ndo_stop,
 	.ndo_start_xmit = mtk_ndo_xmit,
+	.ndo_get_stats  = mtk_ndo_get_stats,
 };
 
 /* =======================================================================================

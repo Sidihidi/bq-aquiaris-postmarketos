@@ -16,6 +16,9 @@ sobre este repo (sesión WiFi/port stock, sesión de drivers/UX, etc.) sin pisar
   la última `*-mac-ports.md`. El DTS canónico es `mainline/dts/mt6582-bq-krillin.dts`.
 
 ## Índice
+- [2026-07-07 · wifi — WPA2+DHCP+datos FUNCIONAN](2026-07-07-wifi-funciona.md) — el "DHCP falla" era
+  un falso diagnóstico de rutas; el port del stock `mt_wifi` ya tenía datos cifrados reales. Fix
+  de stats del netdev (`.ndo_get_stats`) + config de red persistente.
 - [2026-07-02 · mac-ports-ux](2026-07-02-mac-ports-ux.md) — quick-wins (vibr/LED/power/RTC) probados;
   limpieza del repo; UX del botón + brillo en curso.
 
