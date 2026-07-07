@@ -278,11 +278,6 @@ static int mtk_pmic_keys_poll_thread(void *data)
 			key_deb &= info->regs->deb_mask;
 			pressed = !key_deb;
 
-			/* DEBUG temporal: loguear cambios del polling */
-			if (pressed != info->last_pressed)
-				pr_info("mtk-pmic-keys poll: key%d %s (deb=0x%x)\n",
-					index, pressed ? "PRESSED" : "released", key_deb);
-
 			mtk_pmic_keys_report(info, pressed);
 		}
 		msleep(100);

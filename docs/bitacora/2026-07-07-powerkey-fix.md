@@ -29,10 +29,16 @@ driver del kernel `mtk-pmic-keys.c` comparándolo con el original de MediaTek (`
   y la GUI. Fix permanente de la fuga.
 
 ## Diagnóstico del PMIC (lección para retomar)
-- **El PMIC MT6323 SÍ detecta el botón siempre** (CHRSTATUS bit1 cambia con cada toque físico,
-  confirmado con `pwrap_poke r 0x0142` en polling a 20Hz).
-- **El IRQ del MFD (mt6397-irq) NO se genera en el primer toque tras idle** (delta IRQ=0 medido).
-  El PMIC entra en un estado donde el primer toque solo "lo reactiva" sin generar IRQ.
+- **¡IMPORTANTE! Los sysrq reboots (`echo b > sysrq-trigger`) dejan el PMIC MT6323 en mal estado.**
+  Tras un sysrq reboot, el botón power genera **0 IRQs** (IRQ 206 = 0) aunque pulses — el input
+  queda completamente muerto. Tras un **power-cycle físico (quitar/poner batería)**, el PMIC se
+  inicializa bien y el botón funciona (IRQ 206 = 48+ y subiendo). **Para desarrollo: tras flashear,
+  hacer power-cycle físico, NUNCA sysrq reboot** si vas a probar el powerkey (u otros IRQs del PMIC).
+- **El "primer toque tras idle" sigue perdido (necesita 2 toques).** El PMIC MT6323 entra en bajo
+  consumo tras idle y el primer toque no genera IRQ del MFD. El kthread de polling añadido lee
+  CHRSTATUS vía regmap pero no detectó cambios (posible: el polling y el IRQ se pisan, o el regmap
+  en kthread context no ve el cambio fresco). Queda por depurar con printk detallado en un boot
+  donde el PMIC esté bien inicializado (power-cycle, no sysrq).
 - El driver original MTK compensa con el kthread `pmic_thread_kckett` que se auto-despierta, pero
   también depende del EINT del PMIC → no es polling puro.
 - **El primer toque tras idle sigue perdido** incluso con el polling añadido — falta depurar por
