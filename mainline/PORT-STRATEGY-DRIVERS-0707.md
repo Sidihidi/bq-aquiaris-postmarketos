@@ -12,7 +12,7 @@ sección cámara sintetizada (el agente dedicado falló, pero el NO-GO es sólid
 | Subsistema | Veredicto | Esfuerzo | Siguiente paso concreto |
 |---|---|---|---|
 | **GPS** — combo host-based (0xAAF0 → libmnl → NMEA → gpsd/geoclue/Phosh) | **CONDITIONAL-GO** | 3-6 sem (1er hito 1-2 sem) | **Fase A**: runner nativo mínimo = glue abierto recortado + shims KAL, **linkando `libmnl_6628.a`** con toolchain armv7-musl; `dsp_port=/dev/stpgps`, `nmea_port=pty` |
-| **Cámara** (ISP/sensor MTK + HAL cerrada) | **NO-GO** | — | Documentar como **límite conocido** (junto al módem). No abordar |
+| **Cámara** — OV8865(tras)+OV5648(front), SENINF+ISP MTK | **MOONSHOT** (captura básica RAW+soft-ISP) / **NO-GO** (usable con 3A) | 4-8 persona-meses | Prioridad BAJA. Solo un **Fase-0 spike** (~2-3 sem: DT + power + subdev OV8865 upstream → ¿probe+stream?); si no arranca barato, abortar |
 | **Módem 2G/3G** — CCCI/dual_ccci + firmware MOLY | **MOONSHOT** | 4-8+ meses, prob. baja | **No entrar** salvo aceptar apuesta de investigación. Si se acepta: **solo spike M1** (Fase 0+1, 4-7 sem) con puerta de aborto dura |
 | **Pulido (8)** Fluidez botón power | **GO** | 1-2 días | Daemon persistente en la sesión (gdbus + EVIOCGRAB ya abiertos), sin fork de `su` |
 | **Pulido (1)** Auto-brillo ALS | **GO** | 1-2 días | Mini-daemon `ClaimLight`→curva lux→duty→`/run` (backlight actual). **NO** gsd-power |
@@ -46,7 +46,10 @@ Suben la sensación de "teléfono terminado" con riesgo cero y sin tocar kernel.
 
 ### Lo que es investigación pura (no confundir con roadmap de producto)
 - **Módem** — **MOONSHOT**. Hay ruta concreta y precedente (UT/Halium en este mismo móvil) pero mainline-nativo tiene prob. ~10-15% y coste de meses. Entrar solo como apuesta explícita, y solo el spike M1 con puerta de aborto.
-- **FM Radio** y **Cámara** — **NO-GO**. Coste alto/enorme, base mainline nula, utilidad casi cero. Aparcar.
+- **Cámara** — **MOONSHOT** para captura básica (webcam), **NO-GO** para cámara usable con 3A. Los sensores
+  (OV8865/OV5648) YA están en upstream, pero el SENINF+ISP del mt6582 hay que RE-earlo sin docs (~4-8
+  persona-meses). Solo un Fase-0 spike oportunista; prioridad BAJA. (Ver §3.2 — no es NO-GO plano.)
+- **FM Radio** — **NO-GO**. Coste alto, base mainline nula, utilidad ~cero. Aparcar indefinidamente.
 
 > **Regla de oro**: las Olas 1 completan la percepción de "móvil terminado" en dos tardes. La Ola 2 es donde está el trabajo serio y con retorno. La Ola 3 y el módem/cámara/FM son opcionales o investigación — no bloquean declarar las *phone-features* como completas.
 
@@ -90,13 +93,56 @@ Suben la sensación de "teléfono terminado" con riesgo cero y sin tocar kernel.
 
 ---
 
-### 3.2 Cámara — **NO-GO**
+### 3.2 Cámara — **MOONSHOT** (captura básica RAW+soft-ISP) / **NO-GO** (cámara usable con 3A)
 
-**Arquitectura (breve).** ISP MTK + sensor + pipeline propietario (3A, tuning) gestionado por una **HAL cerrada** de Android, sin equivalente mainline para esta generación.
+> Investigada por agente dedicado (relanzado 0707). Matiz clave: **NO es un NO-GO plano** — hay un camino
+> conditional para captura tipo webcam, pero dominado por RE sin docs.
 
-**Estado mainline / stock.** Sin framework destino viable ni source utilizable para el pipeline completo. La cámara se documenta como **límite conocido** del port, en la misma categoría que el módem.
+**Arquitectura (MT6582).** Pipeline MTK pre-ISP3.0: `sensor MIPI → SENINF (rx CSI-2, IRQ 174) → TG →
+CAM_A/ISP "pass1" (DMA raw→DRAM, IRQ 175-177) → pass2`. En el downstream: `arch/arm/mach-mt6582/
+camera_isp.c` (6771 líneas), `isp.c`, `camera_pipe_mgr.c`, `camera_sysram.c` ≈ **10.300 líneas** de
+char-device + ioctl + IRQ + mmap. **Toda la inteligencia (demosaico, 3A=AE/AWB/AF, tuning) corre en
+USERSPACE cerrado** (HAL `mtkcam`/`hal3a`); el kernel solo expone registros/DMA por ioctl. **No hay CAMSV
+en MT6582** → no hay bypass limpio SENINF→memoria; hasta la RAW pasa por el front-end del ISP (TG+CAM_A).
 
-**Recomendación.** **NO-GO.** No abordar. Registrar en la doc como una de las dos limitaciones aceptadas (cámara + llamadas de módem) de un BQ de 2014 que ya hace WiFi + audio + suspend + GUI + vídeo + sensores en mainline.
+**Sensores del krillin (confirmados en `lineage_krillin_defconfig`).** `CUSTOM_KERNEL_IMGSENSOR=
+"ov5648_mipi_raw ov8865_mipi_raw t4k04_mipi_raw ov12830_mipi_raw"` → **trasera = OV8865 (8MP RAW10 CSI-2)**,
+**frontal = OV5648 (5MP RAW10)** (T4K04/OV12830 = alternativos por revisión HW, confirmar en la unidad).
+AF: VCM `fm50af` (tipo DW9714). Flash: GPIO. Power/reset: `krillin/camera/.../kd_camera_hw.c` (1012 L,
+`CMRST/CMPDN`, VCAMA/D/IO/AF) = **nuestra capa baja reutilizable**.
+
+**Estado mainline.** **Sensores YA en upstream** (`drivers/media/i2c/ov8865.c` + `ov5648.c`, Bootlin ~2020) —
+mejor punto de partida que el WiFi. **SENINF+ISP: NADA para mt65xx** (el soporte MTK upstream es ISP3.0/CAMSV
+de mt8183/8365, arquitectura distinta, solo referencia conceptual). El `camera_isp.c` stock **NO es
+transplantable** (shim de ioctl atado al HAL cerrado, no un stack autocontenido con FW como el mt_wifi).
+
+**Precedente.** Ningún MTK de esta era tiene cámara en mainline (UT/Halium usan kernel downstream + HAL en
+contenedor Android, no cuenta). Lo alentador: **libcamera Software ISP** (soft-debayer + soft-3A por CPU,
+upstream desde 2024, probado en PinePhone/RB5) — convierte RAW10 en YUV usable sin ISP HW ni 3A propietario.
+
+**Plan (solo captura básica, gateado por spike):**
+- **Fase 0 — spike (~2-3 sem, BLOQUEANTE):** DT + power/GPIO (reusar `kd_camera_hw.c`) + subdev OV8865
+  upstream → ¿el sensor **probea I2C y configura streaming**? Bajo riesgo, decide el resto.
+- **Fase 1 — SENINF CSI-2 rx (~4-8 sem):** subdev V4L2 `mtk-mt6582-seninf` por **RE de `camera_isp.c` sin
+  datasheet** + binding DT propio.
+- **Fase 2 — captura pass1 RAW→mem (~6-12 sem, CUELLO DE BOTELLA):** driver V4L2+media-ctrl que programe
+  TG+CAM_A para DMA de RAW10 (RE del front-end dentro del monolito de 6771 L).
+- **Fase 3 — libcamera simple-pipeline + Soft-ISP (~3-6 sem):** debayer/AE/AWB por CPU → stills/preview.
+- **Fase 4 (opc):** AF `fm50af` (→`dw9714`) + flash GPIO (`v4l2-flash`).
+
+**Riesgos.** (1) SENINF/ISP **sin documentar** (solo el fuente stock) — puede estancar la Fase 2. (2) Sin
+CAMSV → obligado al ISP pass1 completo. (3) Debayer CPU en A7 4×1.3GHz → solo preview/foto a baja res/fps.
+(4) Ambigüedad de sensor por revisión. (5) Mucho dev net-new para una cámara básica.
+
+**El playbook WiFi solo aplica a medias:** la capa baja (power seq) SÍ se reusa; pero el "cerebro" (3A/ISP)
+está en HAL cerrado de userspace, no en el kernel → **no se transplanta el core, se REESCRIBE contra V4L2**
+(los sensores ya vienen upstream, eso sí). El grueso es desarrollo nuevo de drivers V4L2, no un port.
+
+**Recomendación.** Captura básica (RAW+Soft-ISP) = **MOONSHOT/CONDITIONAL-GO** (~4-8 persona-meses,
+dominado por RE sin docs del SENINF+ISP), **gatear TODO a un Fase-0 spike** (si el sensor no llega a
+stream barato, abortar). Cámara usable con 3A/HAL = **NO-GO** (el 3A vive en HAL cerrado = años).
+**Prioridad BAJA**: dejar para el final; hacer el spike solo de forma oportunista, apuntando a "webcam
+básica", no a paridad con Android.
 
 ---
 
