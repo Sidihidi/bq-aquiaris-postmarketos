@@ -40,3 +40,23 @@ Cadena: `/dev/stpgps` → `mtk-gps-bridge` → `/dev/gps0` (pty) → gpsd → so
 ## Reproducir el diagnóstico
 `strace -s 200 -x -e read,write /tmp/gpsfull` (bridge completo armv7 en `/tmp/gpsfull`): se ve el
 `write(3, burst)` y el `read(3)` bloqueado sin respuesta.
+
+## RE de la pila stock (¿derivar el START sin captura? — Mac, 2026-07-07)
+Se intentó la estrategia-WiFi (RE del stock en vez de capturar) para sacar el frame START. Mapa de dónde
+vive el framing 0xAAF0:
+- **kernel `gps.c` (`mt3326_gps`)**: solo chardev STP (`mt3326_gps_write` pipea bytes). **NO** construye el
+  frame. Descartado.
+- **`libmnlp_mt6582` (34 KB, host-shim)**: hace open-dsp + comandos de alto nivel (`MNL hot/warm/cold/full
+  start`, `libmnlp send FULL restart command`). objdump: **CERO inmediatas del frame** (0xf0/0xaa/0xfe
+  ausentes) → **NO** construye el 0xAAF0. Descartado.
+- **`libmnl.so` (1.78 MB, Thumb-2)**: aquí vive el framing, pero **construido dinámicamente** (no hay
+  plantilla estática `AA F0..05 FE..AA 0F` en ninguna de las 3 libs; los `aa f0`/`05 fe` que aparecen en
+  libmnl son encodings de instrucciones Thumb, no datos). El payload puede depender de estado (start-type).
+- **VEREDICTO RE**: derivar el START por RE = decompilar un blob Thumb de 1.78 MB para 4 bytes que quizá
+  son state-derived. **No compensa** frente a la captura. A diferencia del WiFi (donde capturar el interior
+  del FW era imposible → RE obligado), aquí **SÍ hay ruta de captura limpia** (`strace -s 512` del mnld
+  stock en LineageOS), que da los bytes exactos en un tiro.
+- **RECOMENDACIÓN**: la **re-captura en LineageOS es la vía dominante** (no un fallback). El bloqueo es
+  disparar una sesión GPS bajo Android a ciegas por adb para que libmnl emita el burst; infra en
+  `~/android-cap/`. Binarios stock por si acaso: `~/gps/gps-fm-extract/xbin/{libmnlp_mt6582,mnld}` +
+  `~/gps/gps-grab/{mnld,libmnl.so}`.
