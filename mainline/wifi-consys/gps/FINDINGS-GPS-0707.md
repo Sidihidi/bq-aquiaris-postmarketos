@@ -60,3 +60,19 @@ vive el framing 0xAAF0:
   disparar una sesión GPS bajo Android a ciegas por adb para que libmnl emita el burst; infra en
   `~/android-cap/`. Binarios stock por si acaso: `~/gps/gps-fm-extract/xbin/{libmnlp_mt6582,mnld}` +
   `~/gps/gps-grab/{mnld,libmnl.so}`.
+
+## ⚠️ REFRAME CRÍTICO (workflow 5-agentes, 2026-07-07) — LEER ANTES DE CAPTURAR EN LINEAGEOS
+**El GPS del krillin es HOST-BASED (MSB), no un chip NMEA autónomo.** El DSP del combo SOLO adquiere y
+emite **medidas crudas** (pseudorangos) en 0xAAF0; el **cálculo de la POSICIÓN (PVT) lo hace `libmnl` en
+la CPU** (motor GNSS completo: Kalman, efemérides, geodesia). **Corolario que cambia el plan:**
+- **Capturar el START desde LineageOS es INSUFICIENTE como endgame** — aunque tengas los 4 bytes exactos,
+  **sin `libmnl` NO hay fix** (nuestro bridge `mtkgps_aaf0.c` no puede calcular la posición). El START
+  capturado sirve SOLO como referencia de depuración. **NO gastéis el esfuerzo del dual-boot como si eso
+  cerrara el GPS.**
+- **La vía correcta = PORTAR/CORRER la pila stock `libmnl` (playbook WiFi)**, y de paso **elimina la
+  necesidad de LineageOS**: al correr libmnl en nuestro `/dev/stpgps`, ella misma genera el START con los
+  TCXO reales del móvil (instrumentar el `write` al dsp_fd lo loguea en NUESTRO HW).
+- Recursos hallados: el core cerrado existe como **archivo estático AOSP** `Nu3001/hardware_mediatek
+  gps/combo_mt66xx/mnl/libmnlp/mnl6628/lib/libmnl_6628.a` (10.5MB, sin strip) + el **glue ABIERTO**
+  (`mnl_process_6620.c`, `mtk_gps_6620.c`, `mnl_common_6620.c`) para compilar el runner. Verdict:
+  **CONDITIONAL-GO, ~3-6 sem.** Plan completo por fases: `mainline/PORT-STRATEGY-DRIVERS-0707.md` §3.1.
