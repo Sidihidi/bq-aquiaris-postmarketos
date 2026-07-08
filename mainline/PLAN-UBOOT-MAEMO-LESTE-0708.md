@@ -190,7 +190,109 @@ El krillin hoy valida lima bajo **Wayland/Phosh**. Maemo Leste lo necesita bajo 
 2. **pmOS en una partición de la SD** (ya funciona, solo reposicionar)
 3. **Maemo Leste device package + rootfs** (2-4 sem) — el segundo SO del menú
 4. **Validar Xorg+lima** (dentro de la Fase C de Maemo) — el punto crítico
+5. **Android (kexec) como tercera entrada** (ver Parte 3 abajo)
 
-El resultado: **un móvil con menú de arranque que elige entre postmarketOS (Phosh) y Maemo Leste (Hildon), sin reflashear nunca.**
+El resultado: **un móvil con menú de arranque que elige entre postmarketOS (Phosh), Maemo Leste (Hildon) y Android stock, sin reflashear nunca.**
+
+---
+
+## Parte 3: Triple boot con Android (eMMC) via kexec
+
+### Arquitectura del triple boot
+```
+BROM → Preloader → LK KitKat → U-Boot (boot.img fijo en eMMC)
+                                ↓
+         extlinux.conf en SD (mmcblk1p1)
+                                ↓
+    ┌───────────────────┬───────────────────┬──────────────────────┐
+    │ pmOS (mmcblk1p2)  │ Maemo (mmcblk1p3) │ Android (kexec)      │
+    │ kernel mainline   │ kernel mainline   │ initramfs → kexec     │
+    │ rootfs SD         │ rootfs SD         │ kernel 3.10 del eMMC │
+    └───────────────────┴───────────────────┴──────────────────────┘
+```
+
+### El problema: Android usa un kernel distinto (3.10 downstream)
+Los SOs Linux (pmOS, Maemo) usan nuestro **kernel mainline 7.0.12**. Pero Android necesita su
+**kernel 3.10 downstream** de MediaTek + su ramdisk + su cmdline (`lcm=`, `boot_reason=`, etc.).
+U-Boot carga UN solo kernel → no puede cargar mainline Y Android a la vez.
+
+### Solución: kexec (CONFIG_KEXEC=y ya activo)
+**kexec** permite que un kernel Linux cargue OTRO kernel en caliente y salte a él. El flujo:
+1. U-Boot arranca nuestro kernel mainline 7.0.12 + initramfs
+2. El initramfs (o pmOS) lee el `boot.img` de Android del eMMC
+3. Extrae el kernel 3.10 + ramdisk + cmdline del boot.img
+4. `kexec -l kernel.img --append="cmdline..." --initrd=ramdisk`
+5. `kexec -e` → el kernel 3.10 reemplaza al mainline → Android arranca
+
+**Ventaja:** no toca el eMMC, no reflashea nada. Android sigue intacto en sus particiones.
+
+### Estado verificado en el krillin
+- ✅ `CONFIG_KEXEC=y` activo en el kernel mainline 7.0.12
+- ✅ `/sys/kernel/kexec_loaded` existe (kernel lo soporta)
+- ✅ Android stock boot.img disponible: `/home/cpcd/firmware-stock/boot.img` (en la Pi)
+- ✅ Android vive en el eMMC: `mmcblk0p5` (sistema 1GB) + `mmcblk0p7` (usrdata 5.5GB)
+- ✅ LineageOS 13 boot.img también disponible: `/home/cpcd/images/lineage13-boot.img`
+- ⚠️ `kexec` (herramienta userspace) no instalada → `apk add kexec-tools`
+
+### Riesgo principal: el kernel 3.10 puede no cooperar con kexec
+El kernel downstream 3.10 de MediaTek **no fue diseñado para ser kexec-eado** desde un mainline.
+Posibles problemas:
+- **ATAGs vs FDT**: el kernel 3.10 puede esperar ATAGs del LK (no Device Tree). kexec pasa
+  la info de forma distinta al LK. Hay que pasar `--atags` o un DTB dummy.
+- **Estado del HW**: el LK hace init de HW (clocks, PMIC, display) que el mainline ya hizo
+  de forma distinta. El kernel 3.10 puede asumir ciertas cosas que ya están cambiadas.
+- **DRAM params**: el 3.10 puede re-inicializar DRAM asumiendo la secuencia del preloader.
+
+**Mitigación:** si kexec del kernel 3.10 falla, la alternativa es **U-Boot lo carga directo**
+del eMMC. U-Boot leería el boot.img de Android de `mmc 0` (eMMC), parsearía la cabecera Android,
+y haría `bootm`. Esto requiere que U-Boot soporte `bootm` con formato Android boot.img (lo hace
+vía `CONFIG_ANDROID_BOOT_IMAGE=y`, que habría que verificar en el defconfig).
+
+### Implementación del kexec
+```sh
+# 1. Instalar kexec-tools en el movil
+apk add kexec-tools
+
+# 2. Script de boot Android (desde pmOS o initramfs)
+# Extraer kernel+ramdisk+cmdline del boot.img de Android del eMMC
+# (sector 83968 = donde el LK busca el boot.img HOY tiene el de pmOS;
+#  hay que guardar el boot.img de Android stock en una particion o en la SD)
+kexec -l /ruta/android-kernel.img \
+    --initrd=/ruta/android-ramdisk.img \
+    --append="console=ttyMT0,921600n1 ... lcm=1-hx8389_qhd_dsi_vdo_truly ..."
+kexec -e
+```
+
+**Importante:** el boot.img de Android NO está en el sector 83968 del eMMC hoy (ahora tiene
+el de pmOS). Hay dos opciones:
+1. Guardar el `boot.img` de Android stock como fichero en la SD (`/boot/android-boot.img`)
+   y que el initramfs lo lea de ahí para kexec
+2. Restaurar el boot.img de Android en una partición dedicada del eMMC
+
+La opción 1 es más limpia (no toca el eMMC).
+
+### Entrada en extlinux.conf para Android
+Como Android necesita kexec (no se carga directo desde U-Boot), la entrada sería un
+initramfs especial que hace el kexec:
+```
+label android
+    menu label Android stock (kexec)
+    kernel /zImage
+    initrd /uInitrd-kexec-android
+    fdt /mt6582-bq-krillin.dtb
+    append root=/dev/ram0 rw console=ttyS0,921600n8 clk_ignore_unused
+```
+El `uInitrd-kexec-android` sería un initramfs mínimo que:
+1. Monta la partición boot de la SD
+2. Lee `/boot/android-boot.img` (guardado previamente)
+3. Extrae kernel + ramdisk + cmdline del boot.img
+4. Ejecuta `kexec -l` + `kexec -e`
+
+### Estimación
+- **kexec-tools install + test básico**: 1-2 horas
+- **Script de extracción + kexec del boot.img de Android**: 1-2 días
+- **Si kexec del kernel 3.10 no funciona**: investigar bootm directo desde U-Boot (1-2 sem)
+- **Riesgo:** MEDIO. kexec a un kernel downstream de 2014 no está garantizado, pero el
+  CONFIG_KEXEC del mainline es robusto y hay precedentes (kexec en otros SoCs MTK).
 
 *Co-autor: ZCode (glm-5.2). Investigación por agentes en paralelo.*
