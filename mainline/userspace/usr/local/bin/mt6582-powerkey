@@ -49,10 +49,12 @@ DEBOUNCE = 0.35               # s: ignorar pulsaciones-metralleta
 EVIOCGRAB = 0x40044590        # _IOW('E', 0x90, int)
 
 
-def find_ev():
+def find_ev(name="mtk-pmic-keys"):
+    # OJO: buscar SIEMPRE (no cachear el path): un rebind del driver mueve el
+    # nodo (event1 -> event4, visto 0708) y el path viejo deja de existir.
     for e in sorted(glob.glob("/sys/class/input/event*")):
         try:
-            if "mtk-pmic-keys" in open(e + "/device/name").read():
+            if name in open(e + "/device/name").read():
                 return "/dev/input/" + os.path.basename(e)
         except Exception:
             pass
@@ -245,30 +247,91 @@ def main():
     # ~0 (un close/open por minuto). El select con timeout permite hacer esto sin
     # quedar bloqueado en un read().
     REOPEN_INTERVAL = 30.0
+    TICK = 2.0        # select corto: detectar el resume RAPIDO (ver abajo)
     def open_and_grab():
-        fd = open(ev, "rb", buffering=0)
+        # re-localizar el nodo SIEMPRE: un rebind de mtk-pmic-keys lo mueve y
+        # abrir el path viejo peta (FileNotFoundError) = daemon muerto (0708)
+        path = find_ev() or ev
+        try:
+            fd = open(path, "rb", buffering=0)
+        except Exception:
+            time.sleep(2)
+            return None
         try:
             fcntl.ioctl(fd, EVIOCGRAB, 1)
         except Exception:
             pass
         return fd
+    def suspend_count():
+        # numero de suspends s2idle completados; cambia => acabamos de RESUMIR
+        try:
+            return int(open("/sys/power/suspend_stats/success").read().strip())
+        except Exception:
+            return -1
+    def open_keypad():
+        # VOLUMEN como RESCATE (0708): el bloque de teclas del PMIC puede
+        # quedarse sordo (wedge, en investigacion); las teclas de volumen van
+        # por el SoC (mt6779-keypad) = camino independiente. Con la pantalla
+        # apagada, VOL-ABAJO despierta. SIN grab: con pantalla encendida el
+        # volumen sigue siendo de phosh.
+        path = find_ev("mt6779-keypad")
+        if not path:
+            return None
+        try:
+            return open(path, "rb", buffering=0)
+        except Exception:
+            return None
     fd = open_and_grab()
+    kp = open_keypad()
     last = 0.0
     last_reopen = time.monotonic()
+    last_suspends = suspend_count()
     while True:
-        # Espera con timeout para reabrir el fd periodicamente.
-        r, _, _ = select.select([fd], [], [], REOPEN_INTERVAL)
-        if time.monotonic() - last_reopen >= REOPEN_INTERVAL:
-            # Reabrir el fd: soluciona el bug del driver que deja de entregar eventos
-            # tras idle con grab activo. Close libera el grab; open+grab lo retoma.
-            try:
-                fd.close()
-            except Exception:
-                pass
+        if fd is None:
             fd = open_and_grab()
-            last_reopen = time.monotonic()
+            continue
+        fds = [fd] + ([kp] if kp else [])
+        r, _, _ = select.select(fds, [], [], TICK)
+        if kp and kp in r:
+            try:
+                d = kp.read(SZ)
+                if d and len(d) >= SZ:
+                    _, _, typ, code, val = struct.unpack(FMT, d)
+                    # KEY_VOLUMEDOWN=114: despertar solo con pantalla apagada
+                    if typ == EV_KEY and code == 114 and val == 1 and not screen_is_on():
+                        log("accion: ON/wake por VOL-ABAJO (rescate)")
+                        screen_on(saved)
+                        last = time.monotonic()
+            except Exception:
+                try:
+                    kp.close()
+                except Exception:
+                    pass
+                kp = open_keypad()
+            if fd not in r:
+                continue
         if not r:
-            continue                          # timeout: solo reopen, volver a esperar
+            # Sin eventos pendientes: momento seguro para reabrir el fd si toca
+            # (periodico) o si acabamos de RESUMIR de s2idle — el fix del "boton
+            # sordo tras un par de minutos bloqueado" (0708): el autosuspend mete
+            # el movil en s2idle; al despertar, el bug de mtk-pmic-keys deja este
+            # fd sin eventos, y con solo el reopen periodico de 30s habia hasta
+            # 30s de pulsaciones PERDIDAS tras el resume. Ahora: resume detectado
+            # en <=2s => reopen inmediato. (Si el fd si entrega eventos, r llega
+            # y se procesa normal — no se reabre nada con eventos en vuelo.)
+            now = time.monotonic()
+            cnt = suspend_count()
+            if cnt != last_suspends or now - last_reopen >= REOPEN_INTERVAL:
+                if cnt != last_suspends:
+                    log("resume detectado (suspends=%d): reopen inmediato" % cnt)
+                last_suspends = cnt
+                try:
+                    fd.close()
+                except Exception:
+                    pass
+                fd = open_and_grab()
+                last_reopen = time.monotonic()
+            continue                          # volver a esperar
         d = fd.read(SZ)
         if not d or len(d) < SZ:
             continue
