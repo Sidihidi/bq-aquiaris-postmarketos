@@ -120,7 +120,7 @@ EXPORT_SYMBOL(mtk_wcn_wmt_func_off);
 
 INT32 mtk_wcn_wmt_chipid_query(VOID)
 {
-	return 0x6627;
+	return 0x6582;	/* SoC id: el dispatch de fm_open enlaza MT6627fm_low_ops con 0x6582 */
 }
 EXPORT_SYMBOL(mtk_wcn_wmt_chipid_query);
 
