@@ -1,0 +1,316 @@
+#!/usr/bin/env python3
+# Radio FM del krillin — GUI GTK4/libadwaita sobre /dev/fm (MT6627 on-die).
+#
+# Habla los ioctls del chip DIRECTAMENTE (powerup/tune/seek/vol) y enciende el
+# path del SoC con el kcontrol 'FM Radio Route' (amixer). Los auriculares son
+# la antena. Requiere: /dev/fm accesible (regla udev 75-krillin-fm.rules,
+# grupo audio) y usuario en el grupo audio (amixer).
+#
+# GOTCHA histórico: NO llamar a RESTORE_SEARCH (RampDown = DSP parado, DC).
+# Tras un SEEK se re-TUNEA a la frecuencia encontrada y el audio sigue.
+import os
+import json
+import struct
+import fcntl
+import threading
+import subprocess
+
+import gi
+gi.require_version('Gtk', '4.0')
+gi.require_version('Adw', '1')
+from gi.repository import Gtk, Adw, GLib
+
+DEV = '/dev/fm'
+CONF = os.path.expanduser('~/.config/fmradio.json')
+BAND_EU, SPACE_100K = 1, 2
+FREQ_MIN, FREQ_MAX = 875, 1080          # x10 MHz
+
+# _IOWR(0xf5, nr, ptr) — el header stock pasa PUNTEROS => size=4 siempre
+def _iowr(nr):
+    return (3 << 30) | (4 << 16) | (0xf5 << 8) | nr
+
+IOC_POWERUP   = _iowr(0)
+IOC_POWERDOWN = _iowr(1)
+IOC_TUNE      = _iowr(2)
+IOC_SEEK      = _iowr(3)
+IOC_SETVOL    = _iowr(4)
+IOC_MUTE      = _iowr(6)
+IOC_GETRSSI   = _iowr(7)
+
+
+class FmChip:
+    """Lado chip: /dev/fm. El fd abierto mantiene la radio viva."""
+    def __init__(self):
+        self.fd = None
+
+    def _tune_parm(self, freq):
+        return bytearray(struct.pack('<4BH', 0, BAND_EU, SPACE_100K, 0, freq))
+
+    def on(self, freq):
+        self.fd = os.open(DEV, os.O_RDWR)
+        try:
+            fcntl.ioctl(self.fd, IOC_POWERUP, self._tune_parm(freq), True)
+            self.tune(freq)
+            fcntl.ioctl(self.fd, IOC_MUTE, bytearray(struct.pack('<I', 0)), True)
+        except Exception:
+            self.off()
+            raise
+
+    def off(self):
+        if self.fd is not None:
+            try:
+                fcntl.ioctl(self.fd, IOC_POWERDOWN,
+                            bytearray(struct.pack('<i', 0)), True)
+            except Exception:
+                pass
+            os.close(self.fd)      # el driver hace powerdown al cerrar
+            self.fd = None
+
+    def tune(self, freq):
+        fcntl.ioctl(self.fd, IOC_TUNE, self._tune_parm(freq), True)
+
+    def seek(self, freq, up=True):
+        """Busca la siguiente emisora; devuelve la freq encontrada (x10)."""
+        buf = bytearray(struct.pack('<6BH', 0, BAND_EU, SPACE_100K, 0,
+                                    0 if up else 1, 0, freq))
+        fcntl.ioctl(self.fd, IOC_SEEK, buf, True)
+        err, found = buf[0], struct.unpack('<H', buf[6:8])[0]
+        if err or not (FREQ_MIN <= found <= FREQ_MAX):
+            raise OSError(f'seek err={err} freq={found}')
+        self.tune(found)           # re-tune = DSP sonando en la nueva emisora
+        return found
+
+    def set_vol(self, vol):        # 0..15
+        fcntl.ioctl(self.fd, IOC_SETVOL,
+                    bytearray(struct.pack('<I', max(0, min(15, vol)))), True)
+
+    def rssi(self):
+        buf = bytearray(struct.pack('<i', 0))
+        fcntl.ioctl(self.fd, IOC_GETRSSI, buf, True)
+        return struct.unpack('<i', buf)[0]
+
+
+def route(on):
+    """Lado SoC: 2ºI2S->ASRC->DAC->HP via kcontrol del driver de audio."""
+    subprocess.run(['amixer', '-q', '-c', '0', 'cset',
+                    "name='FM Radio Route'", '1' if on else '0'],
+                   check=True, timeout=10)
+
+
+class FmWindow(Adw.ApplicationWindow):
+    def __init__(self, app):
+        super().__init__(application=app, title='Radio FM',
+                         default_width=360, default_height=560)
+        self.chip = FmChip()
+        self.cfg = {'freq': 1023, 'vol': 12, 'presets': [1023]}
+        try:
+            with open(CONF) as f:
+                self.cfg.update(json.load(f))
+        except Exception:
+            pass
+        self.playing = False
+        self._rssi_timer = None
+        self._build_ui()
+
+    # ---------- UI ----------
+    def _build_ui(self):
+        css = Gtk.CssProvider()
+        css.load_from_data(b'.freq { font-size: 56px; font-weight: 300; '
+                           b'font-feature-settings: "tnum"; }')
+        Gtk.StyleContext.add_provider_for_display(
+            self.get_display(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+        self.toaster = Adw.ToastOverlay()
+        tv = Adw.ToolbarView()
+        self.toaster.set_child(tv)
+        self.set_content(self.toaster)
+
+        hdr = Adw.HeaderBar()
+        self.power = Gtk.Switch(valign=Gtk.Align.CENTER)
+        self.power.connect('state-set', self.on_power)
+        hdr.pack_end(self.power)
+        tv.add_top_bar(hdr)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18,
+                      margin_top=24, margin_bottom=24,
+                      margin_start=18, margin_end=18)
+        tv.set_content(box)
+
+        self.freq_lbl = Gtk.Label(css_classes=['freq'])
+        box.append(self.freq_lbl)
+        self.rssi_lbl = Gtk.Label(css_classes=['dim-label'], label='—')
+        box.append(self.rssi_lbl)
+
+        tune = Gtk.Box(spacing=6, halign=Gtk.Align.CENTER)
+        for icon, cb in (('media-skip-backward-symbolic', lambda b: self.do_seek(False)),
+                         ('list-remove-symbolic',        lambda b: self.step(-1)),
+                         ('list-add-symbolic',           lambda b: self.step(+1)),
+                         ('media-skip-forward-symbolic', lambda b: self.do_seek(True))):
+            b = Gtk.Button(icon_name=icon, css_classes=['circular', 'flat'])
+            b.set_size_request(56, 56)
+            b.connect('clicked', cb)
+            tune.append(b)
+        box.append(tune)
+
+        volrow = Gtk.Box(spacing=8)
+        volrow.append(Gtk.Image(icon_name='audio-volume-high-symbolic'))
+        self.vol = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 15, 1)
+        self.vol.set_hexpand(True)
+        self.vol.set_value(self.cfg['vol'])
+        self.vol.connect('value-changed', self.on_vol)
+        volrow.append(self.vol)
+        box.append(volrow)
+
+        prehdr = Gtk.Box(spacing=6)
+        prehdr.append(Gtk.Label(label='Emisoras', hexpand=True,
+                                halign=Gtk.Align.START,
+                                css_classes=['heading']))
+        star = Gtk.Button(icon_name='starred-symbolic', css_classes=['flat'])
+        star.set_tooltip_text('Guardar/quitar la emisora actual')
+        star.connect('clicked', self.on_star)
+        prehdr.append(star)
+        box.append(prehdr)
+
+        self.preset_box = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE,
+                                      max_children_per_line=4,
+                                      column_spacing=6, row_spacing=6)
+        box.append(self.preset_box)
+
+        self.connect('close-request', self.on_close)
+        self.refresh()
+
+    def refresh(self):
+        f = self.cfg['freq']
+        self.freq_lbl.set_text(f'{f // 10},{f % 10}')
+        child = self.preset_box.get_first_child()
+        while child:
+            nxt = child.get_next_sibling()
+            self.preset_box.remove(child)
+            child = nxt
+        for p in sorted(self.cfg['presets']):
+            b = Gtk.Button(label=f'{p // 10},{p % 10}',
+                           css_classes=['pill'] +
+                           (['suggested-action'] if p == f else []))
+            b.connect('clicked', lambda _b, pf=p: self.tune_to(pf))
+            self.preset_box.append(b)
+
+    def toast(self, msg):
+        self.toaster.add_toast(Adw.Toast(title=msg, timeout=3))
+
+    def save(self):
+        try:
+            os.makedirs(os.path.dirname(CONF), exist_ok=True)
+            with open(CONF, 'w') as f:
+                json.dump(self.cfg, f)
+        except Exception:
+            pass
+
+    # ---------- acciones ----------
+    def on_power(self, _sw, state):
+        try:
+            if state and not self.playing:
+                self.chip.on(self.cfg['freq'])
+                self.chip.set_vol(self.cfg['vol'])
+                route(True)
+                self.playing = True
+                self._rssi_timer = GLib.timeout_add_seconds(3, self.poll_rssi)
+            elif not state and self.playing:
+                self.stop()
+        except Exception as e:
+            self.toast(f'Error: {e}')
+            try:
+                self.chip.off()
+            except Exception:
+                pass
+            self.playing = False
+            return False
+        return False
+
+    def stop(self):
+        if self._rssi_timer:
+            GLib.source_remove(self._rssi_timer)
+            self._rssi_timer = None
+        try:
+            route(False)
+        except Exception:
+            pass
+        self.chip.off()
+        self.playing = False
+        self.rssi_lbl.set_text('—')
+        self.save()
+
+    def tune_to(self, freq):
+        freq = max(FREQ_MIN, min(FREQ_MAX, freq))
+        self.cfg['freq'] = freq
+        if self.playing:
+            try:
+                self.chip.tune(freq)
+            except Exception as e:
+                self.toast(f'Error al sintonizar: {e}')
+        self.refresh()
+        self.save()
+
+    def step(self, d):
+        self.tune_to(self.cfg['freq'] + d)
+
+    def do_seek(self, up):
+        if not self.playing:
+            self.toast('Enciende la radio primero')
+            return
+        self.rssi_lbl.set_text('buscando…')
+
+        def worker():
+            try:
+                found = self.chip.seek(self.cfg['freq'], up)
+                GLib.idle_add(self.tune_to, found)
+            except Exception as e:
+                GLib.idle_add(self.toast, f'Seek: {e}')
+                GLib.idle_add(self.rssi_lbl.set_text, '—')
+        threading.Thread(target=worker, daemon=True).start()
+
+    def on_vol(self, scale):
+        self.cfg['vol'] = int(scale.get_value())
+        if self.playing:
+            try:
+                self.chip.set_vol(self.cfg['vol'])
+            except Exception:
+                pass
+        self.save()
+
+    def on_star(self, _b):
+        f = self.cfg['freq']
+        if f in self.cfg['presets']:
+            self.cfg['presets'].remove(f)
+            self.toast('Emisora quitada')
+        else:
+            self.cfg['presets'].append(f)
+            self.toast('Emisora guardada')
+        self.refresh()
+        self.save()
+
+    def poll_rssi(self):
+        if not self.playing:
+            return False
+        try:
+            self.rssi_lbl.set_text(f'RSSI {self.chip.rssi()} dBm')
+        except Exception:
+            pass
+        return True
+
+    def on_close(self, _w):
+        if self.playing:
+            self.stop()
+        return False
+
+
+class FmApp(Adw.Application):
+    def __init__(self):
+        super().__init__(application_id='org.krillin.FmRadio')
+
+    def do_activate(self):
+        win = self.get_active_window() or FmWindow(self)
+        win.present()
+
+
+if __name__ == '__main__':
+    FmApp().run()

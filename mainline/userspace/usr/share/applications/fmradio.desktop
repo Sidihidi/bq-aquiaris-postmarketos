@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Radio FM
+Comment=Radio FM del krillin (MT6627) — los auriculares son la antena
+Exec=/usr/local/bin/fmradio-app
+Icon=multimedia-player
+Categories=AudioVideo;Audio;
+Keywords=fm;radio;emisora;
+X-Purism-FormFactor=Workstation;Mobile;

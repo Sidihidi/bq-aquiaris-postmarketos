@@ -1,0 +1,3 @@
+# /dev/fm (radio MT6627) accesible para la sesion (grupo audio) — lo usa
+# fmradio-app; sin esto solo root puede encender la radio.
+KERNEL=="fm", MODE="0660", GROUP="audio"
