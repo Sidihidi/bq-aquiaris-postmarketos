@@ -91,6 +91,10 @@ Flujo: **editar → compilar (cross armhf) en la Pi → flashear por USB → ver
 - **Build** (en la Pi): `make O=build-krillin ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- -j2 zImage dtbs`
   (**`-j2`, no `-j4`** — el pico de CPU reinicia la Pi). Empaquetar+flashear: `~/wifi-iter-w.sh`
   (dd a sector 83968 con verificación md5) o `fastboot flash boot boot-*-sd.img`.
+- **⚠️ MULTIBOOT**: el sector 83968 del eMMC ahora tiene el **boot.img del menú multiboot**
+  (`boot-menupick2.img`), NO un boot.img de pmOS directo. Para actualizar pmOS: `apk upgrade`
+  en el rootfs de la SD. Para actualizar el kernel: reconstruir el boot.img del menú. Ver
+  [`mainline/bootmenu/FLASHEO-MULTIBOOT.md`](mainline/bootmenu/FLASHEO-MULTIBOOT.md).
 - **Disparar el CONSYS** (BT/WiFi/GPS): `echo 1 > /sys/kernel/debug/mt6582_wifi/bringup`.
 - **Tras un crash**: el pstore se salva en cada boot en `/var/log/pstore/boot-*` (además de
   `/sys/fs/pstore/console-ramoops-0`).
