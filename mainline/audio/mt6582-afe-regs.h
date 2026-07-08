@@ -44,6 +44,22 @@
 #define AFE_PREDIS_CON0		0x0260	/* pre-distorsion: limpiar a 0 antes del DAC */
 #define AFE_PREDIS_CON1		0x0264
 
+/* --- path de audio FM: 2º I2S IN (CONNSYS on-die) -> ASRC -> GAIN1 -> DAC.
+ * Fuente: mt_soc_pcm_fm_i2s.c + mt_soc_afe_control.c + tablas de
+ * mt_soc_afe_connection.c (regs 0x420/0x448 = interconexiones del GAIN1). --- */
+#define AFE_GAIN1_CON0		0x0410	/* [15:8] samples/step, [7:4] fs, bit0 EN */
+#define AFE_GAIN1_CON1		0x0414	/* ganancia objetivo (0x10000 = 0 dB) */
+#define AFE_CONN_GAIN1_OUT	0x0420	/* bit8 I10->O03, bit10 I11->O04 (GAIN1 out -> DAC) */
+#define AFE_GAIN1_CUR		0x0424	/* ganancia actual (poner 0 antes de EN = rampa suave) */
+#define AFE_CONN_GAIN1_IN	0x0448	/* bit2 I00->O13, bit16 I01->O14 (2ºI2S -> GAIN1 in) */
+#define AFE_ASRC_CON0		0x0500	/* bit6|bit0 = EN del ASRC del I2S in */
+#define AFE_ASRC_CON13		0x0550	/* bit16: 0=stereo 1=mono */
+#define AFE_ASRC_CON14		0x0554	/* 32k->44.1k: 0xDC8000 */
+#define AFE_ASRC_CON15		0x0558	/* 32k->44.1k: 0xA00000 */
+#define AFE_ASRC_CON16		0x055C	/* calibracion: 0x00075987 */
+#define AFE_ASRC_CON17		0x0560	/* 32k->44.1k: 0x1FBD */
+#define AFE_ASRC_CON20		0x056C	/* calibracion: 0x00001b00 */
+
 #define AFE_IRQ_MCU_CON		0x03A0	/* bit0 IRQ1(DL) en, bit1 IRQ2(UL) en, [7:4] fs IRQ1 */
 #define AFE_IRQ_MCU_STATUS	0x03A4	/* & 0xF: bit0=IRQ1, bit1=IRQ2 */
 #define AFE_IRQ_MCU_CLR		0x03A8	/* write-1-clear; bit6 = clear-all */

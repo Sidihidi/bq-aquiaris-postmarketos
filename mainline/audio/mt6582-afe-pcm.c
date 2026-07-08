@@ -61,6 +61,7 @@ struct mt6582_afe {
 	struct device *dev;
 	spinlock_t lock;			/* RMW de registros */
 	struct snd_pcm_substream *dl1_substream;
+	bool fm_route;				/* radio FM ruteada al DAC (kcontrol) */
 };
 
 static u32 afe_rd(struct mt6582_afe *afe, u32 reg)
@@ -155,6 +156,78 @@ static void mt6582_codec_dl_off(struct mt6582_afe *afe)
 
 	regmap_write(r, 0x0708, 0x0000);		/* AUDTOP_CON4: disable bias + L-DAC */
 	regmap_update_bits(r, 0x4000, 0x0001, 0x0000);	/* ABB_AFE_CON0 off */
+}
+
+/* Ruteo del audio de la RADIO FM al DAC. El chip FM (CONNSYS on-die, MT6627-IP)
+ * emite I2S a 32 kHz en modo master — su salida I2S NO se enciende en el powerup
+ * (viene comentada en el stock): la enciende userspace con FM_IOCTL_I2S_SETTING
+ * {ON, MASTER, 32K}. Ese I2S entra al AFE por el 2º I2S IN (pad INTERNO del
+ * CONNSYS, sin pinmux: AFE_I2S_CON=0x8000000d = esclavo + fmt I2S + phase-fix,
+ * el mismo valor del ground truth que .prepare ya escribe) -> ASRC 32k->44.1k
+ * -> HW GAIN1 (rampa) -> interconexion -> I2S-DAC -> codec HP (los auriculares
+ * son la antena). Secuencia del downstream mt_soc_pcm_fm_i2s.c; conexiones de
+ * las tablas de mt_soc_afe_connection.c. */
+static void mt6582_afe_fm_route(struct mt6582_afe *afe, bool on)
+{
+	if (on) {
+		/* clocks + lado DAC a 44.1k (mismo camino que .prepare) */
+		afe_wr(afe, AUDIOAFE_TOP_CON0, 0x60004000);
+		afe_wr(afe, AFE_PREDIS_CON0, 0);
+		afe_wr(afe, AFE_PREDIS_CON1, 0);
+		afe_wr(afe, AFE_ADDA_DL_SRC2_CON0,
+		       (7u << 28) | (0x03 << 24) | (0x03 << 11) | BIT(1));
+		afe_wr(afe, AFE_ADDA_DL_SRC2_CON1, 0xF74F0000);
+		afe_wr(afe, AFE_I2S_CON1, (9u << 8) | BIT(3));
+		afe_rmw(afe, AFE_DAC_CON1, 0xf << 8, 9u << 8);
+		afe_rmw(afe, AFE_ADDA_DL_SRC2_CON0, BIT(0), BIT(0));
+		afe_rmw(afe, AFE_I2S_CON1, BIT(0), BIT(0));
+		afe_rmw(afe, AFE_ADDA_UL_DL_CON0, BIT(0), BIT(0));
+		afe_wr(afe, AFE_ADDA_NEWIF_CFG0, 0x03f87200);
+		afe_wr(afe, AFE_ADDA_NEWIF_CFG1, 0x03117180);
+		afe_rmw(afe, AFE_DAC_CON1, 0x9000, 0x9000);
+
+		/* 2º I2S IN desde CONNSYS (esclavo) + enable */
+		afe_wr(afe, AFE_I2S_CON, 0x8000000d);
+
+		/* ASRC 32k (chip FM master) -> 44.1k (dominio del DAC) */
+		afe_rmw(afe, AFE_CONN4, BIT(30), 0);		/* 0 = pasar por ASRC */
+		afe_rmw(afe, AFE_ASRC_CON13, BIT(16), 0);	/* stereo */
+		afe_wr(afe, AFE_ASRC_CON14, 0xDC8000);
+		afe_wr(afe, AFE_ASRC_CON15, 0xA00000);
+		afe_wr(afe, AFE_ASRC_CON17, 0x1FBD);
+		afe_wr(afe, AFE_ASRC_CON16, 0x00075987);
+		afe_wr(afe, AFE_ASRC_CON20, 0x00001b00);
+		afe_rmw(afe, AFE_ASRC_CON0, BIT(6) | BIT(0), BIT(6) | BIT(0));
+
+		/* HW GAIN1 a 0 dB (con rampa desde 0) + interconexiones del path */
+		afe_wr(afe, AFE_GAIN1_CUR, 0);
+		afe_rmw(afe, AFE_GAIN1_CON0, 0xfff0, (0x80 << 8) | (9 << 4));
+		afe_rmw(afe, AFE_GAIN1_CON0, BIT(0), BIT(0));
+		afe_wr(afe, AFE_GAIN1_CON1, 0x10000);
+		afe_rmw(afe, AFE_CONN_GAIN1_IN, BIT(2) | BIT(16), BIT(2) | BIT(16));
+		afe_rmw(afe, AFE_CONN_GAIN1_OUT, BIT(8) | BIT(10), BIT(8) | BIT(10));
+
+		afe_rmw(afe, AFE_DAC_CON0, BIT(0), BIT(0));	/* AFE_ON */
+
+		/* codec HP on (si no lo tiene ya encendido un playback activo) */
+		if (afe->pmic && !afe->dl1_substream)
+			mt6582_codec_dl_on(afe);
+	} else {
+		afe_rmw(afe, AFE_CONN_GAIN1_IN, BIT(2) | BIT(16), 0);
+		afe_rmw(afe, AFE_CONN_GAIN1_OUT, BIT(8) | BIT(10), 0);
+		afe_rmw(afe, AFE_ASRC_CON0, BIT(6) | BIT(0), 0);
+		afe_rmw(afe, AFE_CONN4, BIT(30), BIT(30));	/* bypass ASRC */
+		afe_rmw(afe, AFE_GAIN1_CON0, BIT(0), 0);
+		/* si no hay playback activo, apagar tambien codec y lado DAC */
+		if (!afe->dl1_substream) {
+			if (afe->pmic)
+				mt6582_codec_dl_off(afe);
+			afe_rmw(afe, AFE_ADDA_DL_SRC2_CON0, BIT(0), 0);
+			afe_rmw(afe, AFE_I2S_CON1, BIT(0), 0);
+			afe_rmw(afe, AFE_ADDA_UL_DL_CON0, BIT(0), 0);
+			afe_rmw(afe, AFE_DAC_CON0, BIT(0), 0);
+		}
+	}
 }
 
 /* fs para memif/I2S-out/IRQ (AFE_DAC_CON1, AFE_I2S_CON1, AFE_IRQ_MCU_CON).
@@ -265,6 +338,12 @@ static int mt6582_afe_close(struct snd_soc_component *component,
 
 	/* apagar el amp del altavoz + el codec analogico (antes que el AFE digital) */
 	mt6582_spk_amp(afe, false);
+
+	/* con la radio FM ruteada, el codec y el lado DAC deben SEGUIR vivos
+	 * (los apagara el kcontrol de FM al desactivarse) */
+	if (afe->fm_route)
+		return 0;
+
 	if (afe->pmic)
 		mt6582_codec_dl_off(afe);
 
@@ -455,6 +534,40 @@ static struct snd_soc_dai_driver mt6582_afe_dais[] = {
  * ANA del MT6323. Con el dummy: /proc/asound/cards + aplay corren (timing
  * real de DMA/IRQ) pero no suena nada. */
 
+/* kcontrol de card: "FM Radio Route" — activa/desactiva el path FM->DAC.
+ * Uso: amixer -c 0 cset name='FM Radio Route' 1 (con el FM encendido y su
+ * I2S activado por ioctl). snd_kcontrol_chip = snd_soc_card (los controles
+ * de card llevan la card como private data). */
+static int mt6582_fm_route_get(struct snd_kcontrol *kcontrol,
+			       struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_card *card = snd_kcontrol_chip(kcontrol);
+	struct mt6582_afe *afe = snd_soc_card_get_drvdata(card);
+
+	ucontrol->value.integer.value[0] = afe->fm_route;
+	return 0;
+}
+
+static int mt6582_fm_route_put(struct snd_kcontrol *kcontrol,
+			       struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_card *card = snd_kcontrol_chip(kcontrol);
+	struct mt6582_afe *afe = snd_soc_card_get_drvdata(card);
+	bool on = !!ucontrol->value.integer.value[0];
+
+	if (on == afe->fm_route)
+		return 0;
+	afe->fm_route = on;
+	mt6582_afe_fm_route(afe, on);
+	dev_info(afe->dev, "FM route %s\n", on ? "ON" : "OFF");
+	return 1;
+}
+
+static const struct snd_kcontrol_new mt6582_card_controls[] = {
+	SOC_SINGLE_BOOL_EXT("FM Radio Route", 0,
+			    mt6582_fm_route_get, mt6582_fm_route_put),
+};
+
 SND_SOC_DAILINK_DEFS(dl1,
 	DAILINK_COMP_ARRAY(COMP_CPU("mt6582-afe-pcm-dai")),
 	DAILINK_COMP_ARRAY(COMP_DUMMY()),
@@ -473,6 +586,8 @@ static struct snd_soc_card mt6582_afe_card = {
 	.owner = THIS_MODULE,
 	.dai_link = mt6582_afe_dai_links,
 	.num_links = ARRAY_SIZE(mt6582_afe_dai_links),
+	.controls = mt6582_card_controls,
+	.num_controls = ARRAY_SIZE(mt6582_card_controls),
 };
 
 /* ------------------------------ probe ------------------------------ */
