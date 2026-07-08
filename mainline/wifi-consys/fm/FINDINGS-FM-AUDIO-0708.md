@@ -33,16 +33,33 @@ que vive en la HAL (`audio.primary.mt6582.so`) — el MISMO tipo de RE que desbl
   v3 es de otro chip); las conexiones directas al DAC van por CONN1 b16 (I00→O03) / CONN2 b1 (I01→O04)
   — esos SÍ latchean. El bit6 de `ASRC_CON0` tampoco latchea en mt6582.
 
-## SIGUIENTE PASO (el que cierra el FM)
-**RE de la HAL para la secuencia ANALÓGICA line-in→HP del MT6323** (playbook del codec, ya probado):
-- Símbolos de entrada: `AudioFMController::SetFmEnable(bool,bool,bool,bool,bool)` @0x73968 (1580 B),
-  `AudioFMResourceManager::SetFmDirectConnection(bool)` @0x522d4 (652 B — hace llamadas por vtable, hay
-  que seguirlas), `AudioFMController::ChangeDevice(uint)` @0x734e8. HAL en `~/audio-hal/` de la Pi.
-- Objetivo: la lista ORDENADA de writes `SetAnalogReg(reg,val,mask)` (@0x34ea4) del path FM-analog
-  (esperable: AUDTOP_CONx para line-in PGA + mux HP←line-in + quizá algo en el lado connsys).
-- Al tenerla: añadirla como variante en `mt6582_codec_dl_on()` o un kcontrol `FM Analog Route`, y el
-  fmradio + kcontrol lo enchufan. Alternativa de validación: dual-boot al ROM STOCK de BQ (tiene app
-  FM Radio) + `/proc/audio` sonando = ground truth de los AUDTOP con FM activo (como se hizo con el HP).
+## RE de la HAL — AVANCE (0708 tarde): estructura mapeada, valores parametrizados
+La escritora es `AudioAnalogReg::SetAnalogReg(this, reg, val, mask)` — args: **r1=reg, r2=val, r3=mask**
+(NO r0/r1/r2; r0=this). Se llama SIEMPRE por PLT `0x2f00c` (0 llamadas directas). Funciones clave:
+- **`AudioMachineDevice::AnalogOpen@0x3723c`** (1928B) = el path HP que ya conocíamos (AUDTOP CON4=0x708,
+  CON5=0x70a, CON6=0x70c, CON7=0x70e + usleep de bias). Ramifica por DEVICE_TYPE (r5: cmp 18, 11).
+- **`AudioMachineDevice::AnalogSetMux@0x37074`** (456B) = **EL MUX DE ENTRADA ANALÓGICA** (line-in/FM).
+  DECODIFICADO (ramas por device r1 ∈ {16,17} y mux r2 ∈ {8,10,16}):
+    - `AUDTOP_CON3 (0x706)` bit8 / bit9 = enable L / R del input (val 0x100/0x200, o 0 para clear).
+    - `AUDTOP_CON1 (0x702)` bits[7:4] = selección PGA/mux (val 0x20 dev16, 0x40 dev17).
+    - `AUDTOP_CON0 (0x700)` bits[3:0] = mux (val 3 ó 4).
+- `AudioMTKVolumeController::SetLineInPlaybackGain@0x4d614` = ganancia line-in→HP (FM = line-in PLAYBACK).
+- `AudioPlatformDevice::AnalogOpen` = el ABB_AFE del PMIC (0x4024/0x4002/0x4028/...).
+
+**BLOQUEO del RE estático**: `AudioFMController::SetFmDirectConnection@0x731dc` usa **DEVICE_TYPE 3 y 5**
+y despacha por **vtable** (`blx ip` sobre punteros del pool) → no se ve qué AnalogSetMux/AnalogOpen device
+concreto llama sin resolver las vtables (lento). Probé en HW las conjeturas del mux (CON3=0x300 L+R,
+CON1[7:4]=2/4, CON0[3:0]=3/4) con FM on + HP on → **SILENCIO** (no son los valores/no es solo el mux).
+
+## SIGUIENTE PASO — GROUND TRUTH (la vía fiable, como se clavó el HP)
+**Dual-boot al ROM STOCK de BQ + volcar `/proc/audio` con la radio SONANDO.** El AudDrv chardev dumpea
+TODOS los registros del codec (AUDTOP CON0-9 + ABB_AFE + SoC AFE). Comparar ese dump (FM activo) contra el
+dump del HP-solo → el **delta = los registros exactos del path FM-analog** (line-in mux + lo que enrute HP
+←line-in), sin adivinar. Infra dual-boot ya validada (`~/android-cap/`, adb autorizado en la Pi). Ojo: usar
+el ROM de **BQ** (trae app FM Radio); si LineageOS no la trae, instalar una app FM o usar la de BQ.
+Con los valores exactos → añadir un kcontrol `FM Analog Route` en `mt6582-afe-pcm.c` (variante de
+`mt6582_codec_dl_on` con el mux line-in) que el `fmradio` + amixer enchufan. AUDTOP en el PMIC = por
+`regmap`/pwrap (como el HP).
 
 ## Cómo reproducir el estado de prueba
 `fmradio 1023 &` (fd abierto = FM on) + `amixer -c 0 cset name='FM Radio Route' 1` (path digital,
