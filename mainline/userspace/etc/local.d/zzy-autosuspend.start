@@ -1,10 +1,15 @@
 #!/bin/sh
 # Auto-suspend en idle: arranca el daemon mt6582-autosuspend al boot.
-# Suspende en s2idle cuando la PANTALLA lleva 60s apagada, salvo inhibidores
-# (audio sonando, sesion SSH activa, o flag /run/mt6582-no-suspend). Wake por
-# el BOTON de encendido (lo gestiona mt6582-powerkey). El wrapper mt6582-suspend
+#
+# MODO HIBRIDO (0708, estilo Android): con la pantalla apagada el movil se queda
+# en idle ligero (despertar INSTANTANEO, WiFi conectado) durante IDLE_SECS, y
+# solo despues entra en s2idle profundo (despertar ~2-3s con powerkey v7: la
+# pulsacion despierta el SoC y la pantalla se enciende sola al resume; ahorra
+# bateria para la noche/bolsillo). Antes IDLE_SECS=60 => SIEMPRE dormido al
+# desbloquear = sensacion de lentitud. Inhibidores: audio sonando, radio FM,
+# sesion SSH activa, flag /run/mt6582-no-suspend. El wrapper mt6582-suspend
 # repara usb0 al resumir. Corre despues del powerkey (zzw) por el nombre (zzy).
 #
 # Para DESACTIVAR temporalmente sin tocar el boot: `touch /run/mt6582-no-suspend`.
-start-stop-daemon --start --background --make-pidfile --pidfile /run/mt6582-autosuspend.pid \
+IDLE_SECS=1200 start-stop-daemon --start --background --make-pidfile --pidfile /run/mt6582-autosuspend.pid \
   --exec /usr/local/bin/mt6582-autosuspend

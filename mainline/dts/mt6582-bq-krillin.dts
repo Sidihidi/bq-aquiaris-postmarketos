@@ -623,3 +623,16 @@
 	};
 };
 
+/* ---- VBAT por AUXADC del MT6323 — driver hwmon mt6323-auxadc.c ----
+ * Reemplaza el pwrap_poke periodico de /usr/local/bin/battery (MMIO al pwrap
+ * SIN lock contra el driver del kernel; sospechoso del wedge del bloque de
+ * INT del PMIC del 0708). Misma receta (CON11 bit4 VBUF, CON22 bit7 ch7,
+ * ADC0 rdy/raw) pero via el regmap del mt6397 = serializado con keys/rtc/
+ * regulator/codec. Regmap por phandle, patron identico al nodo de audio. */
+/ {
+	pmic_vbat: pmic-vbat {
+		compatible = "mediatek,mt6323-auxadc";
+		mediatek,pmic = <&pmic>;
+	};
+};
+

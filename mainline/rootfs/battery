@@ -1,8 +1,12 @@
 #!/bin/sh
-# /usr/local/bin/battery — lee VBAT del MT6323 (AUXADC canal 7 = BATSNS = AUXADC_ADC0)
-# por pwrap_poke y estima el % de carga.
-#   VBAT_mV = raw * 4 * 1800 / 32768   (divisor R_BAT_SENSE=4, ref 1800mV, ADC 15-bit).
-#   Validado: raw=18609 -> 4089 mV, coincide con la medida real cargando.
+# /usr/local/bin/battery — lee VBAT del MT6323 (AUXADC canal 7 = BATSNS) y estima el % de carga.
+#
+# DESDE 0708: la lectura va por el driver kernel hwmon mt6323-auxadc (regmap del mt6397 =
+# pwrap CON lock), en vez de pwrap_poke (MMIO crudo sin lock, sospechoso del wedge del
+# bloque de INT del PMIC del 0708). El driver ya promedia 8 muestras y devuelve mV en
+# /sys/class/hwmon/hwmonN/in0_input (name=mt6323_auxadc).
+# La receta AUXADC y la escala (raw*4*1800/32768) viven ahora en el driver.
+# El pwrap_poke queda SOLO para diagnostico manual: /usr/local/bin/battery-pwrap.
 #
 # COMPENSACION DE CARGA (0706): un gauge por-voltaje SIN sensado de corriente miente bajo
 # carga -> al CARGAR el VBAT esta inflado (caida I*R del cargador) y al DESCARGAR esta
@@ -12,31 +16,22 @@
 #   - descargando: OCV ~= VBAT + 40 mV   (carga media tipica; pantalla on ~300 mA)
 # El % sale de una curva OCV de Li-ion en reposo (interina pero razonable).
 #
-# TRABAJO FUTURO (gauge preciso): usar la tabla ZCV real + coulomb-counting del HW fuel gauge
-# del MT6323. El downstream la tiene en arch/arm/mach-mt6582/krillin/power/krilin_cust_battery_
-# meter_table.h (battery_profile_t2 = 25C) + r_profile_t2, PERO es una curva CARGADA: necesita
-# leer la corriente de bateria (CAR/coulomb counter del MT6323 por pwrap) para compensarla bien.
-# Sin eso, la compensacion I*R fija de arriba es la mejor aproximacion.
-P=/usr/local/bin/pwrap_poke
-rd() { $P r "$1" | sed 's/.*= //'; }
-wr() { $P w "$1" "$(printf 0x%x $2)" >/dev/null; }
+# TRABAJO FUTURO (gauge preciso): tabla ZCV real + coulomb-counting del HW fuel gauge del
+# MT6323 (krilin_cust_battery_meter_table.h del downstream), leyendo la corriente por el
+# driver kernel (nunca mas pwrap_poke periodico).
 
-# pedir canal 7 (CON22=0x076E bit7) + habilitar VBUF (CON11=0x0758 bit4)
-v=$(rd 0x076E); wr 0x076E $(( v | (1<<7) ))
-v=$(rd 0x0758); wr 0x0758 $(( v | (1<<4) ))
-sleep 1
-
-sum=0; n=0; i=0
-while [ $i -lt 8 ]; do
-  val=$(rd 0x0714)
-  if [ $(( (val >> 15) & 1 )) -eq 1 ]; then
-    raw=$(( val & 0x7FFF )); sum=$(( sum + raw )); n=$(( n + 1 ))
-  fi
-  i=$(( i + 1 ))
+hw=
+for n in /sys/class/hwmon/hwmon*/name; do
+  [ -e "$n" ] || continue
+  if [ "$(cat "$n" 2>/dev/null)" = "mt6323_auxadc" ]; then hw=${n%/name}; break; fi
 done
-[ $n -eq 0 ] && { echo "battery: sin lecturas validas"; exit 1; }
-raw=$(( sum / n ))
-mv=$(( raw * 4 * 1800 / 32768 ))
+if [ -z "$hw" ] || [ ! -r "$hw/in0_input" ]; then
+  echo "battery: sin hwmon mt6323_auxadc (¿kernel sin el driver? usa battery-pwrap SOLO para diagnostico)" >&2
+  exit 1
+fi
+
+mv=$(cat "$hw/in0_input") || exit 1
+case "$mv" in ''|*[!0-9]*) echo "battery: lectura invalida '$mv'" >&2; exit 1;; esac
 
 # estado de carga -> compensacion I*R para estimar OCV
 st=$(/usr/local/bin/charge-status 2>/dev/null | grep -o 'STAT=[A-Z]*' | head -1)
@@ -56,4 +51,5 @@ else pct=0; fi
 [ $pct -lt 0 ] && pct=0
 
 # VBAT = voltaje real medido (para el display); el % ya lleva la compensacion de carga.
-echo "VBAT: ${mv} mV  (~${pct}%)   [raw=${raw} ocv=${ocv} ${chg} avg de ${n}]"
+# Formato ESTABLE: battery-upower parsea 'VBAT:\s*(\d+)\s*mV.*?(\d+)\s*%'.
+echo "VBAT: ${mv} mV  (~${pct}%)   [ocv=${ocv} ${chg} hwmon=${hw##*/}]"
