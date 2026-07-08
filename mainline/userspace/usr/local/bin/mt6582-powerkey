@@ -22,7 +22,7 @@
 # DBUS_SESSION_BUS_ADDRESS del proceso phosh (corre en un dbus-run-session aislado: elogind no ve la
 # sesion, por eso no vale loginctl). Corre como root desde /etc/local.d; read() bloqueante = 0 CPU.
 
-import struct, glob, os, time, select, subprocess, pwd, fcntl
+import struct, glob, os, time, select, subprocess, pwd, fcntl, socket
 
 LOGF = "/tmp/powerkey.log"
 
@@ -129,6 +129,28 @@ def run_in_session(cmdline, timeout=6, capture=False):
         return None
 
 
+def helper_cmd(cmd, timeout=6):
+    """VIA RAPIDA (0708): mt6582-session-helper corre persistente EN la sesion con su
+    conexion D-Bus ya abierta; le mandamos el comando por socket unix = milisegundos
+    (el camino viejo su+sh+gdbus tardaba ~1-2s por accion). None => sin helper
+    (sesion vieja o helper muerto): el llamante usa el fallback run_in_session."""
+    for path in glob.glob("/run/user/*/powerkey.sock"):
+        try:
+            t0 = time.monotonic()
+            c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            c.settimeout(timeout)
+            c.connect(path)
+            c.sendall((cmd + "\n").encode())
+            resp = c.recv(64).decode().strip()
+            c.close()
+            log("helper %s -> %s (%.3fs)" % (cmd, resp, time.monotonic() - t0))
+            if resp and not resp.startswith("err"):
+                return resp
+        except Exception as e:
+            log("helper %s fallo: %s" % (cmd, e))
+    return None
+
+
 def output_on():
     # re-enciende el panel DRM (phosh lo apaga en el fade del lockscreen y no lo devuelve).
     # SOLO si esta realmente Off: llamar a wlr-randr durante el fade de phosh roza una
@@ -141,7 +163,8 @@ def output_on():
     log("output_on: dpms=%s (leido en %.3fs)" % (dpms, time.monotonic()-t0))
     if dpms == "Off":
         t1 = time.monotonic()
-        run_in_session("wlr-randr --output DSI-1 --on")
+        if helper_cmd("output-on", timeout=12) is None:
+            run_in_session("wlr-randr --output DSI-1 --on")
         log("output_on: wlr-randr tardo %.3fs" % (time.monotonic()-t1))
 
 
@@ -151,6 +174,8 @@ def phosh_lock(active):
     # — ESE era el bug de "apaga pero no bloquea"). Verificado con grim 0705: Lock muestra el
     # lockscreen (reloj + "Slide up to unlock") sobre el panel encendido (parche monitor.c).
     # DESBLOQUEAR: SetActive(false) baja el screensaver (el usuario normalmente desliza).
+    if helper_cmd("lock" if active else "unlock") is not None:
+        return
     if active:
         run_in_session("gdbus call --session --dest org.gnome.ScreenSaver "
                        "--object-path /org/gnome/ScreenSaver "
@@ -187,12 +212,14 @@ def power_menu():
     """Menu de apagado: pantalla ON + helper en la sesion (el helper gestiona el lockscreen:
     si esta bloqueado pide desbloquear y espera). stdout final: poweroff|reboot|cancel."""
     screen_on(read_int(MX, 10))
-    r = run_in_session("python3 /usr/local/bin/mt6582-powermenu", timeout=75, capture=True)
-    if r is None:
-        subprocess.run(["poweroff"])          # sin sesion Phosh -> apagar directo (fallback)
-        return
-    out = [l for l in (r.stdout or "").strip().splitlines() if l.strip()]
-    action = out[-1].strip() if out else "cancel"
+    action = helper_cmd("menu", timeout=80)
+    if action is None:
+        r = run_in_session("python3 /usr/local/bin/mt6582-powermenu", timeout=75, capture=True)
+        if r is None:
+            subprocess.run(["poweroff"])      # sin sesion Phosh -> apagar directo (fallback)
+            return
+        out = [l for l in (r.stdout or "").strip().splitlines() if l.strip()]
+        action = out[-1].strip() if out else "cancel"
     if action == "poweroff":
         subprocess.run(["poweroff"])
     elif action == "reboot":

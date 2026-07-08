@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+# mt6582-autobrightness — auto-brillo por el ALS TMD2772 (iio tsl2772).
+#
+# Lee lux de /sys (sin D-Bus/sensor-proxy: mas simple y sin polkit) cada POLL s
+# y escribe el objetivo en /run/mt6582-bl-pct — el MISMO canal que el slider de
+# Phosh (shim) — que consume el daemon mt6582-backlight (PWM). "El ultimo que
+# escribe gana", asi que convive con el slider; para no pelearse con el usuario:
+# si alguien mas cambia el fichero (slider), NOS APARTAMOS hasta que la luz
+# ambiente cambie ~3x respecto al momento del ajuste manual (o reboot).
+#
+# El sensor arranca de fabrica con integracion 2.73 ms y ganancia 1 => con luz
+# de interior lee 0. Aqui se configura 699 ms + ganancia 16 (unico itime largo
+# disponible; a plena luz el driver satura y reporta max_lux — a esos niveles
+# el brillo ya esta al 100%, da igual).
+#
+# NO usa gsd-power (su power plugin resucita la regresion de auto-suspend).
+import glob
+import math
+import os
+import time
+
+PCT = "/run/mt6582-bl-pct"
+OFF = "/run/mt6582-screen-off"
+POLL = 2.0          # s entre lecturas
+STEP = 4            # puntos max por tick (rampa suave)
+DEADBAND = 6        # no ajustar si |objetivo-actual| <= esto (histeresis)
+OVERRIDE_RATIO = 3.0  # volver del modo manual si la luz cambia 3x
+
+# curva lux -> % (interpolacion en log10(lux+1)); calibrado a ojo en HW 0708
+CURVE = [(0, 12), (2, 18), (10, 30), (50, 45), (150, 60), (500, 80), (1500, 100)]
+
+
+def find_als():
+    for n in glob.glob("/sys/bus/iio/devices/iio:device*/name"):
+        try:
+            if "tmd2772" in open(n).read() or "tsl2772" in open(n).read():
+                return os.path.dirname(n)
+        except Exception:
+            pass
+    return None
+
+
+def setup(dev):
+    for f, v in (("in_intensity0_integration_time", "0.699000"),
+                 ("in_intensity0_calibscale", "16")):
+        try:
+            with open(os.path.join(dev, f), "w") as fh:
+                fh.write(v)
+        except Exception:
+            pass
+
+
+def read_lux(dev):
+    try:
+        return max(0, int(open(dev + "/in_illuminance0_input").read().strip()))
+    except Exception:
+        return None
+
+
+def curve_pct(lux):
+    lg = math.log10(lux + 1)
+    pts = [(math.log10(l + 1), p) for l, p in CURVE]
+    if lg <= pts[0][0]:
+        return pts[0][1]
+    for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+        if lg <= x1:
+            return int(round(y0 + (y1 - y0) * (lg - x0) / (x1 - x0)))
+    return pts[-1][1]
+
+
+def read_pct():
+    try:
+        return max(0, min(100, int(open(PCT).read().strip())))
+    except Exception:
+        return None
+
+
+def write_pct(v):
+    try:
+        with open(PCT, "w") as f:
+            f.write(str(int(v)))
+        return True
+    except Exception:
+        return False
+
+
+def main():
+    dev = find_als()
+    while dev is None:
+        time.sleep(5)
+        dev = find_als()
+    setup(dev)
+
+    last_written = None        # ultimo valor que escribimos NOSOTROS
+    override_lux = None        # lux en el momento del ajuste manual (None = auto)
+
+    while True:
+        time.sleep(POLL)
+        if os.path.exists(OFF):
+            continue                          # pantalla apagada: no tocar
+        lux = read_lux(dev)
+        if lux is None:
+            setup(dev)                        # p.ej. tras resume: reconfigurar
+            continue
+        cur = read_pct()
+        if cur is None:
+            continue
+
+        # ajuste manual detectado: el fichero no vale lo ultimo que escribimos
+        if last_written is not None and cur != last_written:
+            override_lux = max(lux, 1)
+            last_written = cur
+            continue
+
+        if override_lux is not None:
+            r = (lux + 1) / float(override_lux + 1)
+            if 1.0 / OVERRIDE_RATIO < r < OVERRIDE_RATIO:
+                continue                      # el usuario manda; luz sin cambios
+            override_lux = None               # la luz cambio de verdad: retomar
+
+        target = curve_pct(lux)
+        if abs(target - cur) <= DEADBAND:
+            continue
+        nxt = cur + max(-STEP, min(STEP, target - cur))
+        if write_pct(nxt):
+            last_written = nxt
+
+
+if __name__ == "__main__":
+    main()

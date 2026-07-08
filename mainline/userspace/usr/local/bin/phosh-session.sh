@@ -19,6 +19,9 @@ gsettings set org.sigxcpu.feedbackd profile quiet 2>/dev/null
 # Brillo por slider: el shim D-Bus provee org.gnome.SettingsDaemon.Power.Screen (Brightness)
 # en ESTA sesion -> slider -> /run/mt6582-bl-pct -> daemon mt6582-backlight -> PWM.
 [ -f /usr/local/bin/mt6582-bl-shim.py ] && python3 /usr/local/bin/mt6582-bl-shim.py >/dev/null 2>&1 &
+# Boton fluido: helper persistente en la sesion (socket $XDG_RUNTIME_DIR/powerkey.sock);
+# mt6582-powerkey le manda lock/unlock/menu sin forkear su+gdbus (latencia ~ms).
+[ -f /usr/local/bin/mt6582-session-helper ] && python3 /usr/local/bin/mt6582-session-helper >/dev/null 2>&1 &
 # Audio: arrancar PulseAudio (crea el sink de la card mt6582audio). Las apps tambien lo
 # autospawn-ean al reproducir, pero arrancarlo aqui deja el sink listo desde el boot y evita
 # el retardo del autospawn. El driver del AFE enciende el codec+amp al abrir el sink.

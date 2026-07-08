@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+# mt6582-session-helper — ejecutor persistente DENTRO de la sesion Phosh (lo
+# arranca phosh-session.sh). El daemon root mt6582-powerkey le manda comandos
+# por un socket unix ($XDG_RUNTIME_DIR/powerkey.sock) y este los ejecuta con
+# su conexion D-Bus YA ABIERTA -> latencia de milisegundos.
+#
+# Antes cada accion del boton era: escanear /proc buscando phosh + su + sh +
+# gdbus nuevos = ~1-2 s por pulsacion. Con esto el lock/wake es inmediato;
+# mt6582-powerkey conserva el camino viejo como fallback si el helper no esta.
+#
+# Protocolo: una linea por conexion; respuesta una linea.
+#   ping      -> ok
+#   lock      -> ScreenSaver.Lock                    -> ok
+#   unlock    -> ScreenSaver.SetActive(false)        -> ok
+#   output-on -> wlr-randr --output DSI-1 --on       -> ok
+#   menu      -> mt6582-powermenu (bloquea hasta 75s)-> poweroff|reboot|cancel
+import os
+import socket
+import subprocess
+
+import gi
+gi.require_version("Gio", "2.0")
+from gi.repository import Gio, GLib
+
+SOCK = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "powerkey.sock")
+
+bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+
+
+def screensaver(method, params=None):
+    bus.call_sync("org.gnome.ScreenSaver", "/org/gnome/ScreenSaver",
+                  "org.gnome.ScreenSaver", method, params, None,
+                  Gio.DBusCallFlags.NONE, 5000, None)
+
+
+def handle(cmd):
+    if cmd == "ping":
+        return "ok"
+    if cmd == "lock":
+        screensaver("Lock")
+        return "ok"
+    if cmd == "unlock":
+        screensaver("SetActive", GLib.Variant("(b)", (False,)))
+        return "ok"
+    if cmd == "output-on":
+        subprocess.run(["wlr-randr", "--output", "DSI-1", "--on"], timeout=10,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return "ok"
+    if cmd == "menu":
+        r = subprocess.run(["python3", "/usr/local/bin/mt6582-powermenu"],
+                           stdout=subprocess.PIPE, universal_newlines=True,
+                           timeout=75)
+        lines = [l for l in (r.stdout or "").strip().splitlines() if l.strip()]
+        return lines[-1].strip() if lines else "cancel"
+    return "err comando desconocido"
+
+
+def main():
+    try:
+        os.unlink(SOCK)
+    except FileNotFoundError:
+        pass
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(SOCK)
+    os.chmod(SOCK, 0o600)
+    srv.listen(1)
+    while True:
+        c, _ = srv.accept()
+        try:
+            c.settimeout(80)
+            cmd = c.recv(64).decode().strip()
+            # lock/unlock: responder ANTES de ejecutar (fire-and-forget). El Lock de
+            # phosh tarda ~1.3s en volver (construye el lockscreen); el daemon del
+            # boton no necesita esperarlo — la pantalla ya esta apagada por el flag.
+            if cmd in ("lock", "unlock"):
+                c.sendall(b"ok\n")
+                c.close()
+                c = None
+                try:
+                    handle(cmd)
+                except Exception:
+                    pass
+                continue
+            try:
+                resp = handle(cmd)
+            except subprocess.TimeoutExpired:
+                resp = "cancel"
+            except Exception as e:
+                resp = "err %s" % e
+            c.sendall((resp + "\n").encode())
+        except Exception:
+            pass
+        finally:
+            if c is not None:
+                c.close()
+
+
+if __name__ == "__main__":
+    main()

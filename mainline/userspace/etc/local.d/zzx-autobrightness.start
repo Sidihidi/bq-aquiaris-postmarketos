@@ -1,0 +1,5 @@
+#!/bin/sh
+# Auto-brillo por el sensor de luz TMD2772 -> /run/mt6582-bl-pct (canal del slider).
+# 'zzx' = despues del backlight daemon y antes del autosuspend (zzy).
+pgrep -f "bin/mt6582-autobrightness" >/dev/null 2>&1 && exit 0
+setsid /usr/local/bin/mt6582-autobrightness >/dev/null 2>&1 &

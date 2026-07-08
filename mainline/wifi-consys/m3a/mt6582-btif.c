@@ -69,10 +69,13 @@
 #define PERI_CG_BTIF	(1u << 20)
 
 #define STP_TYPE_BT	0
+#define STP_TYPE_FM	1
 #define STP_TYPE_GPS	2
 #define STP_TYPE_WMT	4
 #define GPS_FIFO_SZ	16384
+#define FM_FIFO_SZ	8192
 #define RXBUF_SZ	2048
+#define MAX_STP_PAYLOAD	2048	/* limite de length plausible en un header STP */
 #define TXPKT_SZ	1100
 #define WMTBUF_SZ	1010
 
@@ -94,6 +97,7 @@ struct mt6582_btif {
 	u32 tx_off, tx_wrap, rx_off, rx_wrap;
 	u8 rxbuf[RXBUF_SZ];
 	u32 rxlen;
+	u32 resync_drops;	/* bytes descartados buscando un header STP valido */
 	u8 txpkt[TXPKT_SZ];
 	u8 wmtbuf[WMTBUF_SZ];
 	struct dentry *dbg;
@@ -107,6 +111,12 @@ struct mt6582_btif {
 	wait_queue_head_t gps_wq;
 	struct mutex gps_rd_lock;
 	u8 gps_tx[1024];
+	/* FM: canal STP 1. El driver stock mtk_fm_drv registra un callback de RX
+	 * (mtk_wcn_stp_register_event_cb) que invocamos cuando llega un frame FM.
+	 * TX va por stp_send(STP_TYPE_FM). El driver FM gestiona su propio /dev/fm. */
+	void (*fm_rx_cb)(const u8 *data, u32 len);
+	struct mutex fm_cb_lock;
+	u8 fm_tx[1024];
 	/* WMT runtime (canal 4): API exportada func_on/off para otras radios (p.ej. WiFi).
 	 * El kthread RX rutea el EVT WMT aquí vía completion (no compite por rxbuf). */
 	struct completion wmt_done;
@@ -218,6 +228,22 @@ static int stp_pop_frame(struct mt6582_btif *b, u8 *out, u32 max, u8 *type)
 {
 	u32 len, frame, n;
 
+	/* RESYNC-RX: descartar bytes hasta un header STP plausible. Sin esto un
+	 * byte espurio desincroniza el parser PARA SIEMPRE (leia el header a
+	 * ciegas). (1) 0x7f = byte de resync del FW (stp_core.c:2137, manda
+	 * 4x0x7f seguidos para forzarlo); (2) byte0 lleva sync-bit 0x80 y
+	 * byte1[6:4] = canal valido 0..4. En el caso feliz (trafico normal) el
+	 * primer byte ya es plausible y esto no descarta nada. */
+	while (b->rxlen >= 4) {
+		u8 h0 = b->rxbuf[0];
+		u8 chan = (b->rxbuf[1] >> 4) & 0x07;
+		u32 l = ((b->rxbuf[1] & 0x0f) << 8) | b->rxbuf[2];
+
+		if (h0 != 0x7f && (h0 & 0x80) && chan <= 4 && l <= MAX_STP_PAYLOAD)
+			break;				/* header plausible */
+		b->resync_drops++;
+		memmove(b->rxbuf, b->rxbuf + 1, --b->rxlen);
+	}
 	if (b->rxlen < 4) return 0;
 	*type = (b->rxbuf[1] >> 4) & 0x0f;
 	len = ((b->rxbuf[1] & 0x0f) << 8) | b->rxbuf[2];
@@ -388,6 +414,13 @@ static int btif_rx_thread(void *data)
 				wake_up_interruptible(&b->gps_wq);
 				continue;
 			}
+			if (type == STP_TYPE_FM) {	/* RDS/eventos FM -> driver mtk_fm_drv */
+				mutex_lock(&b->fm_cb_lock);
+				if (b->fm_rx_cb)
+					b->fm_rx_cb(buf, plen);
+				mutex_unlock(&b->fm_cb_lock);
+				continue;
+			}
 			if (type != STP_TYPE_BT || !b->hdev || plen < 2)
 				continue;
 			skb = bt_skb_alloc(plen - 1, GFP_KERNEL);
@@ -524,6 +557,35 @@ int mt6582_consys_func_off(u8 type)
 }
 EXPORT_SYMBOL_GPL(mt6582_consys_func_off);
 
+/* ===== FM (canal STP 1): API para el driver stock mtk_fm_drv =====
+ * El driver FM llama a estas funciones vía nuestro shim stp_exp.h/wmt_exp.h.
+ * TX: stp_send(STP_TYPE_FM). RX: callback registrado por el driver FM. */
+int mt6582_stp_fm_send(const u8 *data, u32 len)
+{
+	struct mt6582_btif *b = g_btif;
+
+	if (!b)
+		return -ENODEV;
+	mutex_lock(&b->tx_lock);
+	stp_send(b, STP_TYPE_FM, data, len);
+	mutex_unlock(&b->tx_lock);
+	return len;
+}
+EXPORT_SYMBOL_GPL(mt6582_stp_fm_send);
+
+int mt6582_stp_fm_register_rx(void (*cb)(const u8 *data, u32 len))
+{
+	struct mt6582_btif *b = g_btif;
+
+	if (!b)
+		return -ENODEV;
+	mutex_lock(&b->fm_cb_lock);
+	b->fm_rx_cb = cb;
+	mutex_unlock(&b->fm_cb_lock);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(mt6582_stp_fm_register_rx);
+
 static ssize_t bringup_write(struct file *f, const char __user *u, size_t n, loff_t *o)
 {
 	if (g_btif) bringup(g_btif);
@@ -620,6 +682,7 @@ static int mt6582_btif_probe(struct platform_device *pdev)
 	mutex_init(&b->gps_rd_lock);
 	mutex_init(&b->wmt_lock);
 	mutex_init(&b->bringup_lock);
+	mutex_init(&b->fm_cb_lock);
 	init_completion(&b->wmt_done);
 	init_waitqueue_head(&b->gps_wq);
 	if (kfifo_alloc(&b->gps_fifo, GPS_FIFO_SZ, GFP_KERNEL))
@@ -645,6 +708,7 @@ static int mt6582_btif_probe(struct platform_device *pdev)
 	g_btif = b;
 	b->dbg = debugfs_create_dir("mt6582_btif", NULL);
 	debugfs_create_file("bringup", 0200, b->dbg, b, &bringup_fops);
+	debugfs_create_u32("resync_drops", 0444, b->dbg, &b->resync_drops);
 	misc_register(&gps_miscdev);
 	dev_info(dev, "BT: echo 1 > /sys/kernel/debug/mt6582_btif/bringup  (levanta hci0)\n");
 	dev_info(dev, "GPS: /dev/stpgps (abrir dispara bring-up; userspace mnld-equiv -> gpsd)\n");
