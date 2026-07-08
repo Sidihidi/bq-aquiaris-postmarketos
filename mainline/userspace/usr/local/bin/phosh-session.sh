@@ -15,6 +15,9 @@ gsettings set org.gnome.settings-daemon.plugins.power idle-dim false 2>/dev/null
 # 'quiet' = haptico en notificaciones/eventos, sin sonidos. ('full' anade sonidos +
 # haptico al pulsar botones/teclado; el motor es regulator-haptic FF en event2.)
 gsettings set org.sigxcpu.feedbackd profile quiet 2>/dev/null
+# Animaciones fuera: el fade del ScreenSaver.Lock tardaba ~1.3s (jank al despertar
+# justo tras bloquear) y en este A7 las animaciones cuestan CPU que no sobra.
+gsettings set org.gnome.desktop.interface enable-animations false 2>/dev/null
 /usr/libexec/gsd-power &
 # Brillo por slider: el shim D-Bus provee org.gnome.SettingsDaemon.Power.Screen (Brightness)
 # en ESTA sesion -> slider -> /run/mt6582-bl-pct -> daemon mt6582-backlight -> PWM.
