@@ -23,6 +23,9 @@
 #include <linux/suspend.h>
 #include <linux/of.h>
 #include <linux/of_irq.h>
+#include <linux/cpu_pm.h>
+#include <asm/suspend.h>
+#include <asm/cacheflush.h>
 
 /* offsets sobre 0x10006000 (mt_spm.h del downstream) */
 #define SPM_POWERON_CONFIG_SET		0x0000
@@ -128,6 +131,11 @@
 
 static u32 spm_wake_sec = 600;	/* wake periodico de seguridad (0 = off) */
 module_param(spm_wake_sec, uint, 0644);
+
+/* M3: apagar tambien CPU0 (dormant por MTCMOS; resume via BootROM ->
+ * vector 0x10001800 -> cpu_resume). 0 = M1 (WFI plano, CPU0 encendido). */
+static u32 spm_cpu_pdn = 1;
+module_param(spm_cpu_pdn, uint, 0644);
 
 /* microcodigo PCM de suspend, v35rc1 @ 2014-03-17 (verbatim del stock;
  * el tail incluye el programa "normal" post-wake) */
@@ -238,6 +246,7 @@ static const u32 pcm_suspend_fw[] = {
 struct mt6582_spm {
 	struct device *dev;
 	void __iomem *base;
+	void __iomem *bootvec;	/* INFRACFG_AO+0x800: vector de resume del BootROM */
 	u32 *fw;		/* copia coherente (el IM la lee por DMA) */
 	dma_addr_t fw_phys;
 };
@@ -283,6 +292,18 @@ static void spm_hw_init(struct mt6582_spm *s)
 	spm_w(s, SPM_SLEEP_ISR_MASK, ISRM_ALL);
 	spm_w(s, SPM_SLEEP_ISR_STATUS, ISRC_ALL);
 	spm_w(s, SPM_PCM_SW_INT_CLEAR, PCM_SW_INT_ALL);
+}
+
+static int mt6582_spm_finisher(unsigned long arg)
+{
+	/* corre con stack minimo tras el save de cpu_suspend: vaciar caches a
+	 * PoC (el MTCMOS del cluster corta L1/L2) y WFI final. Si el WFI
+	 * retorna (sleep abortado), devolver !=0 => cpu_suspend = abort. */
+	flush_cache_all();
+	isb();
+	dsb(sy);
+	wfi();
+	return 1;
 }
 
 static int spm_suspend_enter(suspend_state_t state)
@@ -360,10 +381,13 @@ static int spm_suspend_enter(suspend_state_t state)
 	isr = spm_r(s, SPM_SLEEP_ISR_MASK) & ISR_TWAM;
 	spm_w(s, SPM_SLEEP_ISR_MASK, isr | ISRM_PCM_IRQ_AUX);
 
-	/* kick: HITO 1 = NO apagar CPU ni INFRA; WDT del PCM en modo WAKE
-	 * (sin el RGU configurado, un reset del PCM no nos resetearia) */
+	/* kick: M3 = apagar CPU (dorm) si spm_cpu_pdn; INFRA sigue ON (M4).
+	 * WDT del PCM en modo WAKE (sin el RGU configurado, un reset del PCM
+	 * no nos resetearia) */
 	clk = spm_r(s, SPM_CLK_CON) & ~(CC_DISABLE_DORM_PWR | CC_DISABLE_INFRA_PWR);
-	clk |= CC_DISABLE_DORM_PWR | CC_DISABLE_INFRA_PWR;
+	if (!spm_cpu_pdn)
+		clk |= CC_DISABLE_DORM_PWR;
+	clk |= CC_DISABLE_INFRA_PWR;
 	spm_w(s, SPM_CLK_CON, clk | CC_LOCK_INFRA_DCM);
 	spm_w(s, SPM_PCM_MAS_PAUSE_MASK, 0xffffffff);
 	spm_w(s, SPM_PCM_PWR_IO_EN, PCM_PWRIO_EN_R0 | PCM_PWRIO_EN_R7);
@@ -376,10 +400,21 @@ static int spm_suspend_enter(suspend_state_t state)
 	spm_w(s, SPM_PCM_CON0, con0 | CON0_CFG_KEY | CON0_PCM_KICK);
 	spm_w(s, SPM_PCM_CON0, con0 | CON0_CFG_KEY);
 
-	/* WFI plano (cpu_pdn=0) */
-	isb();
-	dsb(sy);
-	wfi();
+	/* dormir: M3 = apagar CPU0 (dormant); el BootROM resucita por el
+	 * vector 0x10001800 -> cpu_resume (mainline restaura MMU/contexto;
+	 * los notifiers de CPU_PM salvan GIC/VFP/arch-timer) */
+	if (spm_cpu_pdn && s->bootvec) {
+		writel(__pa_symbol(cpu_resume), s->bootvec);
+		dsb(sy);
+		cpu_pm_enter();
+		cpu_suspend(0, mt6582_spm_finisher);
+		cpu_pm_exit();
+		writel(0, s->bootvec);
+	} else {
+		isb();
+		dsb(sy);
+		wfi();
+	}
 
 	/* estado del wake */
 	dbg = spm_r(s, SPM_PCM_REG_DATA_INI);
@@ -455,6 +490,14 @@ static int mt6582_spm_probe(struct platform_device *pdev)
 			       IRQF_NO_SUSPEND, "mt6582-spm", s);
 	if (ret)
 		return ret;
+
+	/* vector de resume del BootROM: INFRACFG_AO+0x800 (addr) y +0x804
+	 * (bit31 = habilitar el salto). Lo usa el dormant de CPU0 (M3). */
+	s->bootvec = ioremap(0x10001800, 0x8);
+	if (s->bootvec)
+		writel(readl(s->bootvec + 4) | BIT(31), s->bootvec + 4);
+	else
+		dev_warn(&pdev->dev, "sin bootvec: M3 (cpu_pdn) deshabilitado\n");
 
 	spm_hw_init(s);
 	gspm = s;
