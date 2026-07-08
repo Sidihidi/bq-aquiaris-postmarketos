@@ -268,6 +268,18 @@ def main():
             return int(open("/sys/power/suspend_stats/success").read().strip())
         except Exception:
             return -1
+    def keys_irq_count():
+        # total de IRQs de mtk-pmic-keys: sube con CADA pulsacion fisica aunque
+        # el fd este sordo (algo roba el grab tras idle: elogind veia presses
+        # que con nuestro grab no deberia — 0708/0709). Es el detector de
+        # "el usuario pulso y el evento se perdio".
+        try:
+            for ln in open("/proc/interrupts"):
+                if "mtk-pmic-keys" in ln:
+                    return sum(int(x) for x in ln.split()[1:5])
+        except Exception:
+            pass
+        return -1
     def open_keypad():
         # VOLUMEN como RESCATE (0708): el bloque de teclas del PMIC puede
         # quedarse sordo (wedge, en investigacion); las teclas de volumen van
@@ -286,6 +298,7 @@ def main():
     last = 0.0
     last_reopen = time.monotonic()
     last_suspends = suspend_count()
+    last_kirq = keys_irq_count()
     while True:
         if fd is None:
             fd = open_and_grab()
@@ -320,8 +333,27 @@ def main():
             # en <=2s => reopen inmediato. (Si el fd si entrega eventos, r llega
             # y se procesa normal — no se reabre nada con eventos en vuelo.)
             now = time.monotonic()
+            # DETECTOR POR IRQ (0709, el fix del "15-20s en volver la pantalla"):
+            # tras idle algo nos roba el grab/el fd se queda sordo (elogind veia
+            # presses bajo nuestro grab) y las pulsaciones se PERDIAN hasta el
+            # reopen de 30s (espera media 15-20s). El contador de IRQs de
+            # mtk-pmic-keys sube con CADA pulsacion fisica aunque el fd calle:
+            # pantalla apagada + IRQs nuevos + ningun evento leido => el usuario
+            # pulso => despertar YA (<=2s).
+            kirq = keys_irq_count()
+            if kirq != last_kirq:
+                if last_kirq >= 0 and not screen_is_on() \
+                   and now - last >= DEBOUNCE:
+                    log("accion: ON/wake por IRQ-delta (fd sordo, %d IRQs nuevos)"
+                        % (kirq - last_kirq))
+                    screen_on(saved)
+                    last = now
+                last_kirq = kirq
             cnt = suspend_count()
-            if cnt != last_suspends or now - last_reopen >= REOPEN_INTERVAL:
+            # reopen agresivo con pantalla apagada (cada TICK): reduce la
+            # ventana de fd sordo para el resto de interacciones
+            interval = TICK if not screen_is_on() else REOPEN_INTERVAL
+            if cnt != last_suspends or now - last_reopen >= interval:
                 resumed = cnt != last_suspends
                 last_suspends = cnt
                 try:
@@ -369,6 +401,10 @@ def main():
                 log("accion: ON/wake (env=%s, press-recibido hace %.2fs)" % (bool(phosh_env()), t_press))
                 screen_on(saved)
         last = time.monotonic()
+        # sincronizar el contador de IRQs con lo ya procesado: sin esto, el
+        # press+release de un LOCK dispararia el detector IRQ-delta al tick
+        # siguiente (pantalla recien apagada) = falso despertar inmediato
+        last_kirq = keys_irq_count()
 
 
 if __name__ == "__main__":
