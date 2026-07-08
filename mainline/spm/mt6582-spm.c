@@ -26,6 +26,7 @@
 #include <linux/cpu_pm.h>
 #include <asm/suspend.h>
 #include <asm/cacheflush.h>
+#include <asm/cp15.h>
 
 /* offsets sobre 0x10006000 (mt_spm.h del downstream) */
 #define SPM_POWERON_CONFIG_SET		0x0000
@@ -134,7 +135,7 @@ module_param(spm_wake_sec, uint, 0644);
 
 /* M3: apagar tambien CPU0 (dormant por MTCMOS; resume via BootROM ->
  * vector 0x10001800 -> cpu_resume). 0 = M1 (WFI plano, CPU0 encendido). */
-static u32 spm_cpu_pdn = 1;
+static u32 spm_cpu_pdn;		/* 0 por defecto: M3 en debug (crasheo 0709) */
 module_param(spm_cpu_pdn, uint, 0644);
 
 /* microcodigo PCM de suspend, v35rc1 @ 2014-03-17 (verbatim del stock;
@@ -296,12 +297,13 @@ static void spm_hw_init(struct mt6582_spm *s)
 
 static int mt6582_spm_finisher(unsigned long arg)
 {
-	/* corre con stack minimo tras el save de cpu_suspend: vaciar caches a
-	 * PoC (el MTCMOS del cluster corta L1/L2) y WFI final. Si el WFI
-	 * retorna (sleep abortado), devolver !=0 => cpu_suspend = abort. */
-	flush_cache_all();
-	isb();
-	dsb(sy);
+	/* corre tras el save de cpu_suspend. CLAVE (crash 0709): hay que
+	 * DESHABILITAR la D-cache antes del WFI final — flush con cache
+	 * activa deja sucios los pushes de stack posteriores y el MTCMOS
+	 * los pierde (el downstream hace __disable_dcache()). El macro
+	 * canonico lo hace todo en asm sin tocar stack: C-bit off + flush
+	 * L1/L2 a PoC + salir de la coherencia SMP (ACTLR). */
+	v7_exit_coherency_flush(all);
 	wfi();
 	return 1;
 }
