@@ -43,6 +43,7 @@ ssh_active() {
 inhibited() {
   [ -e "$INHIBIT" ] && { echo manual; return 0; }
   audio_playing && { echo audio; return 0; }
+  amixer -c 0 cget name='FM Radio Route' 2>/dev/null | grep -q ': values=1' && { echo fm; return 0; }
   if [ "$IGNORE_SSH" != 1 ] && ssh_active; then echo ssh; return 0; fi
   return 1
 }
