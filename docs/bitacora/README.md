@@ -16,6 +16,8 @@ sobre este repo (sesión WiFi/port stock, sesión de drivers/UX, etc.) sin pisar
   la última `*-mac-ports.md`. El DTS canónico es `mainline/dts/mt6582-bq-krillin.dts`.
 
 ## Índice
+- [2026-07-08 · Menú multiboot visual (menupick)](2026-07-08-menupick-multiboot.md) — menú en
+  pantalla navegable con Vol+/- y Power. FUNCIONA. pmOS + Android (kexec). Sin U-Boot.
 - [2026-07-08 · FM Radio — port del stock MT6627](2026-07-08-fm-port.md) — stock 12K LOC compila y
   se linkea al vmlinux; btif extendido con canal FM; M0 transporte validado. **Falta**: power-cycle
   + verificar `/dev/fm`.
