@@ -409,7 +409,12 @@ static int spm_suspend_enter(suspend_state_t state)
 		writel(__pa_symbol(cpu_resume), s->bootvec);
 		dsb(sy);
 		cpu_pm_enter();
+		/* CLUSTER pm: dispara gic_dist_save/restore — sin esto el
+		 * distribuidor del GIC vuelve EN BLANCO tras el MTCMOS del
+		 * cluster (crash 2 del 0709: resume sin IRQs -> watchdog) */
+		cpu_cluster_pm_enter();
 		cpu_suspend(0, mt6582_spm_finisher);
+		cpu_cluster_pm_exit();
 		cpu_pm_exit();
 		writel(0, s->bootvec);
 	} else {
