@@ -159,14 +159,15 @@ static void mt6582_codec_dl_off(struct mt6582_afe *afe)
 }
 
 /* Ruteo del audio de la RADIO FM al DAC. El chip FM (CONNSYS on-die, MT6627-IP)
- * emite I2S a 32 kHz en modo master — su salida I2S NO se enciende en el powerup
- * (viene comentada en el stock): la enciende userspace con FM_IOCTL_I2S_SETTING
- * {ON, MASTER, 32K}. Ese I2S entra al AFE por el 2º I2S IN (pad INTERNO del
- * CONNSYS, sin pinmux: AFE_I2S_CON=0x8000000d = esclavo + fmt I2S + phase-fix,
- * el mismo valor del ground truth que .prepare ya escribe) -> ASRC 32k->44.1k
- * -> HW GAIN1 (rampa) -> interconexion -> I2S-DAC -> codec HP (los auriculares
- * son la antena). Secuencia del downstream mt_soc_pcm_fm_i2s.c; conexiones de
- * las tablas de mt_soc_afe_connection.c. */
+ * emite I2S a 32 kHz en modo master; su salida queda ACTIVA tras powerup+tune
+ * (no llamar a RESTORE_SEARCH: hace RampDown y deja la linea en DC). Ese I2S
+ * entra al AFE por el 2º I2S IN (pad interno del CONNSYS, sin pinmux:
+ * AFE_I2S_CON=0x8000000d, identico al ground-truth de LineageOS) -> ASRC
+ * 32k->44.1k -> conexion DIRECTA I00/I01 -> O03/O04 (DAC) -> codec HP.
+ * El stock rutea I00/I01 -> O05/O06 (AWB) y hace el loop DL1 por software
+ * (AudioFlinger); la conexion directa al DAC latchea y suena igual, sin
+ * memif ni userspace (validado en HW 0708). Constantes del ASRC identicas
+ * al dump stock (groundtruth-0708/). */
 static void mt6582_afe_fm_route(struct mt6582_afe *afe, bool on)
 {
 	if (on) {
@@ -189,23 +190,23 @@ static void mt6582_afe_fm_route(struct mt6582_afe *afe, bool on)
 		/* 2º I2S IN desde CONNSYS (esclavo) + enable */
 		afe_wr(afe, AFE_I2S_CON, 0x8000000d);
 
-		/* ASRC 32k (chip FM master) -> 44.1k (dominio del DAC) */
+		/* ASRC 32k (chip FM master) -> 44.1k (dominio del DAC).
+		 * CON13/CON21 y el enable solo-bit0 = valores exactos del dump
+		 * stock; el bit6 de CON0 no latchea en mt6582. */
 		afe_rmw(afe, AFE_CONN4, BIT(30), 0);		/* 0 = pasar por ASRC */
-		afe_rmw(afe, AFE_ASRC_CON13, BIT(16), 0);	/* stereo */
+		afe_wr(afe, AFE_ASRC_CON13, 0x00000011);
 		afe_wr(afe, AFE_ASRC_CON14, 0xDC8000);
 		afe_wr(afe, AFE_ASRC_CON15, 0xA00000);
 		afe_wr(afe, AFE_ASRC_CON17, 0x1FBD);
 		afe_wr(afe, AFE_ASRC_CON16, 0x00075987);
 		afe_wr(afe, AFE_ASRC_CON20, 0x00001b00);
-		afe_rmw(afe, AFE_ASRC_CON0, BIT(6) | BIT(0), BIT(6) | BIT(0));
+		afe_wr(afe, AFE_ASRC_CON21, 0x00001800);
+		afe_rmw(afe, AFE_ASRC_CON0, BIT(0), BIT(0));
 
-		/* HW GAIN1 a 0 dB (con rampa desde 0) + interconexiones del path */
-		afe_wr(afe, AFE_GAIN1_CUR, 0);
-		afe_rmw(afe, AFE_GAIN1_CON0, 0xfff0, (0x80 << 8) | (9 << 4));
-		afe_rmw(afe, AFE_GAIN1_CON0, BIT(0), BIT(0));
-		afe_wr(afe, AFE_GAIN1_CON1, 0x10000);
-		afe_rmw(afe, AFE_CONN_GAIN1_IN, BIT(2) | BIT(16), BIT(2) | BIT(16));
-		afe_rmw(afe, AFE_CONN_GAIN1_OUT, BIT(8) | BIT(10), BIT(8) | BIT(10));
+		/* conexion directa FM->DAC: I00->O03 (CONN1 b16), I01->O04
+		 * (CONN2 b1) — tabla v1/MT6583, validada en HW */
+		afe_rmw(afe, AFE_CONN1, BIT(16), BIT(16));
+		afe_rmw(afe, AFE_CONN2, BIT(1), BIT(1));
 
 		afe_rmw(afe, AFE_DAC_CON0, BIT(0), BIT(0));	/* AFE_ON */
 
@@ -213,11 +214,10 @@ static void mt6582_afe_fm_route(struct mt6582_afe *afe, bool on)
 		if (afe->pmic && !afe->dl1_substream)
 			mt6582_codec_dl_on(afe);
 	} else {
-		afe_rmw(afe, AFE_CONN_GAIN1_IN, BIT(2) | BIT(16), 0);
-		afe_rmw(afe, AFE_CONN_GAIN1_OUT, BIT(8) | BIT(10), 0);
-		afe_rmw(afe, AFE_ASRC_CON0, BIT(6) | BIT(0), 0);
+		afe_rmw(afe, AFE_CONN1, BIT(16), 0);
+		afe_rmw(afe, AFE_CONN2, BIT(1), 0);
+		afe_rmw(afe, AFE_ASRC_CON0, BIT(0), 0);
 		afe_rmw(afe, AFE_CONN4, BIT(30), BIT(30));	/* bypass ASRC */
-		afe_rmw(afe, AFE_GAIN1_CON0, BIT(0), 0);
 		/* si no hay playback activo, apagar tambien codec y lado DAC */
 		if (!afe->dl1_substream) {
 			if (afe->pmic)

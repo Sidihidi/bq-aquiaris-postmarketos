@@ -18,6 +18,7 @@ la foto completa: qué está al 100%, qué está a medias, y qué falta — con 
 | **GUI Phosh** | ✅ | 0.55 build propio (en el móvil: `/root/build/phosh`), con parche `0001-monitor-no-dpms-off.patch`. Supervisión completa de sesión |
 | **Bluetooth (bring-up + pairing)** | ✅ | hci0 vía btif/WMT (bring-up diferido post-Phosh), agente auto-pairing. Audio BT = ver Audio |
 | **Carga (mantenedor FAN5405)** | ✅ | `fan5405-charge` daemon; con el móvil apagado carga el PMIC en HW |
+| **Radio FM** | ✅ **SUENA (0708)** | `fmradio 1023 &` + `amixer cset name='FM Radio Route' 1` (auriculares = antena). Chip MT6627 on-die por `/dev/fm` + path digital I2S→ASRC→DAC con conexión directa en `mt6582-afe-pcm.c`. Causa histórica del silencio: RESTORE_SEARCH hacía RampDown del DSP + GAIN1/0x448 inexistente. Ground truth dual-boot en `mainline/wifi-consys/fm/groundtruth-0708/` |
 
 ## 🟡 PARCIAL / POR VALIDAR
 
