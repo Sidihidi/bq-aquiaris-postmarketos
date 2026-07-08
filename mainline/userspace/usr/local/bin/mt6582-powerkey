@@ -322,8 +322,7 @@ def main():
             now = time.monotonic()
             cnt = suspend_count()
             if cnt != last_suspends or now - last_reopen >= REOPEN_INTERVAL:
-                if cnt != last_suspends:
-                    log("resume detectado (suspends=%d): reopen inmediato" % cnt)
+                resumed = cnt != last_suspends
                 last_suspends = cnt
                 try:
                     fd.close()
@@ -331,6 +330,19 @@ def main():
                     pass
                 fd = open_and_grab()
                 last_reopen = time.monotonic()
+                if resumed:
+                    # DESPERTAR = ENCENDER (0708, estilo Android): la pulsacion
+                    # que saca al SoC del s2idle se consume como wakeup (no llega
+                    # como input event) -> sin esto el usuario tenia que pulsar
+                    # otra vez (y esa tambien podia perderse en el fd rancio) =
+                    # "tarda mucho en volver la pantalla". El unico wake real es
+                    # el boton, asi que resume => pantalla ON. Si el kernel dice
+                    # que desperto OTRO irq (p.ej. RTC de un rtcwake), no tocar.
+                    wirq = read_int("/sys/power/pm_wakeup_irq", -1)
+                    log("resume detectado (suspends=%d, wakeup_irq=%d)" % (cnt, wirq))
+                    if wirq in (-1, 0, 51, 206) and not screen_is_on():
+                        log("accion: ON/wake por RESUME (boton desperto el SoC)")
+                        screen_on(saved)
             continue                          # volver a esperar
         d = fd.read(SZ)
         if not d or len(d) < SZ:
