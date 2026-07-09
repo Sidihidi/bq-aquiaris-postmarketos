@@ -1,0 +1,6 @@
+#!/bin/sh
+# SPM: forzar M2 (cpu_pdn=0) — el dormant de CPU0 (M3) tiene una carrera de
+# offline en soak (0709); el mem de diario usa M2. (Algo pone el param a 1 al
+# boot y no se ha localizado; esto lo neutraliza.)
+[ -e /sys/module/mt6582_spm/parameters/spm_cpu_pdn ] && \
+  echo 0 > /sys/module/mt6582_spm/parameters/spm_cpu_pdn
