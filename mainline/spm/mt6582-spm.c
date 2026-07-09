@@ -315,6 +315,8 @@ static int spm_suspend_enter(suspend_state_t state)
 	u32 dbg, r12, r13, raw, tout, evsta;
 	int i;
 
+	pr_info("SPMDBG spm: enter\n");	/* bisect ciclo-5: ¿llega al driver? */
+
 	/* settle del 26M */
 	spm_w(s, SPM_CLK_CON, spm_r(s, SPM_CLK_CON) | CC_SYSSETTLE_SEL);
 	spm_w(s, SPM_CLK_SETTLE, 0);
@@ -334,6 +336,8 @@ static int spm_suspend_enter(suspend_state_t state)
 	con0 = spm_r(s, SPM_PCM_CON0) & ~(CON0_IM_KICK | CON0_PCM_KICK);
 	spm_w(s, SPM_PCM_CON0, con0 | CON0_CFG_KEY | CON0_IM_KICK);
 	spm_w(s, SPM_PCM_CON0, con0 | CON0_CFG_KEY);
+
+	pr_info("SPMDBG spm: im-fetch ok\n");
 
 	/* handshake UART a dormir */
 	val1 = spm_r(s, SPM_POWER_ON_VAL1);
@@ -405,6 +409,8 @@ static int spm_suspend_enter(suspend_state_t state)
 	/* dormir: M3 = apagar CPU0 (dormant); el BootROM resucita por el
 	 * vector 0x10001800 -> cpu_resume (mainline restaura MMU/contexto;
 	 * los notifiers de CPU_PM salvan GIC/VFP/arch-timer) */
+	pr_info("SPMDBG spm: kick ok, a dormir\n");
+
 	if (spm_cpu_pdn && s->bootvec) {
 		/* activar el salto caliente SOLO durante el ciclo: con bit31
 		 * activo, CUALQUIER core que pase por el BootROM salta al
@@ -414,14 +420,18 @@ static int spm_suspend_enter(suspend_state_t state)
 		writel(__pa_symbol(cpu_resume), s->bootvec);
 		writel(readl(s->bootvec + 4) | BIT(31), s->bootvec + 4);
 		dsb(sy);
+		pr_info("SPMDBG spm: pre-sleep cpu_pm_enter\n");
 		cpu_pm_enter();
 		/* CLUSTER pm: dispara gic_dist_save/restore — sin esto el
 		 * distribuidor del GIC vuelve EN BLANCO tras el MTCMOS del
 		 * cluster (crash 2 del 0709: resume sin IRQs -> watchdog) */
 		cpu_cluster_pm_enter();
+		pr_info("SPMDBG spm: cpu_suspend CPU0 dormant\n");
 		cpu_suspend(0, mt6582_spm_finisher);
+		pr_info("SPMDBG spm: RESUMED\n");
 		cpu_cluster_pm_exit();
 		cpu_pm_exit();
+		pr_info("SPMDBG spm: exit ok\n");
 		writel(readl(s->bootvec + 4) & ~BIT(31), s->bootvec + 4);
 		writel(0, s->bootvec);
 		dsb(sy);

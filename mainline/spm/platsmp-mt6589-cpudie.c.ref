@@ -13,6 +13,7 @@
 #include <linux/of_address.h>
 #include <linux/string.h>
 #include <linux/threads.h>
+#include <linux/irqchip/arm-gic.h>
 
 #define MTK_MAX_CPU		8
 #define MTK_SMP_REG_SIZE	0x1000
@@ -109,6 +110,7 @@ static int m2_poll(u32 off, u32 mask, u32 want, int us)
 			return 0;
 		udelay(1);
 	}
+	pr_warn("SPMDBG m2_poll TIMEOUT off=0x%x mask=0x%x want=0x%x got=0x%x\n", off, mask, want, m2_r(off));
 	return -ETIMEDOUT;
 }
 
@@ -155,6 +157,18 @@ static void m2_cpu_power_off(unsigned int cpu)
 
 static void mtk_cpu_die(unsigned int cpu)
 {
+	/* Desactivar el interfaz GIC de ESTE core ANTES del WFI final. Sin esto,
+	 * una IRQ/IPI (p.ej. el IPI de broadcast del tick — los cores 1-3 no
+	 * tienen timer local y lo usan) despierta el WFI, y mtk_cpu_kill puede
+	 * cortar el MTCMOS con el core EJECUTANDO -> cuelgue del bus AHB. Es la
+	 * carrera del crash intermitente del soak de suspend ("Disabling non-boot
+	 * CPUs" clavado -> WDT). Con el interfaz GIC apagado el core queda
+	 * quiescente hasta el power-off; boot_secondary lo re-enciende (cold boot
+	 * por el BootROM) y re-inicializa el GIC en frio. */
+	pr_info("SPMDBG die%u: enter\n", cpu);
+	gic_cpu_if_down(0);
+	dsb(sy);
+	pr_info("SPMDBG die%u: gic off, wfi\n", cpu);
 	while (1)
 		wfi();
 }
@@ -163,10 +177,23 @@ static int mtk_cpu_kill(unsigned int cpu)
 {
 	if (!m2_map() || cpu < 1 || cpu > 3)
 		return 1;
-	/* esperar a que el SPM vea el core en WFI antes de cortarle la luz */
-	m2_poll(M2_SPM_SLEEP_TIMER_STA, M2_APMCUX_SLEEP(cpu),
-		M2_APMCUX_SLEEP(cpu), 100000);
+	pr_info("SPMDBG kill%u: enter\n", cpu);
+	/* Confirmar que el SPM ve el core en WFI ANTES de cortar la luz. Si NO
+	 * lo confirma, NO apagar: cortar el MTCMOS de un core vivo cuelga el
+	 * AHB. Devolver 0 = "kill fallido" -> el generico aborta el suspend
+	 * LIMPIAMENTE, en vez del BUG_ON(num_online_cpus()>1) que crasheaba el
+	 * soak de forma intermitente (diagnosticado 0709, kernel #270). */
+	if (m2_poll(M2_SPM_SLEEP_TIMER_STA, M2_APMCUX_SLEEP(cpu),
+		    M2_APMCUX_SLEEP(cpu), 200000)) {
+		pr_warn("mt6582: CPU%u no confirmo WFI; suspend abortado\n", cpu);
+		return 0;
+	}
 	m2_cpu_power_off(cpu);
+	if (m2_r(M2_SPM_PWR_STATUS) & M2_FCX_STA(cpu)) {
+		pr_warn("mt6582: CPU%u no se apago; suspend abortado\n", cpu);
+		return 0;
+	}
+	pr_info("SPMDBG kill%u: off done pwr=0x%x\n", cpu, m2_r(M2_SPM_PWR_STATUS));
 	return 1;
 }
 #endif

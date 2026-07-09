@@ -1,75 +1,65 @@
-# HANDOFF — SPM soak: el crash NO es el offline, es el DEEP-SLEEP de CPU0 (2026-07-09)
+# HANDOFF — SPM M3: el crash del soak es un BUG_ON de hotplug en el OFFLINE (2026-07-09, actualizado casa)
 
-> Sesión Mac. Hallazgo que **redirige** la investigación del M3. Driver: `mt6582-spm.c` + `platsmp.c`.
+> Actualiza y **corrige** la conclusión anterior de este doc. Driver: `mt6582-spm.c` + `platsmp.c`.
 
-## 🎯 HALLAZGO PRINCIPAL (refuta el marco anterior)
-El crash intermitente del soak de suspend profundo (M3, `spm_cpu_pdn=1`) **NO está en el offline de los
-cores secundarios**. Estaba oculto por un **artefacto de visibilidad**: la consola se suspende justo
-después de "Disabling non-boot CPUs", así que ESA parecía la línea del cuelgue. Con `no_console_suspend`
-horneado + instrumentación, el trace real (console-ramoops, kernel #268) muestra:
+## 🎯 HALLAZGO DEFINITIVO (refuta la hipótesis "es el deep-sleep de CPU0")
+Con `no_console_suspend` horneado + instrumentación de fase (SPMDBG), el trace real del crash
+(console-ramoops + dmesg-ramoops, kernel #270) es un **oops con BUG explícito, NO un WDT mudo**:
 
 ```
-SPMDBG-SOAK cycle 1
-PM: suspend entry (deep)
-Disabling non-boot CPUs ...
-die3: enter → gic off, wfi → kill3: enter → kill3: off done pwr=0x3d5f
-die2: enter → gic off, wfi → kill2: enter → kill2: off done pwr=0x395f
-die1: enter → gic off, wfi → kill1: enter → kill1: off done pwr=0x315f
-   ← TERMINA AQUÍ. Sin "wake:", sin "Enabling non-boot CPUs" → WDT reset (boot_reason=4)
+kernel BUG at kernel/cpu.c:1929!
+PC is at freeze_secondary_cpus+0x16c/0x200
+  → BUG_ON(num_online_cpus() > 1)
+Call trace: freeze_secondary_cpus ← suspend_devices_and_enter ← pm_suspend ← state_store ← write
 ```
 
-**Los 3 cores secundarios (3,2,1) se apagan LIMPIAMENTE**: `die`+`kill`+power-off MTCMOS completos,
-**cero `m2_poll TIMEOUT`**, `pwr status` limpia bits bien (`0x3d5f→0x395f→0x315f`). El offline funciona.
-El crash es **después**, en `spm_suspend_enter` → el **dormant/resume de CPU0** (PCM sleep +
-`cpu_pm_enter`/`cpu_cluster_pm_enter`/`cpu_suspend(finisher)` → BootROM). Nunca despierta.
+- El **deep-sleep de CPU0 FUNCIONA**: en los ciclos que sobreviven, el trace imprime la secuencia
+  completa `spm: pre-sleep cpu_pm_enter → cpu_suspend CPU0 dormant → RESUMED → exit ok → wake:
+  r12=...TIMER`. O sea CPU0 se apaga, el BootROM salta a `cpu_resume`, el GIC se restaura y despierta.
+  **Eso ya no es el problema** (era la conclusión del doc anterior — refutada).
+- El crash es **intermitente y en el OFFLINE de los cores secundarios** (`freeze_secondary_cpus`),
+  no en el sleep. `BUG_ON(num_online_cpus() > 1)` = tras "downear" los 3 cores secundarios, más de
+  uno sigue online → carrera de hotplug/MTCMOS en el offline rápido y consecutivo del suspend
+  (a diferencia del hotplug manual 1-a-1 con sleeps, que SÍ es fiable = validación de M2).
 
-**Implicación:** el fix `gic_cpu_if_down(0)` de `cpu_die` (platsmp) NO era el fix (el offline nunca fue el
-problema). El foco correcto = el path de sueño de CPU0 en `mt6582-spm.c:408-427`.
-
-## MÉTODO DE CAPTURA (esto es lo que por fin hizo visible el crash — reutilizar)
-El crash es **invisible al pstore por defecto** (la consola se suspende antes del punto del cuelgue). Fix:
-**hornear en el cmdline** (sobrevive reboots + efectivo desde el arranque; runtime NO sirve porque el
-crash resetea los params):
+## FIX APLICADO (kernel #272+): blindaje de `mtk_cpu_kill` (platsmp.c)
+Convierte el **crash duro (BUG_ON) en un aborto LIMPIO del suspend**: `cpu_kill` ya no apaga un core
+que no haya confirmado WFI (apagar el MTCMOS de un core vivo cuelga el AHB), y verifica el power-off:
+```c
+if (m2_poll(SLEEP_TIMER_STA, APMCUX_SLEEP(cpu), ..., 200000)) {
+    pr_warn("mt6582: CPU%u no confirmo WFI; suspend abortado\n", cpu);
+    return 0;   /* kill fallido -> el generico aborta el suspend, sin BUG */
+}
+m2_cpu_power_off(cpu);
+if (m2_r(PWR_STATUS) & FCX_STA(cpu)) { pr_warn(... "no se apago" ...); return 0; }
 ```
-CONFIG_CMDLINE_EXTEND=y
-CONFIG_CMDLINE="no_console_suspend mt6582_spm.spm_cpu_pdn=1 mt6582_spm.spm_wake_sec=15"
-```
-- `no_console_suspend` → la consola sigue viva durante el suspend → el trace del offline+sleep va a
-  `console-ramoops`, que **sobrevive al WDT reset**.
-- `spm_cpu_pdn=1` + `spm_wake_sec=15` → cada `echo mem` es M3 profundo con wake a los 15s (soak rápido),
-  sin depender de escribir params en runtime (que se pierden en el reboot).
-- Soak: `while :; do echo mem > /sys/power/state; sleep 2; done` con marca por ciclo a `/dev/kmsg`.
-- Leer tras el crash: `grep SPMDBG /sys/fs/pstore/console-ramoops-0` (tras un power-cycle si sshd flaky).
-- GOTCHA: tras cada crash el móvil queda con **sshd flaky → power-cycle a mano** para leer el ramoops.
+Esto NO elimina la carrera de raíz, pero degrada el fallo de "crash+WDT reset" a "el suspend no entra
+esta vez" (el sistema sigue vivo). Con `spm_cpu_pdn=0` por defecto, el `mem` de diario es M2 y ni
+siquiera intenta el dormant de CPU0.
 
-## INSTRUMENTACIÓN aplicada (en el árbol de build de la Pi .123, #269 — re-aplicar si se regenera)
-En `arch/arm/mach-mediatek/platsmp.c`:
-- `m2_poll()`: `pr_warn("SPMDBG m2_poll TIMEOUT off=0x%x mask=0x%x want=0x%x got=0x%x\n", ...)` antes del
-  `return -ETIMEDOUT`.
-- `mtk_cpu_die()`: `pr_info("SPMDBG die%u: enter\n", cpu)` al inicio + `pr_info("SPMDBG die%u: gic off, wfi\n")` tras `gic_cpu_if_down`.
-- `mtk_cpu_kill()`: `pr_info("SPMDBG kill%u: enter\n")` + `pr_info("SPMDBG kill%u: off done pwr=0x%x\n", cpu, m2_r(M2_SPM_PWR_STATUS))` tras `m2_cpu_power_off`.
+## SIGUIENTE (raíz de la carrera del offline — pendiente)
+El `num_online_cpus() > 1` intermitente apunta a que un core "downeado" no queda realmente offline en
+la contabilidad. Candidatos a investigar (con la instrumentación SPMDBG ya en el árbol):
+- Timing entre `cpuhp_ap_report_dead()` (dying) y nuestro `gic_cpu_if_down(0)` + `m2_cpu_power_off`
+  (killing): ¿el report_dead se hace visible antes de cortar la caché/GIC del core?
+- `mtk_cpu_die`: ¿el `while(1) wfi()` puede reanudar y reonlinear el core si una IPI llega tras el
+  `gic_cpu_if_down` pero antes del power-off? (mirar si hace falta enmascarar más o un handshake).
+- El `m2_poll` de `APMCUX_SLEEP`: ¿el bit es fiable por-core o hay solape entre cores consecutivos?
+- Comparar con el `hotplug.c` del downstream (secuencia exacta de WFI-check + MTCMOS por core).
 
-En `drivers/soc/mediatek/mt6582-spm.c` (`spm_suspend_enter`, bloque `if (spm_cpu_pdn && s->bootvec)`):
-- `pr_info("SPMDBG spm: pre-sleep cpu_pm_enter\n")` antes de `cpu_pm_enter()`.
-- `pr_info("SPMDBG spm: cpu_suspend CPU0 dormant\n")` antes + `pr_info("SPMDBG spm: RESUMED\n")` después de `cpu_suspend(0, finisher)`.
-- `pr_info("SPMDBG spm: exit ok\n")` tras `cpu_pm_exit()`.
-(NO instrumentar el finisher: printk tras el save de cpu_suspend rompe el sleep.)
+## MÉTODO DE CAPTURA (reutilizar — así se hizo visible el crash)
+- Config horneado (SOLO para debug; QUITAR para uso normal, auto-activa M3):
+  `CONFIG_CMDLINE_EXTEND=y` + `CONFIG_CMDLINE="no_console_suspend mt6582_spm.spm_cpu_pdn=1 mt6582_spm.spm_wake_sec=15"`.
+- Guardián de pstore: `/etc/local.d/00-pstore-save.start` copia `/sys/fs/pstore/*` a `/root/pstore-logs/<ts>/`
+  al arranque (el WDT reset conserva ramoops pero un 2º reboot lo machaca; esto lo preserva).
+- Soak: `while :; do echo "SPMDBG-SOAK cycle $i" > /dev/kmsg; echo mem > /sys/power/state; ...; done`.
+- Leer tras el crash: `grep SPMDBG /root/pstore-logs/<ultimo>/dmesg-ramoops-0` (power-cycle a mano si sshd flaky).
 
-## SIGUIENTE (pendiente: leer el trace del #269 tras power-cycle)
-Kernel **#269** flasheado con la instrumentación del sleep. El soak crasheó (ciclo ~1) pero quedó sin sshd;
-**falta un power-cycle para leer `console-ramoops`** y ver cuál de estos es:
-- `pre-sleep cpu_pm_enter` SIN `cpu_suspend CPU0 dormant` → cuelgue en el save GIC/VFP del cluster.
-- `cpu_suspend CPU0 dormant` SIN `RESUMED` → **CPU0 no vuelve del BootROM** (salto caliente / finisher /
-  PCM sleep). ← hipótesis más probable (encaja con "el BootROM no toma el salto caliente" del intento M3-1).
-- `RESUMED` SIN `exit ok` → cuelgue en la restauración del GIC (`cpu_cluster_pm_exit` → `gic_dist_restore`).
+## Estado del móvil / kernel
+Kernel **#272+** (seguro): `spm_cpu_pdn=0` por defecto, SIN cmdline horneado, `mtk_cpu_kill` blindado.
+`mem` de diario = M2 (offline manual fiable, 4 cores vuelven). M3 (`spm_cpu_pdn=1`) = experimental,
+aborta limpio si la carrera del offline pica. GOTCHA de build: forzar `rm` de los `.o` de `mt6582-spm`
+y `platsmp` + `vmlinux/zImage` antes de recompilar (si no, cambios de fuente pueden no relinkar).
 
-Según cuál sea:
-- Si es "CPU0 no vuelve": revisar el protocolo warm-boot del BootROM (bit31/llave mágica de 0x10001800/0x804),
-  el `mt6582_spm_finisher` (`v7_exit_coherency_flush` + wfi), y si el PCM realmente arranca el sleep vector.
-- Si es GIC restore: el `cpu_cluster_pm_exit`/`gic_dist_restore` intermitente (candidato irq-mtk-cirq).
-
-## Estado del móvil
-Kernel #269 con la instrumentación + config horneado. `spm_cpu_pdn=1` por cmdline (M3 activo). Para volver
-a uso normal seguro: flashear un kernel sin `spm_cpu_pdn=1` en el cmdline (M1/s2idle) o `spm_cpu_pdn=0`.
-
-*Sesión Mac (Fable 5), 2026-07-09. El offline está resuelto; el trabajo real es el dormant/resume de CPU0.*
+*Sesión casa (Fable 5), 2026-07-09. M1+M2 sólidos; M3 funcional en ciclos sueltos; la carrera del
+offline en soak es el trabajo de raíz pendiente, ya con crash→abort-limpio de red de seguridad.*
