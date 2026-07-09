@@ -14,6 +14,8 @@
 #include <linux/string.h>
 #include <linux/threads.h>
 #include <linux/irqchip/arm-gic.h>
+#include <asm/cacheflush.h>
+#include <asm/cp15.h>
 
 #define MTK_MAX_CPU		8
 #define MTK_SMP_REG_SIZE	0x1000
@@ -166,9 +168,16 @@ static void mtk_cpu_die(unsigned int cpu)
 	 * quiescente hasta el power-off; boot_secondary lo re-enciende (cold boot
 	 * por el BootROM) y re-inicializa el GIC en frio. */
 	pr_info("SPMDBG die%u: enter\n", cpu);
+	pr_info("SPMDBG die%u: gic off, coherency off, wfi\n", cpu);
 	gic_cpu_if_down(0);
-	dsb(sy);
-	pr_info("SPMDBG die%u: gic off, wfi\n", cpu);
+	/* RAIZ de la carrera del soak (0709): hay que SALIR de la coherencia
+	 * SMP (ACTLR) y vaciar L1 ANTES del WFI de aparcamiento — como hacen
+	 * highbank/imx/exynos. Sin esto, CPU0 corta el MTCMOS de un core que
+	 * aun participa en la coherencia (con lineas sucias de estos mismos
+	 * prints): snoops a un core apagado = BUG_ON/cuelgue intermitente.
+	 * OJO: tras el exit-coherency NO se puede tocar nada cacheable
+	 * (ni printk) — solo el WFI. */
+	v7_exit_coherency_flush(louis);
 	while (1)
 		wfi();
 }
