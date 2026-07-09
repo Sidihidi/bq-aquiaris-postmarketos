@@ -5,7 +5,7 @@
 # Entradas:
 #   0: postmarketOS (Alpine + Phosh) — switch_root a mmcblk1p1
 #   1: Android stock — kexec del kernel 3.10 desde /boot/android-boot.img
-#   (futuro: 2: Maemo Leste — switch_root a mmcblk1p3)
+#   2: Maemo Leste (Devuan + Hildon) — switch_root a mmcblk1p3
 
 BB=/bin/busybox
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
@@ -29,9 +29,9 @@ if [ ! -e /dev/fb0 ]; then
     echo "menupick: NO fb0 — auto-boot pmOS" > /dev/kmsg 2>/dev/null
     CHOICE=0
 else
-    # Ejecutar el menu. Devuelve 0 o 1 por stdout.
+    # Ejecutar el menu. Devuelve 0, 1 o 2 por stdout.
     # Auto-boot tras 10s si no hay seleccion.
-    CHOICE=$(/bin/menupick "BQ Aquaris E4.5" "postmarketOS" "Android" 2>/dev/null)
+    CHOICE=$(/bin/menupick "BQ Aquaris E4.5" "postmarketOS" "Android" "Maemo Leste" 2>/dev/null)
     [ -z "$CHOICE" ] && CHOICE=0
 fi
 
@@ -86,6 +86,40 @@ case "$CHOICE" in
             $BB mount --move /proc /newroot/proc 2>/dev/null
             $BB mount --move /sys  /newroot/sys  2>/dev/null
             exec $BB switch_root /newroot /sbin/init
+        fi
+        ;;
+
+    2)
+        # === Maemo Leste: switch_root a mmcblk1p3 (SD) ===
+        echo "menupick: arrancando Maemo Leste..." > /dev/kmsg 2>/dev/null
+        i=0; while [ $i -lt 20 ]; do [ -b /dev/mmcblk1p3 ] && break; $BB sleep 1; i=$((i+1)); done
+        if [ ! -b /dev/mmcblk1p3 ]; then
+            echo "menupick: no mmcblk1p3 — fallback a pmOS" > /dev/kmsg 2>/dev/null
+            CHOICE=0
+            i=0; while [ $i -lt 20 ]; do [ -b /dev/mmcblk1p1 ] && break; $BB sleep 1; i=$((i+1)); done
+            $BB mkdir -p /newroot
+            $BB mount -t ext4 /dev/mmcblk1p1 /newroot 2>/dev/null && [ -e /newroot/sbin/init ] && {
+                $BB mount --move /dev  /newroot/dev  2>/dev/null
+                $BB mount --move /proc /newroot/proc 2>/dev/null
+                $BB mount --move /sys  /newroot/sys  2>/dev/null
+                exec $BB switch_root /newroot /sbin/init
+            }
+        else
+            $BB mkdir -p /newroot
+            if $BB mount -t ext4 /dev/mmcblk1p3 /newroot 2>/dev/null && [ -e /newroot/sbin/init ]; then
+                $BB mount --move /dev  /newroot/dev  2>/dev/null
+                $BB mount --move /proc /newroot/proc 2>/dev/null
+                $BB mount --move /sys  /newroot/sys  2>/dev/null
+                exec $BB switch_root /newroot /sbin/init
+            fi
+            echo "menupick: FALLO mount Maemo — fallback a pmOS" > /dev/kmsg 2>/dev/null
+            CHOICE=0
+            $BB mount -t ext4 /dev/mmcblk1p1 /newroot 2>/dev/null && [ -e /newroot/sbin/init ] && {
+                $BB mount --move /dev  /newroot/dev  2>/dev/null
+                $BB mount --move /proc /newroot/proc 2>/dev/null
+                $BB mount --move /sys  /newroot/sys  2>/dev/null
+                exec $BB switch_root /newroot /sbin/init
+            }
         fi
         ;;
 esac
