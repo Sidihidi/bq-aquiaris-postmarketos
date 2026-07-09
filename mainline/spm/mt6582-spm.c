@@ -406,7 +406,13 @@ static int spm_suspend_enter(suspend_state_t state)
 	 * vector 0x10001800 -> cpu_resume (mainline restaura MMU/contexto;
 	 * los notifiers de CPU_PM salvan GIC/VFP/arch-timer) */
 	if (spm_cpu_pdn && s->bootvec) {
+		/* activar el salto caliente SOLO durante el ciclo: con bit31
+		 * activo, CUALQUIER core que pase por el BootROM salta al
+		 * vector — si quedara activo tras el resume (con el vector ya
+		 * a 0), los cores 1-3 re-onlineando saltarian a 0 = -5 o
+		 * corrupcion (LOS DOS flecos del 0709) */
 		writel(__pa_symbol(cpu_resume), s->bootvec);
+		writel(readl(s->bootvec + 4) | BIT(31), s->bootvec + 4);
 		dsb(sy);
 		cpu_pm_enter();
 		/* CLUSTER pm: dispara gic_dist_save/restore — sin esto el
@@ -416,7 +422,9 @@ static int spm_suspend_enter(suspend_state_t state)
 		cpu_suspend(0, mt6582_spm_finisher);
 		cpu_cluster_pm_exit();
 		cpu_pm_exit();
+		writel(readl(s->bootvec + 4) & ~BIT(31), s->bootvec + 4);
 		writel(0, s->bootvec);
+		dsb(sy);
 	} else {
 		isb();
 		dsb(sy);
@@ -501,9 +509,7 @@ static int mt6582_spm_probe(struct platform_device *pdev)
 	/* vector de resume del BootROM: INFRACFG_AO+0x800 (addr) y +0x804
 	 * (bit31 = habilitar el salto). Lo usa el dormant de CPU0 (M3). */
 	s->bootvec = ioremap(0x10001800, 0x8);
-	if (s->bootvec)
-		writel(readl(s->bootvec + 4) | BIT(31), s->bootvec + 4);
-	else
+	if (!s->bootvec)
 		dev_warn(&pdev->dev, "sin bootvec: M3 (cpu_pdn) deshabilitado\n");
 
 	spm_hw_init(s);
