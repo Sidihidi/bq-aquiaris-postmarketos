@@ -1,0 +1,78 @@
+#!/bin/sh
+# mt6582-autosuspend — auto-suspend en idle para el krillin.
+#
+# Suspende en s2idle (via mt6582-suspend, que repara usb0 al resumir) cuando la PANTALLA
+# lleva >= IDLE_SECS apagada Y no hay inhibidores. El wakeup es el BOTON de encendido
+# (lo gestiona mt6582-powerkey: al pulsar despierta el SoC y enciende la pantalla).
+#
+# Pantalla off = existe el flag /run/mt6582-screen-off (lo pone mt6582-powerkey al bloquear).
+#
+# Inhibidores (NO suspender si...):
+#   - existe /run/mt6582-no-suspend   (inhibicion manual: activar durante debug/tethering)
+#   - hay audio reproduciendose        (pcm status RUNNING)
+#   - hay una sesion SSH activa         (mas de un proceso sshd: master + sesion) [salvo IGNORE_SSH=1]
+#
+# Variables de entorno:
+#   IDLE_SECS   segundos de pantalla apagada antes de suspender (def. 60)
+#   SAFETY_RTC  si se define (N), pasa un RTC de auto-wake a N s a mt6582-suspend (para TESTS;
+#               en produccion se deja vacio -> espera el boton)
+#   IGNORE_SSH  =1 ignora el inhibidor de SSH (para poder probar el daemon estando conectado)
+#   DRY_RUN     =1 NO suspende: solo logea "suspenderia" y toca /run/mt6582-autosuspend-fired
+#               (para validar la logica de decision sin suspender)
+IDLE_SECS=${IDLE_SECS:-60}
+SAFETY_RTC=${SAFETY_RTC:-}
+IGNORE_SSH=${IGNORE_SSH:-0}
+DRY_RUN=${DRY_RUN:-0}
+FLAG=/run/mt6582-screen-off
+INHIBIT=/run/mt6582-no-suspend
+off_since=0
+
+audio_playing() {
+  for s in /proc/asound/card0/pcm*p/sub*/status; do
+    grep -q RUNNING "$s" 2>/dev/null && return 0
+  done
+  return 1
+}
+
+ssh_active() {
+  # conexiones establecidas (st=01) con puerto LOCAL 22 (0016 hex) en /proc/net/tcp[6].
+  # (pgrep no vale: OpenSSH nuevo usa el binario 'sshd-session', no 'sshd'.)
+  [ "$(awk '$2 ~ /:0016$/ && $4=="01"' /proc/net/tcp /proc/net/tcp6 2>/dev/null | wc -l)" -gt 0 ]
+}
+
+inhibited() {
+  [ -e "$INHIBIT" ] && { echo manual; return 0; }
+  audio_playing && { echo audio; return 0; }
+  amixer -c 0 cget name='FM Radio Route' 2>/dev/null | grep -q ': values=1' && { echo fm; return 0; }
+  if [ "$IGNORE_SSH" != 1 ] && ssh_active; then echo ssh; return 0; fi
+  return 1
+}
+
+echo "mt6582-autosuspend: iniciado (IDLE_SECS=$IDLE_SECS SAFETY_RTC=${SAFETY_RTC:-none} IGNORE_SSH=$IGNORE_SSH)" > /dev/kmsg 2>/dev/null
+
+while true; do
+  if [ -e "$FLAG" ]; then
+    now=$(cut -d. -f1 /proc/uptime)
+    [ "$off_since" = 0 ] && off_since=$now
+    if [ $(( now - off_since )) -ge "$IDLE_SECS" ]; then
+      why=$(inhibited)
+      if [ -n "$why" ]; then
+        : # inhibido ($why); esperar sin resetear el contador (sigue apagada)
+      elif [ "$DRY_RUN" = 1 ]; then
+        echo "mt6582-autosuspend: [DRY] suspenderia ahora (pantalla off ${IDLE_SECS}s, sin inhibidores)" > /dev/kmsg 2>/dev/null
+        touch /run/mt6582-autosuspend-fired
+        off_since=0
+        sleep 3
+      else
+        echo "mt6582-autosuspend: pantalla off ${IDLE_SECS}s, sin inhibidores -> suspend" > /dev/kmsg 2>/dev/null
+        /usr/local/bin/mt6582-suspend $SAFETY_RTC
+        echo "mt6582-autosuspend: resume" > /dev/kmsg 2>/dev/null
+        off_since=0
+        sleep 3
+      fi
+    fi
+  else
+    off_since=0
+  fi
+  sleep 5
+done

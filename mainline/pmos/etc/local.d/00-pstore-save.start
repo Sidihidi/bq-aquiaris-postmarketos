@@ -1,0 +1,10 @@
+#!/bin/sh
+# Guarda el pstore (ramoops del boot anterior) en el SD ANTES de que otro
+# reboot lo machaque. Conserva las ultimas 10 capturas. (diagnostico SPM 0709)
+D=/root/pstore-logs/$(cut -d. -f1 /proc/uptime)-$(date +%H%M%S 2>/dev/null || echo x)
+if ls /sys/fs/pstore/* >/dev/null 2>&1; then
+  mkdir -p "$D"
+  cp /sys/fs/pstore/* "$D"/ 2>/dev/null
+  sync
+  ls -dt /root/pstore-logs/*/ 2>/dev/null | tail -n +11 | xargs rm -rf 2>/dev/null
+fi

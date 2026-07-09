@@ -1,0 +1,411 @@
+#!/usr/bin/env python3
+# mt6582-powerkey — boton de encendido del BQ Aquaris E4.5 (krillin), comportamiento "movil normal":
+#
+#   Pulsacion CORTA (< LONG s):
+#       - pantalla ENCENDIDA -> BLOQUEAR (lockscreen de Phosh) + apagar el LCD (PWM a 0).
+#       - pantalla APAGADA   -> encender el LCD + FORZAR el panel DRM a On (wlr-randr).
+#   Pulsacion LARGA (>= LONG s):
+#       - menu de apagado (notificacion con botones; si hay lockscreen, pide desbloquear antes).
+#
+# v3 — DUEÑO UNICO del boton (fix del "no vuelve la GUI"):
+#   * EVIOCGRAB en el evdev: Phosh/phoc/gsd-power YA NO ven KEY_POWER. Antes habia 3 actores
+#     (este daemon, phosh y gsd-power con power-button-action=suspend) pisandose: phosh apagaba
+#     el panel (dpms Off) al primer toque y NUNCA lo re-encendia al segundo (su inhibit de logind
+#     falla con AccessDenied en esta sesion aislada) -> backlight encendido con panel negro.
+#     Medido con press-monitor 2026-07-05: flag/PWM correctos, dpms Off de un solo sentido.
+#   * screen_on() ademas fuerza el output con wlr-randr --on (por si phosh apago el panel por su
+#     cuenta, p.ej. el fade del lockscreen).
+#   * gsd-power: power-button-action=nothing (dconf, persistente) — puesto el 2026-07-05.
+#
+# Lee KEY_POWER (116) del driver kernel mtk-pmic-keys (/dev/input/eventN). El bloqueo se hace por el
+# D-Bus de la SESION de Phosh (org.gnome.ScreenSaver.SetActive), alcanzada leyendo el
+# DBUS_SESSION_BUS_ADDRESS del proceso phosh (corre en un dbus-run-session aislado: elogind no ve la
+# sesion, por eso no vale loginctl). Corre como root desde /etc/local.d; read() bloqueante = 0 CPU.
+
+import struct, glob, os, time, select, subprocess, pwd, fcntl, socket
+
+LOGF = "/tmp/powerkey.log"
+
+
+def log(msg):
+    try:
+        with open(LOGF, "a") as f:
+            f.write("%.2f %s\n" % (time.monotonic(), msg))
+    except Exception:
+        pass
+
+BL = "/sys/class/backlight/backlight"
+BR = BL + "/brightness"
+MX = BL + "/max_brightness"
+# El backlight lo maneja mt6582-backlight.py (PWM por /dev/mem). Apaga la pantalla SOLO si existe
+# este flag (duty del PWM a 0); NO honra bl_power ni brightness=0. Crear/borrar el flag = off/on.
+SCREEN_OFF_FLAG = "/run/mt6582-screen-off"
+KEY_POWER = 116
+EV_KEY = 1
+FMT = "llHHi"                 # input_event armv7 (32-bit): time(2*long)=8 + type,code(H,H) + value(i) = 16B
+SZ = struct.calcsize(FMT)
+LONG = 1.5                    # s: umbral corto/largo
+DEBOUNCE = 0.35               # s: ignorar pulsaciones-metralleta
+EVIOCGRAB = 0x40044590        # _IOW('E', 0x90, int)
+
+
+def find_ev(name="mtk-pmic-keys"):
+    # OJO: buscar SIEMPRE (no cachear el path): un rebind del driver mueve el
+    # nodo (event1 -> event4, visto 0708) y el path viejo deja de existir.
+    for e in sorted(glob.glob("/sys/class/input/event*")):
+        try:
+            if name in open(e + "/device/name").read():
+                return "/dev/input/" + os.path.basename(e)
+        except Exception:
+            pass
+    return None
+
+
+def read_int(p, d=0):
+    try:
+        return int(open(p).read().strip())
+    except Exception:
+        return d
+
+
+def screen_is_on():
+    return not os.path.exists(SCREEN_OFF_FLAG)   # el flag existe => backlight OFF
+
+
+def screen_off():
+    try:
+        open(SCREEN_OFF_FLAG, "w").close()       # mt6582-backlight.py pone el PWM a 0
+    except Exception:
+        pass
+
+
+def screen_on(level=None):
+    t0 = time.monotonic()
+    try:
+        os.remove(SCREEN_OFF_FLAG)               # mt6582-backlight.py restaura el brillo de /sys
+        log("screen_on: flag quitado en %.3fs" % (time.monotonic()-t0))
+    except Exception:
+        pass
+    # Despertar = quitar el flag (el backlight vuelve) y LISTO: phosh esta parcheado para
+    # NO apagar nunca el panel (monitor-manager ignora POWER_SAVE_OFF, 0705), asi que el
+    # lockscreen sigue renderizado y al volver la luz se ve — bloqueado, como un movil normal.
+    # output_on() queda solo como red de seguridad por si algo dejo el dpms en Off
+    # (p.ej. un phosh sin el parche); wlr-randr tira el shield, por eso solo si hace falta.
+    output_on()
+    log("screen_on: TOTAL %.3fs" % (time.monotonic()-t0))
+
+
+def phosh_env():
+    """(bus, xdg_runtime, user, wayland_display) del proceso phosh, o None."""
+    for p in glob.glob("/proc/[0-9]*"):
+        try:
+            comm = open(p + "/comm").read().strip()
+            cmd = open(p + "/cmdline").read()
+            if comm != "phosh" and "libexec/phosh" not in cmd:
+                continue
+            env = dict(x.split("=", 1) for x in open(p + "/environ").read().split("\0") if "=" in x)
+            bus = env.get("DBUS_SESSION_BUS_ADDRESS")
+            if not bus:
+                continue
+            uid = os.stat(p).st_uid
+            return (bus, env.get("XDG_RUNTIME_DIR", "/run/user/%d" % uid),
+                    pwd.getpwuid(uid).pw_name, env.get("WAYLAND_DISPLAY", "wayland-0"))
+        except Exception:
+            pass
+    return None
+
+
+def run_in_session(cmdline, timeout=6, capture=False):
+    """Ejecuta cmdline como el usuario de la sesion Phosh con su bus/wayland. None si no hay sesion."""
+    e = phosh_env()
+    if not e:
+        return None
+    bus, xdg, user, wld = e
+    envs = ("export DBUS_SESSION_BUS_ADDRESS='%s' XDG_RUNTIME_DIR='%s' WAYLAND_DISPLAY='%s'; "
+            % (bus, xdg, wld))
+    try:
+        return subprocess.run(["su", user, "-s", "/bin/sh", "-c", envs + cmdline],
+                              stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, universal_newlines=True, timeout=timeout)
+    except Exception:
+        return None
+
+
+def helper_cmd(cmd, timeout=6):
+    """VIA RAPIDA (0708): mt6582-session-helper corre persistente EN la sesion con su
+    conexion D-Bus ya abierta; le mandamos el comando por socket unix = milisegundos
+    (el camino viejo su+sh+gdbus tardaba ~1-2s por accion). None => sin helper
+    (sesion vieja o helper muerto): el llamante usa el fallback run_in_session."""
+    for path in glob.glob("/run/user/*/powerkey.sock"):
+        try:
+            t0 = time.monotonic()
+            c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            c.settimeout(timeout)
+            c.connect(path)
+            c.sendall((cmd + "\n").encode())
+            resp = c.recv(64).decode().strip()
+            c.close()
+            log("helper %s -> %s (%.3fs)" % (cmd, resp, time.monotonic() - t0))
+            if resp and not resp.startswith("err"):
+                return resp
+        except Exception as e:
+            log("helper %s fallo: %s" % (cmd, e))
+    return None
+
+
+def output_on():
+    # re-enciende el panel DRM (phosh lo apaga en el fade del lockscreen y no lo devuelve).
+    # SOLO si esta realmente Off: llamar a wlr-randr durante el fade de phosh roza una
+    # carrera de capas en phoc (CRITICAL top-panel, visto 0705) — no tocar si no hace falta.
+    t0 = time.monotonic()
+    try:
+        dpms = open("/sys/class/drm/card1-DSI-1/dpms").read().strip()
+    except Exception:
+        dpms = "Off"
+    log("output_on: dpms=%s (leido en %.3fs)" % (dpms, time.monotonic()-t0))
+    if dpms == "Off":
+        t1 = time.monotonic()
+        if helper_cmd("output-on", timeout=12) is None:
+            run_in_session("wlr-randr --output DSI-1 --on")
+        log("output_on: wlr-randr tardo %.3fs" % (time.monotonic()-t1))
+
+
+def phosh_lock(active):
+    # BLOQUEAR: metodo Lock (fuerza el lockscreen via lockscreen-manager, INDEPENDIENTE del
+    # gsetting lock-enabled que suele estar en false; SetActive(true) solo hace blank, no bloquea
+    # — ESE era el bug de "apaga pero no bloquea"). Verificado con grim 0705: Lock muestra el
+    # lockscreen (reloj + "Slide up to unlock") sobre el panel encendido (parche monitor.c).
+    # DESBLOQUEAR: SetActive(false) baja el screensaver (el usuario normalmente desliza).
+    if helper_cmd("lock" if active else "unlock") is not None:
+        return
+    if active:
+        run_in_session("gdbus call --session --dest org.gnome.ScreenSaver "
+                       "--object-path /org/gnome/ScreenSaver "
+                       "--method org.gnome.ScreenSaver.Lock")
+    else:
+        run_in_session("gdbus call --session --dest org.gnome.ScreenSaver "
+                       "--object-path /org/gnome/ScreenSaver "
+                       "--method org.gnome.ScreenSaver.SetActive false")
+
+
+def wait_release_or_long(fd):
+    """Tras un press, espera el release (val==0) hasta LONG s. True = pulsacion LARGA."""
+    t0 = time.monotonic()
+    while True:
+        rem = LONG - (time.monotonic() - t0)
+        if rem <= 0:
+            log("LARGA (sin release en %.2fs)" % LONG)
+            return True
+        r, _, _ = select.select([fd], [], [], rem)
+        if not r:
+            log("LARGA (select timeout, %.2fs)" % (time.monotonic() - t0))
+            return True
+        d = fd.read(SZ)
+        if not d or len(d) < SZ:
+            continue
+        _, _, typ, code, val = struct.unpack(FMT, d)
+        if typ == EV_KEY and code == KEY_POWER and val == 0:
+            log("CORTA (release a %.2fs)" % (time.monotonic() - t0))
+            return False
+        # val==2 (autorepeat) u otros: seguir esperando
+
+
+def power_menu():
+    """Menu de apagado: pantalla ON + helper en la sesion (el helper gestiona el lockscreen:
+    si esta bloqueado pide desbloquear y espera). stdout final: poweroff|reboot|cancel."""
+    screen_on(read_int(MX, 10))
+    action = helper_cmd("menu", timeout=80)
+    if action is None:
+        r = run_in_session("python3 /usr/local/bin/mt6582-powermenu", timeout=75, capture=True)
+        if r is None:
+            subprocess.run(["poweroff"])      # sin sesion Phosh -> apagar directo (fallback)
+            return
+        out = [l for l in (r.stdout or "").strip().splitlines() if l.strip()]
+        action = out[-1].strip() if out else "cancel"
+    if action == "poweroff":
+        subprocess.run(["poweroff"])
+    elif action == "reboot":
+        subprocess.run(["reboot"])
+    # cancel -> nada
+
+
+def main():
+    ev = find_ev()
+    while ev is None:                        # esperar a que el kernel registre el input
+        time.sleep(2)
+        ev = find_ev()
+    saved = read_int(MX, 10) or 10
+
+    # DUEÑO UNICO del boton via EVIOCGRAB. Dos problemas reales encontrados en HW:
+    #  (1) phoc al (re)iniciarse puede robar el EVIOCGRAB.
+    #  (2) BUG DE FONDO: tras idle prolongado con el grab activo, el driver mtk-pmic-keys
+    #      deja de entregar eventos KEY_POWER a ESTE fd (el grab sigue siendo nuestro,
+    #      pero el driver no propaga el IRQ->input event). Reabrir el fd lo arregla al
+    #      instante (confirmado en HW 0707).
+    # Fix: cada REOPEN_INTERVAL s, cerrar y reabrir el fd + re-hacer el grab. Eso
+    # garantiza que el driver siempre tenga un fd "fresco" y entregue eventos. Coste:
+    # ~0 (un close/open por minuto). El select con timeout permite hacer esto sin
+    # quedar bloqueado en un read().
+    REOPEN_INTERVAL = 30.0
+    TICK = 2.0        # select corto: detectar el resume RAPIDO (ver abajo)
+    def open_and_grab():
+        # re-localizar el nodo SIEMPRE: un rebind de mtk-pmic-keys lo mueve y
+        # abrir el path viejo peta (FileNotFoundError) = daemon muerto (0708)
+        path = find_ev() or ev
+        try:
+            fd = open(path, "rb", buffering=0)
+        except Exception:
+            time.sleep(2)
+            return None
+        try:
+            fcntl.ioctl(fd, EVIOCGRAB, 1)
+        except Exception:
+            pass
+        return fd
+    def suspend_count():
+        # numero de suspends s2idle completados; cambia => acabamos de RESUMIR
+        try:
+            return int(open("/sys/power/suspend_stats/success").read().strip())
+        except Exception:
+            return -1
+    def keys_irq_count():
+        # total de IRQs de mtk-pmic-keys: sube con CADA pulsacion fisica aunque
+        # el fd este sordo (algo roba el grab tras idle: elogind veia presses
+        # que con nuestro grab no deberia — 0708/0709). Es el detector de
+        # "el usuario pulso y el evento se perdio".
+        try:
+            for ln in open("/proc/interrupts"):
+                if "mtk-pmic-keys" in ln:
+                    return sum(int(x) for x in ln.split()[1:5])
+        except Exception:
+            pass
+        return -1
+    def open_keypad():
+        # VOLUMEN como RESCATE (0708): el bloque de teclas del PMIC puede
+        # quedarse sordo (wedge, en investigacion); las teclas de volumen van
+        # por el SoC (mt6779-keypad) = camino independiente. Con la pantalla
+        # apagada, VOL-ABAJO despierta. SIN grab: con pantalla encendida el
+        # volumen sigue siendo de phosh.
+        path = find_ev("mt6779-keypad")
+        if not path:
+            return None
+        try:
+            return open(path, "rb", buffering=0)
+        except Exception:
+            return None
+    fd = open_and_grab()
+    kp = open_keypad()
+    last = 0.0
+    last_reopen = time.monotonic()
+    last_suspends = suspend_count()
+    last_kirq = keys_irq_count()
+    while True:
+        if fd is None:
+            fd = open_and_grab()
+            continue
+        fds = [fd] + ([kp] if kp else [])
+        r, _, _ = select.select(fds, [], [], TICK)
+        if kp and kp in r:
+            try:
+                d = kp.read(SZ)
+                if d and len(d) >= SZ:
+                    _, _, typ, code, val = struct.unpack(FMT, d)
+                    # KEY_VOLUMEDOWN=114: despertar solo con pantalla apagada
+                    if typ == EV_KEY and code == 114 and val == 1 and not screen_is_on():
+                        log("accion: ON/wake por VOL-ABAJO (rescate)")
+                        screen_on(saved)
+                        last = time.monotonic()
+            except Exception:
+                try:
+                    kp.close()
+                except Exception:
+                    pass
+                kp = open_keypad()
+            if fd not in r:
+                continue
+        if not r:
+            # Sin eventos pendientes: momento seguro para reabrir el fd si toca
+            # (periodico) o si acabamos de RESUMIR de s2idle — el fix del "boton
+            # sordo tras un par de minutos bloqueado" (0708): el autosuspend mete
+            # el movil en s2idle; al despertar, el bug de mtk-pmic-keys deja este
+            # fd sin eventos, y con solo el reopen periodico de 30s habia hasta
+            # 30s de pulsaciones PERDIDAS tras el resume. Ahora: resume detectado
+            # en <=2s => reopen inmediato. (Si el fd si entrega eventos, r llega
+            # y se procesa normal — no se reabre nada con eventos en vuelo.)
+            now = time.monotonic()
+            # DETECTOR POR IRQ (0709, el fix del "15-20s en volver la pantalla"):
+            # tras idle algo nos roba el grab/el fd se queda sordo (elogind veia
+            # presses bajo nuestro grab) y las pulsaciones se PERDIAN hasta el
+            # reopen de 30s (espera media 15-20s). El contador de IRQs de
+            # mtk-pmic-keys sube con CADA pulsacion fisica aunque el fd calle:
+            # pantalla apagada + IRQs nuevos + ningun evento leido => el usuario
+            # pulso => despertar YA (<=2s).
+            kirq = keys_irq_count()
+            if kirq != last_kirq:
+                if last_kirq >= 0 and not screen_is_on() \
+                   and now - last >= DEBOUNCE:
+                    log("accion: ON/wake por IRQ-delta (fd sordo, %d IRQs nuevos)"
+                        % (kirq - last_kirq))
+                    screen_on(saved)
+                    last = now
+                last_kirq = kirq
+            cnt = suspend_count()
+            # reopen agresivo con pantalla apagada (cada TICK): reduce la
+            # ventana de fd sordo para el resto de interacciones
+            interval = TICK if not screen_is_on() else REOPEN_INTERVAL
+            if cnt != last_suspends or now - last_reopen >= interval:
+                resumed = cnt != last_suspends
+                last_suspends = cnt
+                try:
+                    fd.close()
+                except Exception:
+                    pass
+                fd = open_and_grab()
+                last_reopen = time.monotonic()
+                if resumed:
+                    # DESPERTAR = ENCENDER (0708, estilo Android): la pulsacion
+                    # que saca al SoC del s2idle se consume como wakeup (no llega
+                    # como input event) -> sin esto el usuario tenia que pulsar
+                    # otra vez (y esa tambien podia perderse en el fd rancio) =
+                    # "tarda mucho en volver la pantalla". El unico wake real es
+                    # el boton, asi que resume => pantalla ON. Si el kernel dice
+                    # que desperto OTRO irq (p.ej. RTC de un rtcwake), no tocar.
+                    wirq = read_int("/sys/power/pm_wakeup_irq", -1)
+                    log("resume detectado (suspends=%d, wakeup_irq=%d)" % (cnt, wirq))
+                    if wirq in (-1, 0, 51, 206) and not screen_is_on():
+                        log("accion: ON/wake por RESUME (boton desperto el SoC)")
+                        screen_on(saved)
+            continue                          # volver a esperar
+        d = fd.read(SZ)
+        if not d or len(d) < SZ:
+            continue
+        _, _, typ, code, val = struct.unpack(FMT, d)
+        if typ != EV_KEY or code != KEY_POWER or val != 1:
+            continue                         # solo actuamos desde el PRESS
+        t_press = time.monotonic()
+        if t_press - last < DEBOUNCE:
+            continue                         # metralleta: ignorar
+
+        if wait_release_or_long(fd):
+            log("accion: MENU apagado (env=%s)" % bool(phosh_env()))
+            power_menu()                     # LARGA -> menu de apagado
+        else:
+            if screen_is_on():               # CORTA -> toggle pantalla + bloqueo
+                cur = read_int(BR, 0)
+                if cur > 0:
+                    saved = cur
+                screen_off()
+                log("accion: OFF+lock (env=%s)" % bool(phosh_env()))
+                phosh_lock(True)
+            else:
+                log("accion: ON/wake (env=%s, press-recibido hace %.2fs)" % (bool(phosh_env()), t_press))
+                screen_on(saved)
+        last = time.monotonic()
+        # sincronizar el contador de IRQs con lo ya procesado: sin esto, el
+        # press+release de un LOCK dispararia el detector IRQ-delta al tick
+        # siguiente (pantalla recien apagada) = falso despertar inmediato
+        last_kirq = keys_irq_count()
+
+
+if __name__ == "__main__":
+    main()

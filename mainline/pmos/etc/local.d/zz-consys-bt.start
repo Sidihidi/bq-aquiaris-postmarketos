@@ -1,0 +1,14 @@
+#!/bin/sh
+# CONSYS BT (hci0): bring-up en BACKGROUND y DESPUES de que Phosh arranque (sin contienda de I/O por la SD).
+# Async => si el bring-up se cuelga (D-state) NO atasca el boot. Mutex en el driver => sin carrera BT/GPS/WiFi.
+mount -t debugfs none /sys/kernel/debug 2>/dev/null
+PP=/usr/local/bin/pwrap_poke
+set_bit() { cur=$($PP r "$1" 2>/dev/null | sed "s/.*= //"); [ -n "$cur" ] && $PP w "$1" "$(printf '0x%04x' $(( cur | $2 )))" >/dev/null 2>&1; }
+set_bit 0x0416 0x0080
+set_bit 0x0418 0x5000
+(
+  i=0; while [ $i -lt 45 ] && ! pgrep -x phoc >/dev/null 2>&1; do sleep 1; i=$((i+1)); done
+  sleep 3
+  j=0; while [ $j -lt 20 ] && [ ! -e /sys/kernel/debug/mt6582_btif/bringup ]; do sleep 1; j=$((j+1)); done
+  [ -e /sys/kernel/debug/mt6582_btif/bringup ] && { timeout 50 sh -c "echo 1 > /sys/kernel/debug/mt6582_btif/bringup"; sleep 2; bluetoothctl power on >/dev/null 2>&1; }
+) &

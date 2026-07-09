@@ -1,128 +1,120 @@
 # BQ Aquaris E4.5 (`krillin`) — Linux MAINLINE en un MediaTek MT6582 de 2014
 
 Reviviendo el **BQ Aquaris E4.5** (MediaTek MT6582, Cortex-A7 ×4 armv7, Mali-400 MP2, 1 GB RAM,
-540×960; *el primer Ubuntu Phone, 2014*) con **Linux mainline 7.0.12 + postmarketOS/Alpine + Phosh**,
-escribiendo y portando los drivers que upstream nunca tuvo para este SoC.
+540×960; *el primer Ubuntu Phone, 2014*) con **Linux mainline 7.0.12**, portando desde cero los
+drivers que upstream nunca tuvo para este SoC.
 
-> **Estado (2026-07-07):** un teléfono de 2014 con **Linux mainline 7.0.12 + Alpine** y **Phosh
-> acelerado por GPU (lima/Mali-400)**, arrancando desde **SD**, con **táctil multitouch (kernel),
-> carga, batería en la UI, brillo por slider, Bluetooth y **WiFi WPA2 con DHCP + datos + HTTPS
-> funcionando** (port del driver stock `mt_wifi` = `mtk_mtwifi`). Vibrador, LEDs, botón power y RTC
-> code-complete. En curso: **audio** y una **tanda de drivers de pulido** (thermal, accdet, GPS).
-
-📍 **Puntos de entrada:** historia técnica → [mainline/HITOS.md](mainline/HITOS.md) · plan de drivers
-vigente → [PLAN-PORTS-DRIVERS.md](PLAN-PORTS-DRIVERS.md).
-Repo: [github.com/Sidihidi/bq-aquiaris-postmarketos](https://github.com/Sidihidi/bq-aquiaris-postmarketos).
+> **Estado (2026-07-09):** un teléfono de 2014 con **Linux mainline 7.0.12 + Alpine/Phosh**
+> completamente funcional: WiFi WPA2+DHCP, Bluetooth, **Radio FM que suena**, audio, vídeo,
+> sensores, suspend profundo, y **menú multiboot** que elige entre pmOS, Android y Maemo Leste.
+> GPS y módem en investigación.
 
 ---
 
 ## ✅ Estado por subsistema
 
-**✅** funciona en HW · **🟡** parcial / en progreso · **⬜** sin empezar.
-
 | Subsistema | Estado | Detalle |
 |---|---|---|
-| Boot mainline (SMP 4×A7) | ✅ | Arranca desde **SD** (`mmcblk1p1`), sector **83968**; LK KitKat carga zImage+dtb. |
-| Display DRM + GPU | ✅ | `mediatek-drm` (DSI) + **lima / Mali-400**. |
-| Phosh (Wayland) | ✅ | phoc + phosh + squeekboard sobre GLES2/lima. |
-| **Táctil** | ✅ | **Multitouch por kernel** (`edt-ft5x06` + chunked-read I2C, EINT117, 0 CPU en reposo). |
-| PMIC MT6323 | ✅ | En el DeviceTree (pwrap + MFD + reguladores). |
-| Batería % + carga | ✅ | VBAT por AUXADC + indicador en Phosh; cargador FAN5405. |
-| Brillo (slider) | ✅ | Slider de Phosh → logind → `/sys/class/backlight` → daemon PWM. |
-| Bluetooth (hci0) | ✅ | Empareja (probado con un S24) + toggle en Phosh. Vía CONSYS/BTIF. |
-| WiFi — scan + red abierta | ✅ | Escanea redes reales; **red abierta navega** (lease + ping). |
-| **WiFi — WPA2 + DHCP + datos** | ✅ | **Handshake + cifrado L2 + DHCP + datos a internet + HTTPS** (port del stock `mt_wifi` = `mtk_mtwifi`, probado 07-07). El "DHCP falla" de handoffs previos era un malentendido de rutas de red (ver [bitácora 07-07](docs/bitacora/2026-07-07-wifi-funciona.md)). |
-| GPS | 🟡 | Protocolo `0xAAF0` decodificado; cadena gpsd→geoclue→Phosh validada. Falta el `START_SEQ` de `mnld`. |
-| **Vibrador · LEDs RGB · botón power · RTC** | 🟡 | **Code-complete** (drivers mainline + DT+config); compilan, **falta 1 flash de verificación**. |
-| **Thermal** | 🟡 | AUXADC del SoC **validado en HW**; falta el rail del NTC (lee 0 mV). |
-| **STP (robustez BT)** | 🟡 | Analizado; parche de resync RX listo (handoff), sin integrar (no romper el BT que ya va). |
-| **Audio** | 🟡 | Mapeado + esqueleto AFE compilando; port de ~6-8 sem (ALSA SoC de cero). |
-| Botones vol | ✅ | Keypad matriz (`mt6779-keypad`). |
-| FM · cámara · módem 3G | ⬜ | **Investigados a fondo (07-07)**: [ver informe](mainline/CAMARA-MODEM-FM-INVESTIGACION-0707.md). FM = **CONDITIONAL GO** (~1-2 sem, reusa CONSYS); módem M1 (arrancar MD) = **GO** (~3-5 sem, playbook WiFi); cámara = **NO-GO confirmado** (HAL cerrada imprescindible). |
-
-*(El **CONSYS** — combo WiFi/BT/GPS/FM del MT6582, que mainline nunca soportó — se levanta entero por
-drivers propios en `mainline/wifi-consys/`. Es la frontera técnica del proyecto.)*
-
----
-
-## 🔀 Frentes
-
-1. **WiFi WPA2** — ✅ **RESUELTO** (2026-07-07). El port del driver stock `mt_wifi` a 7.0.12
-   (`mainline/wifi-consys/wifi/mt_wifi_port/`) funciona con datos cifrados reales. Historia y
-   por qué el "DHCP falla" era un falso diagnóstico:
-   [bitácora 07-07](docs/bitacora/2026-07-07-wifi-funciona.md). (Los handoffs previos sobre el
-   port y el blind-poke quedan en `docs/archive/` como histórico.)
-2. **Resto de drivers** — vibrador/LEDs/power/RTC/thermal/STP/audio/GPS. Plan y estado en
-   [PLAN-PORTS-DRIVERS.md](PLAN-PORTS-DRIVERS.md) y estrategia por subsistema en
-   [mainline/PORT-STRATEGY-DRIVERS-0707.md](mainline/PORT-STRATEGY-DRIVERS-0707.md).
+| Boot SMP 4×A7 | ✅ | Arranca desde SD; LK KitKat → boot.img sector 83968 |
+| Display DRM + GPU | ✅ | `mediatek-drm` (DSI hx8389) + **lima / Mali-400** |
+| Phosh (Wayland) | ✅ | phoc + phosh + squeekboard, GLES2/lima |
+| Táctil multitouch | ✅ | `edt-ft5x06` + chunked-read (5 dedos, EINT117) |
+| **WiFi WPA2+DHCP+datos** | ✅ | Port del stock `mt_wifi` = `mtk_mtwifi`. HTTPS real. |
+| **Bluetooth (hci0)** | ✅ | Empareja + toggle. Vía CONSYS/BTIF. |
+| **Radio FM** | ✅ | **¡SUENA!** Port del stock MT6627 + app GTK4. `/dev/fm` + I2S analógico. |
+| **Audio completo** | ✅ | `aplay`/mpv/PulseAudio. Altavoz + auriculares. AFE MT6323. |
+| Batería % + carga | ✅ | VBAT por AUXADC (hwmon kernel) + FAN5405. |
+| Botón power | ✅ | Toggle INT_SEL + daemon helper (2 toques tras idle). |
+| Auto-rotación + ALS | ✅ | LSM330 + TMD2772 por IIO + iio-sensor-proxy |
+| Vibración + LEDs RGB | ✅ | regulator-haptic + leds-mt6323 + feedbackd |
+| Brillo (slider) | ✅ | Phosh → logind → sysfs → daemon PWM |
+| Vídeo (YouTube) | ✅ | mpv/Livi h264 360p fluido, lima/GLES2 |
+| Suspend | ✅ | s2idle + autosuspend híbrido + SPM M3 (deep sleep CPU0) |
+| **Menú multiboot** | ✅ | Selección visual: pmOS / Android / Maemo Leste (Vol+/- + Power) |
+| USB gadget + SSH | ✅ | g_ether (mt6582-musb) + SSH por USB y WiFi |
+| **GPS** | 🟡 | Fase A: runner libmnl enlaza. Falta Fase B (HW). |
+| **Magnetómetro** | 🟡 | MMC3516x driver IIO compila. Falta flash de validación. |
+| **Thermal** | 🟡 | auxadc_thermal con entrada mt6582 compila. Falta flash. |
+| **Accdet (jack)** | 🟡 | mt6323-accdet compila. Botones inline pendientes. |
+| **Módem 2G/3G** | 🔬 | M1 (arrancar baseband) = GO. Moonshot completo. |
+| **Cámara** | ❌ | NO-GO: HAL cerrada imprescindible, kernel es passthrough. |
+| **Android 13** | ❌ | NO-GO: RAM (1<2GB) + armv7 deprecado. |
 
 ---
 
 ## 🗺️ Estructura del repo
 
 ```
-README.md                     ← este (punto de entrada)
-PLAN-PORTS-DRIVERS.md         ← plan maestro de drivers (estado + recetas de test)
 mainline/
-  HITOS.md                    ← historia unificada del proyecto (todos los hitos)
-  dts/mt6582-bq-krillin.dts   ← el DeviceTree canónico del krillin
-  audio/                      ← port de audio (AFE) — esqueleto + handoff
-  wifi-consys/                ← CONSYS WiFi/BT/GPS/FM (la frontera)
-    wifi/                     ← driver A (mt6582-wifi.c) + handoffs + mt_wifi_port/ (port stock)
-    HANDOFF-STP-CORE-PORT-0702.md
-  rootfs/ · phosh/ · userspace/  ← configs, stack Phosh, bridges de userspace
-fw-analysis/                  ← firmware WiFi nds32 descompilado (Ghidra) + herramientas RE
-docs/archive/                 ← documentación histórica superada (ver su README)
+├── drivers/
+│   ├── done/           ← ✅ Drivers terminados y probados en HW
+│   │   ├── wifi/       (mt6582-wifi + mt_wifi_port stock + mtk-pmic-keys)
+│   │   ├── bt/         (mt6582-btif)
+│   │   ├── fm/         (fm_glue + shims + app GTK4 + groundtruth)
+│   │   ├── audio/      (afe-pcm + codec-sequence)
+│   │   ├── battery/    (mt6323-auxadc hwmon)
+│   │   ├── spm/        (mt6582-spm + suspend)
+│   │   └── sensors/    (LSM330 + TMD2772)
+│   ├── wip/            ← 🟡 En progreso
+│   │   ├── powerkey/   (mtk-pmic-keys: 2 toques tras idle)
+│   │   ├── gps/        (Fase A: runner libmnl enlaza)
+│   │   ├── magnetometer/ (MMC3516x: compila)
+│   │   ├── thermal/    (auxadc_thermal: compila)
+│   │   ├── accdet/     (mt6323-accdet: compila)
+│   │   └── modem/      (CCCI: M1 GO, moonshot)
+│   └── nogo/           ← ❌ Descartados (cámara, Android 13)
+├── bootmenu/           ← Menú multiboot (menupick.c + init-menupick.sh)
+├── maemo-leste/        ← Port de Maemo Leste (rootfs construido)
+├── pmos/               ← Configs/scripts del rootfs pmOS
+├── investigations/     ← Estudios de viabilidad (bootloader, Android, etc.)
+├── dts/                ← DeviceTree canónico del krillin
+└── userspace/          ← Daemons y configs de userspace (backlight, autosuspend, etc.)
+
+docs/
+├── bitacora/           ← Diario de sesiones (ordenado por fecha)
+└── archive/            ← Documentación histórica superada
+
+fw-analysis/            ← Firmware NDS32 descompilado (Ghidra)
 ```
 
-> **Nota:** el árbol de build vive en la Pi (`~/mainline/linux-7.0.12`), no en el repo. Aquí van las
-> **fuentes canónicas** (drivers propios, DTS, configs, handoffs). Sincronizar con `scp` + `md5`.
+---
+
+## 🔀 Multiboot (3 SOs)
+
+El móvil tiene un **menú de arranque visual** (navegable con Vol+/- y Power):
+
+| Opción | SO | Dónde | Cómo arranca |
+|---|---|---|---|
+| 0 | **postmarketOS** | SD `mmcblk1p1` | switch_root a Alpine |
+| 1 | **Android** (LineageOS 13) | eMMC (intacto) | kexec del kernel 3.10 |
+| 2 | **Maemo Leste** | SD `mmcblk1p3` | switch_root a Devuan |
+
+El boot.img del menú va en el **sector 83968 del eMMC** (fijo, no se toca).
+Ver [cómo flashear](mainline/bootmenu/FLASHEO-MULTIBOOT.md).
 
 ---
 
 ## 🔧 Cómo se trabaja
 
-Flujo: **editar → compilar (cross armhf) en la Pi → flashear por USB → verificar en HW.**
+**Flujo:** editar → compilar (cross armhf) en la Pi → flashear → verificar en HW.
 
-- **Pi de build** — `ssh cpcd@192.168.0.123` (sudo NOPASSWD). Árbol: `~/mainline/linux-7.0.12`
-  (build dir `O=build-krillin`). *(Hay una 2ª Pi, `.38`, con el otro frente; no confundirlas.)*
-- **Teléfono** (pmOS, desde la Pi) — `ssh root@172.16.42.1`. USB gadget: la Pi es `172.16.42.2/24`
-  en `usb0` → reconectar con `sudo ip addr replace 172.16.42.2/24 dev usb0`.
-- **Build** (en la Pi): `make O=build-krillin ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- -j2 zImage dtbs`
-  (**`-j2`, no `-j4`** — el pico de CPU reinicia la Pi). Empaquetar+flashear: `~/wifi-iter-w.sh`
-  (dd a sector 83968 con verificación md5) o `fastboot flash boot boot-*-sd.img`.
-- **⚠️ MULTIBOOT**: el sector 83968 del eMMC ahora tiene el **boot.img del menú multiboot**
-  (`boot-menupick2.img`), NO un boot.img de pmOS directo. Para actualizar pmOS: `apk upgrade`
-  en el rootfs de la SD. Para actualizar el kernel: reconstruir el boot.img del menú. Ver
-  [`mainline/bootmenu/FLASHEO-MULTIBOOT.md`](mainline/bootmenu/FLASHEO-MULTIBOOT.md).
-- **Disparar el CONSYS** (BT/WiFi/GPS): `echo 1 > /sys/kernel/debug/mt6582_wifi/bringup`.
-- **Tras un crash**: el pstore se salva en cada boot en `/var/log/pstore/boot-*` (además de
-  `/sys/fs/pstore/console-ramoops-0`).
-
-> ⚠️ Repo (Mac) y árbol de build (Pi) pueden divergir: sincronizar y comparar `md5` antes de editar.
-> ⚠️ No martillear el SSH anidado Pi→teléfono (satura sshd/musb). Agrupar comandos. Si el teléfono no
-> responde → power-cycle físico.
+- **Pi de build** — `cpcd@192.168.0.38` (Debian trixie, sudo NOPASSWD). Árbol: `~/mainline/linux-7.0.12`
+- **Teléfono** (pmOS) — `ssh root@172.16.42.1` (USB) o `ssh root@192.168.0.x` (WiFi)
+- **Build kernel**: `make O=build-krillin ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- -j2 zImage dtbs`
+- **⚠️ MULTIBOOT**: el sector 83968 tiene el boot.img del MENÚ. NO flashear boot.img de pmOS allí.
+  Ver [FLASHEO-MULTIBOOT.md](mainline/bootmenu/FLASHEO-MULTIBOOT.md).
+- **Reglas de oro MTK**: NUNCA flashear preloader. NUNCA restaurar LK Lollipop (bueno = KitKat 1.5.2).
+  sysrq reboot deja el PMIC en mal estado → power-cycle físico.
 
 ---
 
-## 🛟 Recuperación — difícil de brickear
+## 📓 Documentación
 
-- **Regla de oro MTK:** NUNCA flashear `preloader`; **nunca** restaurar el LK de **Lollipop**
-  (bootloop; el bueno es **KitKat 1.5.2**). Lo demás es recuperable.
-- **fastboot** (Pi): `fastboot flash boot boot-*-sd.img`. Entrar: Power ~10 s → Power + Vol↑.
-  Usar `flash boot`, **nunca** `boot`.
-- **mtkclient / BROM** (red de seguridad): backup golden en `artifacts/golden/` (fuera de git).
-  Usar **`wo <off> <len> <img>`** (offsets HEX, boot=`0x2900000`), **nunca `wf`** (machaca el sector 0).
-- **Dual-boot:** pmOS vive en la **SD**; la interna es Android (`/data` = `mmcblk0p7`).
+- [Bitácora de sesiones](docs/bitacora/README.md) — qué se hizo y cómo seguir, por sesión
+- [Estado del proyecto](mainline/ESTADO-PROYECTO-0709.md) — coordinación entre sesiones paralelas
+- [Historia de hitos](mainline/HITOS.md) — cronología completa del proyecto
+- [Estudios de viabilidad](mainline/investigations/) — bootloader, Android 13, cámara/módem/FM
 
 ---
 
-## 📓 Bitácora entre sesiones
-Los frentes que trabajan sobre el repo dejan qué hicieron y cómo seguir en
-[docs/bitacora/](docs/bitacora/README.md) — mirar la última entrada del frente antes de continuar.
-
----
-
-*Proyecto de aficionado, bring-up en hardware real. Historial completo en
-[mainline/HITOS.md](mainline/HITOS.md); documentación superada en
-[docs/archive/](docs/archive/README.md).*
+*Proyecto de aficionado, bring-up en hardware real. Histórico completo en [HITOS.md](mainline/HITOS.md).*

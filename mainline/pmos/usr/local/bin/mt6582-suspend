@@ -1,0 +1,40 @@
+#!/bin/sh
+# mt6582-suspend — suspende el krillin en s2idle y REPARA usb0 al resumir.
+#
+# En este SoC (MT6582) NO hay deep-suspend (falta el SPM en mainline) -> `mem` cae a s2idle.
+# s2idle suspende CPU (WFI) + devices + DRAM self-refresh; el WiFi reconecta solo al resumir,
+# pero el gadget musb (usb0) NO re-enumera al host tras el resume (host da error -71). Fix
+# validado: unbind/rebind del controlador musb -> re-enumera. Este wrapper lo hace SIEMPRE al
+# resumir para que el canal USB (rescate/adb) sobreviva al ciclo de suspend.
+#
+# Uso:
+#   mt6582-suspend        -> suspende y ESPERA un wakeup (boton de encendido).
+#   mt6582-suspend <N>    -> arma un RTC de seguridad a N s (auto-wake) ademas del boton.
+#                            Util para tests: garantiza que vuelve aunque el boton falle.
+RTC="$1"
+UDC=musb-hdrc.2.auto
+DRV=/sys/bus/platform/drivers/musb-hdrc
+
+echo "mt6582-suspend: entrando en s2idle $(date)" > /dev/kmsg 2>/dev/null
+sync
+
+if [ -n "$RTC" ]; then
+  /usr/sbin/rtcwake -m freeze -s "$RTC" >/dev/null 2>&1
+else
+  echo freeze > /sys/power/state
+fi
+
+# ---- a partir de aqui: RESUME ----
+echo "mt6582-suspend: resume; reparando usb0 (rebind musb)" > /dev/kmsg 2>/dev/null
+
+# El gadget musb no re-enumera solo tras resume -> unbind/rebind fuerza la re-atadura y que el
+# host re-enumere. Legacy gadget (g_ether); re-crea usb0 sin IP -> re-asignar la del lado movil.
+echo "$UDC" > "$DRV/unbind" 2>/dev/null
+sleep 1
+echo "$UDC" > "$DRV/bind"   2>/dev/null
+sleep 2
+if ip link show usb0 >/dev/null 2>&1; then
+  ip addr add 172.16.42.1/24 dev usb0 2>/dev/null
+  ip link set usb0 up 2>/dev/null
+fi
+exit 0

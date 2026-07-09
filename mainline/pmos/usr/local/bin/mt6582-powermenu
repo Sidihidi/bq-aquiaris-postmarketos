@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+# mt6582-powermenu — "menu de apagado" del BQ krillin como NOTIFICACION con acciones.
+#
+# Phosh renderiza las acciones de una notificacion como BOTONES (GetCapabilities incluye 'actions'),
+# asi que esto muestra una notificacion con botones [Apagar] [Reiniciar] y espera a que el usuario
+# pulse uno. Imprime en stdout la accion elegida: "poweroff" | "reboot" | "cancel".
+#
+# v2 — consciente del LOCKSCREEN: Phosh DESACTIVA los botones de accion de las notificaciones
+# mientras la sesion esta bloqueada (salian grises). Si ScreenSaver.GetActive es true, primero
+# muestra un aviso "desbloquea para continuar" y espera el desbloqueo (señal ActiveChanged, con
+# poll de respaldo) hasta 30s; solo entonces muestra el menu con los botones ya activos.
+#
+# Corre EN LA SESION (como el usuario de Phosh, con su DBUS_SESSION_BUS_ADDRESS) porque el bus de
+# notificaciones es el de la sesion. Lo lanza mt6582-powerkey en la pulsacion LARGA; ese (root) lee
+# esta salida y ejecuta poweroff/reboot (que necesitan root). Timeout de seguridad -> "cancel".
+
+import sys
+import gi
+gi.require_version("Gio", "2.0")
+gi.require_version("GLib", "2.0")
+from gi.repository import Gio, GLib
+
+MENU_TIMEOUT_MS = 30000
+UNLOCK_TIMEOUT_MS = 30000
+
+bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+
+
+def notify(summary, body, actions, timeout_ms, replaces=0):
+    params = GLib.Variant("(susssasa{sv}i)", (
+        "Sistema", replaces, "system-shutdown-symbolic",
+        summary, body, actions, {"urgency": GLib.Variant("y", 2)}, timeout_ms))
+    ret = bus.call_sync("org.freedesktop.Notifications", "/org/freedesktop/Notifications",
+                        "org.freedesktop.Notifications", "Notify", params, None,
+                        Gio.DBusCallFlags.NONE, -1, None)
+    return ret.unpack()[0]
+
+
+def close_notification(nid):
+    try:
+        bus.call_sync("org.freedesktop.Notifications", "/org/freedesktop/Notifications",
+                      "org.freedesktop.Notifications", "CloseNotification",
+                      GLib.Variant("(u)", (nid,)), None, Gio.DBusCallFlags.NONE, -1, None)
+    except Exception:
+        pass
+
+
+def screensaver_active():
+    try:
+        ret = bus.call_sync("org.gnome.ScreenSaver", "/org/gnome/ScreenSaver",
+                            "org.gnome.ScreenSaver", "GetActive", None, None,
+                            Gio.DBusCallFlags.NONE, 2000, None)
+        return bool(ret.unpack()[0])
+    except Exception:
+        return False
+
+
+def wait_for_unlock():
+    """Aviso + espera a que el usuario desbloquee. True si desbloqueo, False si timeout."""
+    nid = notify("Menu de apagado", "Desbloquea la pantalla para continuar", [], UNLOCK_TIMEOUT_MS)
+    loop = GLib.MainLoop()
+    state = {"unlocked": False}
+
+    def on_active_changed(conn, sender, path, iface, signal, sparams):
+        if not sparams.unpack()[0]:
+            state["unlocked"] = True
+            loop.quit()
+
+    sid = bus.signal_subscribe("org.gnome.ScreenSaver", "org.gnome.ScreenSaver",
+                               "ActiveChanged", "/org/gnome/ScreenSaver", None,
+                               Gio.DBusSignalFlags.NONE, on_active_changed)
+
+    def poll():
+        if not screensaver_active():
+            state["unlocked"] = True
+            loop.quit()
+            return False
+        return True
+
+    GLib.timeout_add(2000, poll)                       # respaldo por si la señal no llega
+    GLib.timeout_add(UNLOCK_TIMEOUT_MS, loop.quit)
+    loop.run()
+    bus.signal_unsubscribe(sid)
+    close_notification(nid)
+    return state["unlocked"]
+
+
+def action_menu():
+    """Notificacion con botones [Apagar] [Reiniciar]. Devuelve poweroff|reboot|cancel."""
+    result = {"action": "cancel"}
+    loop = GLib.MainLoop()
+    try:
+        notif_id = notify("Apagar el telefono", "Elige una opcion",
+                          ["poweroff", "Apagar", "reboot", "Reiniciar"], MENU_TIMEOUT_MS)
+    except Exception:
+        return "cancel"
+
+    def on_signal(conn, sender, path, iface, signal, sparams):
+        p = sparams.unpack()
+        if not p or p[0] != notif_id:
+            return
+        if signal == "ActionInvoked":
+            result["action"] = p[1]        # "poweroff" | "reboot"
+            loop.quit()
+        elif signal == "NotificationClosed":
+            loop.quit()                    # cerrada sin accion (swipe / expira) -> cancelar
+
+    bus.signal_subscribe("org.freedesktop.Notifications", "org.freedesktop.Notifications",
+                         None, "/org/freedesktop/Notifications", None,
+                         Gio.DBusSignalFlags.NONE, on_signal)
+    GLib.timeout_add(MENU_TIMEOUT_MS + 2000, loop.quit)     # red de seguridad
+    loop.run()
+    return result["action"]
+
+
+if screensaver_active():
+    if not wait_for_unlock():
+        print("cancel")
+        sys.exit(0)
+print(action_menu())

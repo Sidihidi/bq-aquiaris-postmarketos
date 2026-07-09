@@ -1,0 +1,13 @@
+#!/bin/sh
+# Agente de emparejamiento BT permanente (auto-acepta passkey). Corre el ULTIMO (tras Phosh)
+# para no retrasar la GUI. hci0 ya lo creó zz-consys-bt. Totalmente desacoplado del boot.
+( i=0
+  while [ $i -lt 40 ] && ! hciconfig hci0 >/dev/null 2>&1; do sleep 1; i=$((i+1)); done
+  pkill -f bluetoothctl 2>/dev/null
+  sleep 1
+  setsid sh -c '( printf "agent NoInputNoOutput
+default-agent
+pairable on
+discoverable on
+"; while true; do echo yes; sleep 2; done ) | bluetoothctl >/dev/null 2>&1' </dev/null >/dev/null 2>&1 &
+) </dev/null >/dev/null 2>&1 &
