@@ -33,13 +33,16 @@
 | **FM audio** (sintoniza, no suena) | `aif_ctrl_cb` no-op + ruteo codec (¿analógico line-in MT6323 o I2S→AFE?) | RE del downstream (cmb_stub + krillin audio cust) → implementar callback + secuencia codec + script pwrap de validación |
 | **Proximidad** (lee raw, proxy no la expone) | eventos/umbral tsl2772 | baja prioridad, tras lo gordo |
 
-### ⬜ SIN EMPEZAR (esta sesión los escribe)
-| Qué | Estrategia-0707 | Entregable |
+### ✅ HECHO ESTA SESIÓN (0709) — código completo + compila, SIN probar HW
+| Qué | Entregable (en el repo) | Estado |
 |---|---|---|
-| **Magnetómetro MMC3516x** | GO (2-4 d) | driver IIO nuevo `mmc3516x.c` (modelo mmc35240) + DT + Kconfig/Makefile, **compilado** |
-| **Thermal CPU** | CONDITIONAL-GO (1-2 sem) | `mtk_thermal_data` MT6582 en `auxadc_thermal.c` (offsets/efuse del ds `mtk_ts_cpu.c`) + DTS thermal-zones, **compilado** |
-| **Accdet jack** | CONDITIONAL-GO (1 sem) | driver hijo MFD MT6323 (modelo `mt6359-accdet.c`) con umbrales del ds → ALSA jack + botones inline, **compilado** |
-| **GPS Fase A** (runner+shims) | CONDITIONAL-GO (la pieza grande) | scaffold: glue AOSP recortado + ~6 shims KAL + shims bionic→musl + Makefile armv7-musl. Meta: **que enlace** |
+| **Magnetómetro MMC3516x** | `mainline/sensors/mmc3516x/` (driver IIO ~400 L + INTEGRATION) | **`mmc3516x.ko` COMPILA** ✓ |
+| **Thermal CPU** | `mainline/thermal/` (auxadc_thermal + parche 202 L + DTS + INTEGRATION) | **`auxadc_thermal.ko` COMPILA** ✓ |
+| **Accdet jack** | `mainline/audio-accdet/` (mt6323-accdet ~450 L + INTEGRATION) | **`mt6323-accdet.ko` COMPILA** ✓ |
+| **FM audio** | `mainline/wifi-consys/fm/FINDINGS-FM-I2S-ROUTE-0709.md` | **RE cerrado**: I2S interno PAD_CONN + receta de registros AFE exacta |
+| **GPS Fase A** | `mainline/wifi-consys/gps/FASE-A-ENLAZA-0709.md` + `fase-a-shim/` | **✅ ENLAZA** (binario ARM estático: libmnl_6628 + glue AOSP + shims KAL) |
+
+Los `.ko`/binarios de prueba están en `~/drivers-wip/` y `~/gps/fase-a/` de la Pi .38 (todo en **build-drv**, NUNCA build-krillin). Cada uno con su `INTEGRATION.md`/`FINDINGS` (DT + config + qué validar en HW).
 
 ### 🔴 FUERA (decisión estrategia-0707)
 Módem (MOONSHOT, solo spike explícito) · Cámara (MOONSHOT/NO-GO, solo spike oportunista) · FM ya se decidió atacarlo pese al NO-GO y sintoniza (queda solo el audio) · BTCVSD (DEFER).
