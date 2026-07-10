@@ -80,3 +80,12 @@ marcarlo → toda imagen posterior nacía sin WiFi/BT (horas de diagnóstico + u
 **REGLA NUEVA**: cambios de debug en ficheros compartidos del árbol (dts, platsmp, btif...) se marcan
 con comentario `/* STAGED-DEBUG <sesión> <fecha>: revertir */` Y se anotan en este doc, o mejor: se
 hacen en una copia (dts propio) sin tocar el compartido.
+
+## ⚠️ INCIDENTE 0710-b: ROOTFS de la SD CORRUPTO (apagados forzados de bootloop)
+Los apagados forzados durante el bootloop dañaron el rootfs pmOS (SD mmcblk1p1): binarios core de
+busybox (ls/cat/id/date) SEGFAULTEAN (exit 139), `echo` builtin OK. Sin errores EXT4 en dmesg (metadatos
+OK) → es corrupción de DATOS de ficheros (busybox/libc), que un fsck NO restaura. phosh no arranca
+(libs dañadas). Recuperación: (A) `apk fix`/reinstalar paquetes dañados si apk aún corre; (B) fsck de
+mmcblk1p1 desde initramfs o desde la Pi con la SD fuera + restaurar binarios; (C) reflashear el rootfs
+pmOS. **El código del proyecto está SEGURO en GitHub — solo el sistema instalado en la SD está dañado.**
+LECCIÓN: nunca forzar apagados en bootloop sin necesidad extrema; usar fastboot para romper el bucle.
