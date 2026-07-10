@@ -51,3 +51,6 @@ IRQ, ADC ch8 (CON22 0x76E, ADC7 0x722, mV=raw·1800/32768), IRQ MFD 18, binding 
 Jack-detect y mic/no-mic probablemente funcionen TAL CUAL; los 3 botones necesitan 1-3.
 
 *Verificación por agente (contraste downstream), revisada por la sesión principal. 2026-07-09.*
+
+---
+**ADDENDUM (0709 noche, sesión paralela):** los 6 fixes del accdet (§3) están **APLICADOS en v2** (`mainline/drivers/wip/accdet/`, compila). No re-aplicar.
