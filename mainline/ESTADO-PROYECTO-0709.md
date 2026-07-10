@@ -19,10 +19,13 @@
 | **SPM M1+M2+M3**: deep sleep vía PCM con CPU0 dormant | 4/5 ciclos limpios; ver §2 | 0709 |
 
 ### 🔨 EN CURSO — SESIÓN PRINCIPAL (única que toca móvil/build-krillin)
-1. **SPM: carrera del offline** — `BUG_ON(num_online_cpus()>1)` intermitente en `freeze_secondary_cpus`
-   (⚠️ CORRIGE al handoff Mac: NO es el deep-sleep de CPU0 — ese imprime RESUMED/exit ok/wake).
-   Mitigado con `mtk_cpu_kill` blindado (crash→abort limpio) + `zzz-spm-safe.start` (cpu_pdn=0 al boot).
-   Raíz pendiente. Después: **M4** (infra_pdn = suspend profundo completo).
+1. **SPM**: ✅ raíz del BUG_ON del offline ARREGLADA (#273: `v7_exit_coherency_flush(louis)` en
+   `mtk_cpu_die` — el core se aparcaba en WFI dentro de la coherencia SMP; commit 79697d0).
+   QUEDA: **cuelgue post-resume raro** (~1/7 ciclos, 1-3s tras `suspend exit`, sin oops = bus lockup).
+   **Experimento en vuelo** (0709 noche): soak AISLADO (WiFi down + daemons de polling parados) —
+   última lectura 6/6 limpios; el resultado final está en `/root/soakiso.log` del móvil (leer al
+   volver a estar disponible). Si sale 10/10 → bisecar WiFi vs daemons; el script restaura todo solo.
+   Después: **M4** (infra_pdn = suspend profundo completo).
 2. **Estabilización del boot** (siguiente hito tras el SMP): el boot se ha desestabilizado con las
    últimas iteraciones (sshd flaky, arranques parciales). Plan: auditar orden/serialización de local.d,
    el `init-menupick` del multiboot (nuevo actor en la cadena), cadena de entropía tras resets duros,

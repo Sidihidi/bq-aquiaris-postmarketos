@@ -138,6 +138,12 @@ module_param(spm_wake_sec, uint, 0644);
 static u32 spm_cpu_pdn;		/* 0 por defecto: M3 en debug (crasheo 0709) */
 module_param(spm_cpu_pdn, uint, 0644);
 
+/* M4: apagar tambien INFRA/DDRPHY (DDR en self-refresh por HW, 26M fuera =
+ * el suspend profundo completo del stock). Requiere spm_cpu_pdn=1. Default 0
+ * hasta validar; los perifericos pierden estado (musb ya tiene rebind). */
+static u32 spm_infra_pdn;
+module_param(spm_infra_pdn, uint, 0644);
+
 /* microcodigo PCM de suspend, v35rc1 @ 2014-03-17 (verbatim del stock;
  * el tail incluye el programa "normal" post-wake) */
 static const u32 pcm_suspend_fw[] = {
@@ -393,7 +399,8 @@ static int spm_suspend_enter(suspend_state_t state)
 	clk = spm_r(s, SPM_CLK_CON) & ~(CC_DISABLE_DORM_PWR | CC_DISABLE_INFRA_PWR);
 	if (!spm_cpu_pdn)
 		clk |= CC_DISABLE_DORM_PWR;
-	clk |= CC_DISABLE_INFRA_PWR;
+	if (!(spm_infra_pdn && spm_cpu_pdn))	/* M4 solo sobre M3 */
+		clk |= CC_DISABLE_INFRA_PWR;
 	spm_w(s, SPM_CLK_CON, clk | CC_LOCK_INFRA_DCM);
 	spm_w(s, SPM_PCM_MAS_PAUSE_MASK, 0xffffffff);
 	spm_w(s, SPM_PCM_PWR_IO_EN, PCM_PWRIO_EN_R0 | PCM_PWRIO_EN_R7);
