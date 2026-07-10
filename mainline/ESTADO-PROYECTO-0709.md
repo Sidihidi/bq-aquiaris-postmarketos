@@ -72,3 +72,11 @@ Módem (moonshot, solo spike explícito) · Cámara (NO-GO) · BTCVSD (defer).
 5. El pstore-guardián (`00-pstore-save.start`) conserva las trazas de crash en `/root/pstore-logs/` — leer antes de reflashear.
 
 *Sesión principal (Fable 5, casa), 2026-07-09.*
+
+## ⚠️ INCIDENTE 0710 (resuelto) — cambios staged en el árbol compartido
+La sesión Mac dejó `status="disabled"` en consys/btif/wifi del DTS del árbol (debug Maemo) SIN
+marcarlo → toda imagen posterior nacía sin WiFi/BT (horas de diagnóstico + un bootloop). REVERTIDO
+(backup .bak-connsys-disabled; imagen buena = boot-menupick9.img, kernel #278 con TODO).
+**REGLA NUEVA**: cambios de debug en ficheros compartidos del árbol (dts, platsmp, btif...) se marcan
+con comentario `/* STAGED-DEBUG <sesión> <fecha>: revertir */` Y se anotan en este doc, o mejor: se
+hacen en una copia (dts propio) sin tocar el compartido.
