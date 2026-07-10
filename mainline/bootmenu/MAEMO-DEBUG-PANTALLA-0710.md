@@ -46,4 +46,29 @@ WARNING: drm_atomic_helper_wait_for_vblanks ... vblank wait timed out
    `var/log/hd-desktop.log`, `var/log/kmsg-live.log`, ramoops (`/sys/fs/pstore/console-ramoops-0`
    — ¡solo guarda el ÚLTIMO boot, leerlo antes de otro reboot!).
 
+## Ronda 4 (0710 tarde): la rotación inicial es INCONDICIONAL — el bloqueo es de KERNEL
+- Con `ui_can_rotate=false` + env COGL activado, el Xorg rootless muestra otra vez
+  `Allocate new frame buffer 960x540` a los ~50 s → **hildon-desktop hace el XRRSetCrtcConfig
+  a paisaje SIEMPRE al arrancar** (la clave gconf solo gobierna la rotación dinámica de UI).
+- `hd-desktop.log` salió con 35 KB de espacios en blanco (basura de terminal) — sin valor.
+- La sesión corre entera (mis-xrecord/mis-sound de hildon en `.xsession-errors`). **Maemo está
+  VIVO y a ciegas**: el único bloqueador real es que el modeset de la rotación mata el panel.
+- `kmsg-dump` INSTALADO (`/etc/init.d/kmsg-dump` + `rcS.d/S03`): el próximo boot de Maemo dejará
+  el kernel log completo y persistente en `/var/log/kmsg-live.log` (sync cada 5 s; el anterior
+  rota a `.old`). Ahí se verán los WARN del DSI sin depender del ramoops.
+
+## PLAN PARA CASA (por prioridad)
+1. **KERNEL (fix de fondo, sirve a Maemo Y pmOS)**: hacer que el pipeline DRM sobreviva a un
+   modeset completo. Portar la secuencia de init del LCM `hx8389_qhd_dsi_vdo_truly` del downstream
+   al driver de panel mainline + revisar `mtk_dsi` stop/start (el `polling dsi wait not busy
+   timeout` tras `mtk_crtc_atomic_disable`). Desbloquea: rotación, DPMS, apagado de pantalla y
+   suspend/resume en ambos SO. Verificación rápida sin Maemo: desde pmOS,
+   `xrandr --rotate left` (o modetest con ciclo off/on) debe sobrevivir.
+2. **Userspace (workaround si 1 se atasca)**: parchear el hildon-desktop de Leste (es open
+   source, paquete `hildon-desktop`) para saltarse el `XRRSetCrtcConfig` inicial, o shim
+   LD_PRELOAD que haga no-op `XRRSetCrtcConfig`/`XRRSetScreenSize` (cross-compilar armhf en la
+   Pi). Con el panel vertical y sin rotación se vería el escritorio (quizá con layout raro).
+3. Tras ver Hildon: quitar el env de DEBUG de `20hildon-desktop` (CLUTTER_DEBUG/EGL_LOG_LEVEL/
+   LIBGL_DEBUG) y el wrapper si molesta; revisar `21hildon-desktop-wait` (stamp) y el táctil.
+
 *Sesión Mac (Fable 5), 2026-07-10.*
