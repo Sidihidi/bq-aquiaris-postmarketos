@@ -49,3 +49,11 @@ WiFi · daemons de polling · tail "normal" del PCM · alarma RTC · config L2/M
 - FIX: daemon watchdog en userspace (busybox `watchdog -T 30 -t 5 /dev/watchdog`, local.d
   01-watchdog.start) → watchdog_active=true → mtk_wdt_suspend PARA el HW en cada ciclo.
 - VALIDADO: soak 12/12 ciclos M3 limpios, suspend_stats=12, sin reboot. **M3 ESTABLE.**
+
+## 🏆 M4 VALIDADO (0710): SPM COMPLETO — M1+M2+M3+M4
+Con el watchdog en userspace: **M4 (infra_pdn=1) funcionó A LA PRIMERA** y soak 5/5 limpio
+(stats 18/0, mismo boot). Suspend profundo completo: cluster CPU fuera, INFRA/DDRPHY fuera,
+DDR self-refresh, 26M cortado, resume BootROM→0x10001800→cpu_resume. Activación:
+spm_cpu_pdn=1 + spm_infra_pdn=1 + wake por EINT (botón/RTC) o PCM_TIMER; musb rebind post-ciclo.
+Pendiente de integración de producto: decidir cuándo el autosuspend usa mem-M4 vs freeze
+(p.ej. tras 20 min = híbrido actual → M4), y validar pantalla/periféricos tras M4 en uso GUI real.
