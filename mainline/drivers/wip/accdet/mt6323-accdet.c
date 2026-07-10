@@ -24,7 +24,15 @@
  * scripts on this platform for now).
  *
  * Register/sequence provenance: downstream accdet.c/reg_accdet.h RE
- * (see mainline/audio-accdet/INTEGRATION.md in the pmos-krillin repo).
+ * (see the INTEGRATION.md next to this file in the pmos-krillin repo).
+ *
+ * v2 (0709): fixes from VERIFICACION-DRIVERS-PARALELA-0709 —
+ *  - key reads route accdet->AUXADC (RSV=0x5A20) and boost the micbias
+ *    PWM to 100% duty for the measurement, restoring both afterwards;
+ *  - VBUF enabled around the ADC read (stock does it for ch < 9);
+ *  - SWCTRL keeps comparator/vth/micbias on in idle (0x77, multi-key);
+ *  - dropped the 0x0400/bit14 write (FSA8049 pin-swap, not fitted);
+ *  - plug-out leaves RSV at the low-power value (0x1A10).
  */
 
 #include <linux/module.h>
@@ -53,6 +61,8 @@
 #define MT6323_AUXADC_ADC7		0x0722	/* out of hw CH5 = sw ch8 (ACCDET) */
 #define  AUXADC_ADC_RDY			BIT(15)
 #define  AUXADC_ADC_OUT_MASK		GENMASK(14, 0)
+#define MT6323_AUXADC_CON1		0x0758
+#define  AUXADC_VBUF_EN			BIT(4)	/* stock enables it for ch < 9 */
 #define MT6323_AUXADC_CON22		0x076e	/* RG_AP_RQST_LIST (9 bits) */
 #define  AUXADC_RQST_CH8		BIT(8)
 
@@ -66,6 +76,7 @@
 #define  ACCDET_CTRL_EN			BIT(0)
 #define MT6323_ACCDET_STATE_SWCTRL	0x077e
 #define  ACCDET_SWCTRL_EN		0x07	/* cmp + vth + micbias PWM */
+#define  ACCDET_SWCTRL_IDLE_EN		(0x07 << 4) /* keep them on in idle (multi-key) */
 #define MT6323_ACCDET_PWM_WIDTH		0x0780
 #define MT6323_ACCDET_PWM_THRESH	0x0782
 #define MT6323_ACCDET_EN_DELAY_NUM	0x0784
@@ -77,10 +88,6 @@
 #define  ACCDET_IRQ_CLR			BIT(8)
 #define MT6323_ACCDET_STATE_RG		0x0794
 #define  ACCDET_STATE_AB(v)		(((v) & 0xc0) >> 6)
-
-/* micbias switch used by the downstream 2.8V mode (reg 0x0400, bit 14) */
-#define MT6323_MICBIAS_REG		0x0400
-#define  MICBIAS_HS_EN			BIT(14)
 
 /* comparator states (AB) */
 #define AB_HOOK_OR_NOMIC		0
@@ -139,11 +146,28 @@ static void accdet_write(struct mt6323_accdet *acc, unsigned int reg,
 	regmap_write(acc->regmap, reg, val);
 }
 
-/* read the button voltage: AUXADC sw ch8 (hw CH5), result in mV */
+/*
+ * Read the button voltage: AUXADC sw ch8 (hw CH5), result in mV.
+ *
+ * Per the downstream flow (accdet_auxadc_switch + multi_key_detection):
+ *  - ACCDET_RSV bit5 = 0x5A20 routes the accdet pin to the AUXADC
+ *    (without it every button reads < 90 mV = PLAYPAUSE);
+ *  - during the measurement the micbias PWM runs at 100% duty
+ *    (PWM_THRESH = PWM_WIDTH), otherwise the voltage is chopped;
+ *  - VBUF enabled for channels < 9.
+ * Everything is restored afterwards.
+ */
 static int mt6323_accdet_read_key_mv(struct mt6323_accdet *acc)
 {
 	unsigned int val;
 	int tries = 40;
+	int mv = -ETIMEDOUT;
+
+	/* accdet -> AUXADC switch on + PWM at 100% duty + VBUF on */
+	accdet_write(acc, MT6323_ACCDET_RSV, ACCDET_2V8_MODE_ON);
+	accdet_write(acc, MT6323_ACCDET_PWM_THRESH, KRILLIN_PWM_WIDTH);
+	accdet_write(acc, MT6323_AUXADC_CON1,
+		     accdet_read(acc, MT6323_AUXADC_CON1) | AUXADC_VBUF_EN);
 
 	/* request: toggle bit 8 of RG_AP_RQST_LIST (clear, then set) */
 	val = accdet_read(acc, MT6323_AUXADC_CON22);
@@ -154,13 +178,22 @@ static int mt6323_accdet_read_key_mv(struct mt6323_accdet *acc)
 	/* downstream: channel 8 needs no settling delay (HW quirk) */
 	while (tries-- > 0) {
 		val = accdet_read(acc, MT6323_AUXADC_ADC7);
-		if (val & AUXADC_ADC_RDY)
-			return (int)((val & AUXADC_ADC_OUT_MASK) * 1800 / 32768);
+		if (val & AUXADC_ADC_RDY) {
+			mv = (int)((val & AUXADC_ADC_OUT_MASK) * 1800 / 32768);
+			break;
+		}
 		usleep_range(500, 1000);
 	}
+	if (mv < 0)
+		dev_warn(acc->dev, "key ADC not ready\n");
 
-	dev_warn(acc->dev, "key ADC not ready\n");
-	return -ETIMEDOUT;
+	/* restore: VBUF off, PWM duty back to cust, ADC switch off */
+	accdet_write(acc, MT6323_AUXADC_CON1,
+		     accdet_read(acc, MT6323_AUXADC_CON1) & ~AUXADC_VBUF_EN);
+	accdet_write(acc, MT6323_ACCDET_PWM_THRESH, KRILLIN_PWM_THRESH);
+	accdet_write(acc, MT6323_ACCDET_RSV, ACCDET_2V8_MODE_OFF);
+
+	return mv;
 }
 
 static unsigned int mt6323_accdet_key_from_mv(int mv)
@@ -196,14 +229,13 @@ static void mt6323_accdet_power_on(struct mt6323_accdet *acc)
 	accdet_write(acc, MT6323_TOP_RST_ACCDET_SET, ACCDET_RESET);
 	accdet_write(acc, MT6323_TOP_RST_ACCDET_CLR, ACCDET_RESET);
 
-	/* micbias mode (downstream 2.8V flow uses reg 0x0400 bit 14) */
-	if (acc->micbias_2v8) {
-		accdet_write(acc, MT6323_ACCDET_RSV, ACCDET_2V8_MODE_OFF);
-		accdet_write(acc, MT6323_MICBIAS_REG,
-			     accdet_read(acc, MT6323_MICBIAS_REG) | MICBIAS_HS_EN);
-	} else {
-		accdet_write(acc, MT6323_ACCDET_RSV, ACCDET_1V9_MODE_ON);
-	}
+	/*
+	 * Micbias mode: 2.8V on the krillin (RSV = 0x5A10; the ADC-switch
+	 * bit 5 stays OFF outside key reads). The downstream 0x0400/bit14
+	 * write is FSA8049 pin-swap only (not fitted on the krillin).
+	 */
+	accdet_write(acc, MT6323_ACCDET_RSV,
+		     acc->micbias_2v8 ? ACCDET_2V8_MODE_OFF : ACCDET_1V9_MODE_ON);
 
 	/* PWM + delays + debounce (krillin cust values) */
 	accdet_write(acc, MT6323_ACCDET_PWM_WIDTH, KRILLIN_PWM_WIDTH);
@@ -214,10 +246,13 @@ static void mt6323_accdet_power_on(struct mt6323_accdet *acc)
 	accdet_write(acc, MT6323_ACCDET_DEBOUNCE1, KRILLIN_DEBOUNCE1);
 	accdet_write(acc, MT6323_ACCDET_DEBOUNCE3, KRILLIN_DEBOUNCE3);
 
-	/* enable comparator/vth/micbias PWM + the unit */
+	/*
+	 * Enable comparator/vth/micbias PWM + keep them on in idle
+	 * (IDLE_EN, downstream multi-key: SWCTRL = 0x77) + the unit.
+	 */
 	accdet_write(acc, MT6323_ACCDET_STATE_SWCTRL,
 		     accdet_read(acc, MT6323_ACCDET_STATE_SWCTRL) |
-		     ACCDET_SWCTRL_EN);
+		     ACCDET_SWCTRL_EN | ACCDET_SWCTRL_IDLE_EN);
 	accdet_write(acc, MT6323_ACCDET_CTRL, ACCDET_CTRL_EN);
 }
 
@@ -225,11 +260,8 @@ static void mt6323_accdet_power_off(struct mt6323_accdet *acc)
 {
 	accdet_write(acc, MT6323_ACCDET_CTRL, 0);
 	accdet_write(acc, MT6323_ACCDET_STATE_SWCTRL, 0);
-	if (acc->micbias_2v8)
-		accdet_write(acc, MT6323_MICBIAS_REG,
-			     accdet_read(acc, MT6323_MICBIAS_REG) & ~MICBIAS_HS_EN);
-	accdet_write(acc, MT6323_ACCDET_RSV,
-		     acc->micbias_2v8 ? ACCDET_2V8_MODE_OFF : ACCDET_1V9_MODE_OFF);
+	/* lowest-power RSV value while unplugged (downstream plug-out) */
+	accdet_write(acc, MT6323_ACCDET_RSV, ACCDET_1V9_MODE_OFF);
 	mt6323_accdet_clear_irq(acc);
 	accdet_write(acc, MT6323_TOP_CKPDN_SET, RG_ACCDET_CLK);
 }
