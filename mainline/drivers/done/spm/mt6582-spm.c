@@ -470,6 +470,15 @@ static int spm_suspend_enter(suspend_state_t state)
 	spm_w(s, SPM_SLEEP_ISR_STATUS, ISRC_ALL_EXC_TWAM);
 	spm_w(s, SPM_PCM_SW_INT_CLEAR, BIT(0));
 
+	/* PARAR el PCM entre ciclos (0710): tras el wake, el tail "normal" del
+	 * firmware (proteccion termica del stock) queda corriendo en el uP del
+	 * SPM — sospechoso de la bomba retardada que mataba el sistema 1-3s
+	 * despues del 6º ciclo (moria EN LA PAUSA, sin suspend en vuelo). No
+	 * lo necesitamos: el thermal mainline ya cubre eso. Cada enter hace
+	 * reset+refetch igualmente. */
+	spm_w(s, SPM_PCM_CON0, CON0_CFG_KEY | CON0_PCM_SW_RESET);
+	spm_w(s, SPM_PCM_CON0, CON0_CFG_KEY);
+
 	if (dbg)
 		dev_err(s->dev, "PCM ASSERT: PC=%u r13=0x%x evsta=0x%x\n",
 			dbg, r13, evsta);
