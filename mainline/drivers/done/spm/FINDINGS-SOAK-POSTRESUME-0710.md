@@ -57,3 +57,14 @@ DDR self-refresh, 26M cortado, resume BootROM→0x10001800→cpu_resume. Activac
 spm_cpu_pdn=1 + spm_infra_pdn=1 + wake por EINT (botón/RTC) o PCM_TIMER; musb rebind post-ciclo.
 Pendiente de integración de producto: decidir cuándo el autosuspend usa mem-M4 vs freeze
 (p.ej. tras 20 min = híbrido actual → M4), y validar pantalla/periféricos tras M4 en uso GUI real.
+
+## M4 + GUI validado (0710) + caveat CONNSYS
+- **La GUI Phosh SOBREVIVE a un ciclo M4 completo** (usuario confirmó: lockscreen/escritorio OK tras
+  infra_pdn=1). El DSI/panel se re-inicializa solo en el resume → el pipeline DRM aguanta perder INFRA.
+  DATO CLAVE para Maemo/DSI: el panel SÍ recupera de una pérdida de INFRA; el bug de Maemo es del path
+  de MODESET (CRTC disable→enable), mecanismo distinto.
+- **CAVEAT M4: el CONNSYS (WiFi+BT) muere** con INFRA fuera (como el musb). Rebind del driver NO basta:
+  el combo-chip necesita el re-bring-up completo del WMT (secuencia de power del stack STP/WMT).
+  → INTEGRACIÓN: el autosuspend híbrido debe usar **M3 (INFRA on) para el idle diario** (mantiene
+  WiFi/BT/periféricos, ya ahorra el grueso), y reservar **M4 para "sueño profundo deliberado"**
+  (avión/mesita) con un hook de resume que re-levante CONNSYS+musb. M4 core = DONE y validado.
