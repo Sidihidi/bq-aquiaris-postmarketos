@@ -1,15 +1,19 @@
 #!/bin/busybox sh
-# init-menupick v2 (ROBUSTO) — initramfs con menu de seleccion de SO para el krillin.
+# init-menupick v3 — initramfs con menu de seleccion de SO para el krillin.
 # Muestra el menu en pantalla, lee Vol+/- + Power, y arranca el SO elegido.
 #
 # Entradas:
-#   0: postmarketOS (Alpine + Phosh) — switch_root a mmcblk1p1
-#   1: Android stock — kexec del kernel 3.10 desde /boot/android-boot.img (mmcblk1p1)
-#   2: Maemo Leste (Devuan + Hildon) — switch_root a mmcblk1p3
+#   0: postmarketOS (Alpine + Phosh) — switch_root a LABEL=pmos (SD p1)
+#   1: Android stock — kexec del kernel 3.10 desde /boot/android-boot.img (particion pmos)
+#   2: Maemo Leste (Devuan + Hildon) — switch_root a LABEL=maemo (SD p3)
 #
 # v2: boot_rootfs() robusto — espera el device, reintenta el mount, cae a -o noload
 # si el journal esta sucio, acepta /sbin/init como fichero O symlink (-e/-L), remonta rw,
 # y solo va a EMERGENCIA si de verdad no hay rootfs arrancable.
+# v3: resolve_dev() — resuelve el rootfs por LABEL (findfs) con fallback al device fijo.
+#     Complementa los aliases mmc0/mmc1 del DTS que clavan eMMC=mmcblk0 y SD=mmcblk1
+#     (sin aliases el orden de probe era aleatorio: la SD salia a veces como mmcblk0,
+#     el blkdevparts= del LK le enmascaraba la tabla real y el boot moria en emergencia).
 
 BB=/bin/busybox
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
@@ -20,7 +24,19 @@ $BB mount -t devtmpfs dev  /dev   2>/dev/null
 $BB mount -t tmpfs    tmp  /tmp   2>/dev/null
 
 klog() { echo "menupick: $*" > /dev/kmsg 2>/dev/null; }
-klog "init v2 started"
+klog "init v3 started"
+
+# resolve_dev <label> <fallback> — device por LABEL de filesystem; si no aparece, fallback.
+resolve_dev() {
+    lbl="$1"; fb="$2"
+    k=0
+    while [ $k -lt 12 ]; do
+        d=$($BB findfs LABEL="$lbl" 2>/dev/null)
+        if [ -n "$d" ] && [ -b "$d" ]; then echo "$d"; return 0; fi
+        $BB sleep 1; k=$((k+1))
+    done
+    echo "$fb"
+}
 
 # boot_rootfs <device> — monta el rootfs ext4 y hace switch_root. NO vuelve si tiene exito.
 # Devuelve 1 si no se pudo (para caer al siguiente fallback).
@@ -67,15 +83,17 @@ klog "seleccion=$CHOICE"
 
 case "$CHOICE" in
     2)
-        klog "-> Maemo Leste (mmcblk1p3)"
-        boot_rootfs /dev/mmcblk1p3
+        DEV=$(resolve_dev maemo /dev/mmcblk1p3)
+        klog "-> Maemo Leste ($DEV)"
+        boot_rootfs "$DEV"
         klog "Maemo no arranco -> fallback pmOS"
-        boot_rootfs /dev/mmcblk1p1
+        boot_rootfs "$(resolve_dev pmos /dev/mmcblk1p1)"
         ;;
     1)
         klog "-> Android (kexec)"
+        SDP=$(resolve_dev pmos /dev/mmcblk1p1)
         $BB mkdir -p /sdboot
-        if $BB mount -t ext4 -o ro,noload /dev/mmcblk1p1 /sdboot 2>/dev/null; then
+        if $BB mount -t ext4 -o ro,noload "$SDP" /sdboot 2>/dev/null; then
             IMG=/sdboot/boot/android-boot.img
             if [ -f "$IMG" ]; then
                 /sbin/kexec --type=zImage --load="$IMG" 2>/dev/null || \
@@ -88,11 +106,12 @@ case "$CHOICE" in
             $BB umount /sdboot 2>/dev/null
         fi
         klog "Android no arranco -> fallback pmOS"
-        boot_rootfs /dev/mmcblk1p1
+        boot_rootfs "$(resolve_dev pmos /dev/mmcblk1p1)"
         ;;
     *)
-        klog "-> postmarketOS (mmcblk1p1)"
-        boot_rootfs /dev/mmcblk1p1
+        DEV=$(resolve_dev pmos /dev/mmcblk1p1)
+        klog "-> postmarketOS ($DEV)"
+        boot_rootfs "$DEV"
         ;;
 esac
 

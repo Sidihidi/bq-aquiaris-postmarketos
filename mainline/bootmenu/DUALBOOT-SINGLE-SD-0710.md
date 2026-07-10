@@ -52,4 +52,19 @@ con `ssh-keygen -R 172.16.42.1` en la Pi (los warnings no bloquean el comando, p
 - ⏳ **SIGUIENTE: que Maemo bootee BIEN del todo** (llegar a Hildon con display/táctil/servicios) — el
   `switch_root` funciona; falta pulir el arranque del rootfs de Maemo en sí.
 
-*Sesión Mac (Fable 5), 2026-07-10. Ambos SO arrancan desde una SD; init v2 elimina las caídas a emergencia.*
+## FIX v3 + aliases mmc (0710 tarde): la flakiness REAL era un swap de controladores
+Con el init v2 seguía cayendo a emergencia a menudo ("`Can't lookup blockdev`"). El pstore del boot
+fallido reveló la causa: **el orden de probe de los dos controladores MSDC es aleatorio** — a veces la
+**SD enumera como `mmcblk0` y el eMMC como `mmcblk1`**. Consecuencias en un boot intercambiado:
+1. `mmcblk1p1/p3` (SD esperada) no existe → emergencia tras 25 s.
+2. **Peor**: el `blkdevparts=mmcblk0:...` del LK (tabla del eMMC) se aplica a la **SD**, enmascarando
+   su tabla real con particiones falsas (`p1(ebr1) p2(protect_f)...`) → riesgo de corrupción.
+
+**Fix doble (boot-menupick7.img, md5 `fe292daf…`):**
+- **DTS `aliases { mmc0 = &mmc0; mmc1 = &mmc1; }`** — clava eMMC=mmcblk0 y SD=mmcblk1 (el core mmc
+  respeta los aliases del DT). Esta es la solución de fondo.
+- **init v3**: `resolve_dev()` resuelve el rootfs por **LABEL** (`findfs LABEL=pmos|maemo`, el busybox
+  del initrd trae `findfs`/`blkid`) con fallback al device fijo. Cinturón y tirantes.
+
+*Sesión Mac (Fable 5), 2026-07-10. Ambos SO arrancan desde una SD; v2 robusteció el mount, v3+aliases
+matan la causa raíz de las caídas a emergencia.*
