@@ -1,8 +1,19 @@
 # Accdet MT6323 — jack de auriculares + botones inline (sesión drivers 0709)
 
-> **Estado: CÓDIGO COMPLETO + COMPILA** (`mt6323-accdet.ko`). **NO probado en HW.**
-> Port del downstream `accdet/mt6582/accdet.c` (1613 L) a un driver mainline compacto (~450 L),
+> **Estado: v2 — CÓDIGO COMPLETO + COMPILA + fixes de la verificación APLICADOS**
+> (`mt6323-accdet.ko`). **NO probado en HW.**
+> Port del downstream `accdet/mt6582/accdet.c` (1613 L) a un driver mainline compacto (~500 L),
 > con la config del krillin horneada (EINT + multi-key + modo 2.8V).
+
+## v2 (0709 noche) — los 6 fixes de `VERIFICACION-DRIVERS-PARALELA-0709.md` aplicados
+1. ✅ **auxadc switch** (bloqueante): la lectura de tecla ahora rodea el ADC con `RSV=0x5A20`
+   (accdet→AUXADC on) y restaura `0x5A10` después.
+2. ✅ **PWM boost** (bloqueante): `PWM_THRESH=PWM_WIDTH` (duty 100%) durante la medida, restaura 0x400.
+3. ✅ **IDLE_EN** (probable bloqueante): `SWCTRL = 0x07 | (0x07<<4) = 0x77` en power_on.
+4. ✅ Quitado el write `0x0400` bit14 (era del mux FSA8049, que el krillin no monta).
+5. ✅ `RG_VBUF_EN` (0x758 bit4) activado alrededor del read del ADC.
+6. ✅ Plug-out deja `RSV=0x1A10` (consumo).
+Con esto el veredicto del verificador pasa a **LISTO-PARA-HW** (jack + mic + 3 botones).
 
 ## Qué da
 - **Detección de jack**: SW_HEADPHONE_INSERT + SW_MICROPHONE_INSERT (input switches — WirePlumber
