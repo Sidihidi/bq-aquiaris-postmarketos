@@ -23,3 +23,19 @@
 - `echo 1 > /sys/module/mt6582_spm/parameters/spm_cpu_pdn; echo 10 > .../spm_wake_sec`
 - bucle `echo mem > /sys/power/state` con log a /root/ y sync; heartbeat 200ms + regs a /dev/kmsg.
 - Tras el WDT reset: el guardián (00-pstore-save.start) deja el console-ramoops en /root/pstore-logs/.
+
+## Ronda 2 (0710 tarde, kernels #277-#278) — más exoneraciones
+- **L2CTLR/CA7_CACHE_CONFIG: REFUTADO** — instrumentado compare+restore post-resume
+  (LK: L2CTLR=0x3800001, CACFG=0x60): **drift=0 en todos los ciclos** y murió igual (ciclo 6).
+  El restore queda en el driver (inofensivo, defensa en profundidad).
+- **musb/usb0: REFUTADO** — soak con musb desligado TODO el rato: murió en ciclo ~5.
+- Patrón consolidado: muerte en ciclo 4-6, ~2s post-resume, silenciosa (heartbeats cortados).
+
+## Exonerados (todos por experimento directo)
+WiFi · daemons de polling · tail "normal" del PCM · alarma RTC · config L2/MCUSYS · musb/usb0
+
+## Cola de hipótesis (próxima sesión)
+1. **CONNSYS/BT**: el BTIF+STP+chip conn estuvo ACTIVO en todos los soaks (hci0 up, btif-rx thread).
+   Test: soak con `mt6582_consys_func_off` de BT/FM o rmmod-equivalente (WMT off).
+2. Integridad DRAM tras self-refresh repetido: memtester entre ciclos.
+3. El 26M/CLKSQ settle acumulando (SPM_CLK_SETTLE re-cálculo cada enter).
