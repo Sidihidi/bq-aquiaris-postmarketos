@@ -1,0 +1,8 @@
+#!/bin/sh
+# Watchdog TOPRGU en manos de userspace (0710). CLAVE para el suspend profundo
+# (SPM M3/M4): el LK deja el WDT hardware armado (31s) y el auto-ping del kernel
+# va en CLOCK_MONOTONIC, que SE CONGELA durante cada ciclo de sueño mientras el
+# hardware cuenta tiempo real -> tras ~4-6 ciclos el WDT expiraba = el "cuelgue
+# post-resume fantasma" del soak (nunca fue un crash). Con el device ABIERTO,
+# mtk-wdt lo para/rearranca en cada suspend (watchdog_active=true). 12/12 validado.
+pgrep watchdog >/dev/null 2>&1 || watchdog -T 30 -t 5 /dev/watchdog

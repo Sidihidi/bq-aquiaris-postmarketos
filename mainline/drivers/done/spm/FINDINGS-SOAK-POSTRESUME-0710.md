@@ -39,3 +39,13 @@ WiFi · daemons de polling · tail "normal" del PCM · alarma RTC · config L2/M
    Test: soak con `mt6582_consys_func_off` de BT/FM o rmmod-equivalente (WMT off).
 2. Integridad DRAM tras self-refresh repetido: memtester entre ciclos.
 3. El 26M/CLKSQ settle acumulando (SPM_CLK_SETTLE re-cálculo cada enter).
+
+## ✅ RAÍZ ENCONTRADA Y RESUELTA (0710): era el WATCHDOG, nunca un cuelgue
+- mtk-wdt (TOPRGU) armado por el LK con timeout=31s; sin userspace que lo abra, lo rearma el
+  [watchdogd] del kernel via hrtimer (CLOCK_MONOTONIC) → los sueños M3 CONGELAN el monotonic
+  mientras el HW cuenta tiempo real → los pings se retrasan acumulativamente → reset a los ~4-6
+  ciclos. Explica TODO: muerte súbita sin oops, en idle, exoneración de todos los subsistemas,
+  DRAM íntegra.
+- FIX: daemon watchdog en userspace (busybox `watchdog -T 30 -t 5 /dev/watchdog`, local.d
+  01-watchdog.start) → watchdog_active=true → mtk_wdt_suspend PARA el HW en cada ciclo.
+- VALIDADO: soak 12/12 ciclos M3 limpios, suspend_stats=12, sin reboot. **M3 ESTABLE.**
