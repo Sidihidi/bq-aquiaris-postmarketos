@@ -1,131 +1,103 @@
 #!/bin/busybox sh
-# init-menupick — initramfs con menu de seleccion de SO para el krillin.
+# init-menupick v2 (ROBUSTO) — initramfs con menu de seleccion de SO para el krillin.
 # Muestra el menu en pantalla, lee Vol+/- + Power, y arranca el SO elegido.
 #
 # Entradas:
 #   0: postmarketOS (Alpine + Phosh) — switch_root a mmcblk1p1
-#   1: Android stock — kexec del kernel 3.10 desde /boot/android-boot.img
+#   1: Android stock — kexec del kernel 3.10 desde /boot/android-boot.img (mmcblk1p1)
 #   2: Maemo Leste (Devuan + Hildon) — switch_root a mmcblk1p3
+#
+# v2: boot_rootfs() robusto — espera el device, reintenta el mount, cae a -o noload
+# si el journal esta sucio, acepta /sbin/init como fichero O symlink (-e/-L), remonta rw,
+# y solo va a EMERGENCIA si de verdad no hay rootfs arrancable.
 
 BB=/bin/busybox
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 
-# Montar lo basico
 $BB mount -t proc     proc /proc  2>/dev/null
 $BB mount -t sysfs    sys  /sys   2>/dev/null
 $BB mount -t devtmpfs dev  /dev   2>/dev/null
 $BB mount -t tmpfs    tmp  /tmp   2>/dev/null
 
-echo "menupick: init started" > /dev/kmsg 2>/dev/null
+klog() { echo "menupick: $*" > /dev/kmsg 2>/dev/null; }
+klog "init v2 started"
 
-# Esperar a que el framebuffer y los input devices aparezcan
-i=0
-while [ $i -lt 30 ]; do
-    [ -e /dev/fb0 ] && [ -e /dev/input/event0 ] && break
-    $BB sleep 1; i=$((i+1))
-done
+# boot_rootfs <device> — monta el rootfs ext4 y hace switch_root. NO vuelve si tiene exito.
+# Devuelve 1 si no se pudo (para caer al siguiente fallback).
+boot_rootfs() {
+    dev="$1"
+    # 1) esperar a que el block device exista (SD tarda en enumerar)
+    i=0; while [ $i -lt 25 ]; do [ -b "$dev" ] && break; $BB sleep 1; i=$((i+1)); done
+    [ -b "$dev" ] || { klog "no existe $dev"; return 1; }
+    $BB mkdir -p /newroot
+    # 2) montar rw: plano, y si falla (journal sucio) con noload. Reintentar cada uno.
+    mounted=0
+    for opt in "" "-o noload"; do
+        j=0; while [ $j -lt 3 ]; do
+            if $BB mount -t ext4 $opt "$dev" /newroot 2>/dev/null; then mounted=1; break; fi
+            $BB sleep 1; j=$((j+1))
+        done
+        [ "$mounted" = 1 ] && break
+    done
+    if [ "$mounted" != 1 ]; then klog "mount $dev FALLO (todas las opciones)"; return 1; fi
+    # 3) validar init: fichero real O symlink (el symlink resuelve tras el pivot; -e solo
+    #    seguiria el enlace contra el root del initramfs y daria falso negativo).
+    if [ -e /newroot/sbin/init ] || [ -L /newroot/sbin/init ] || [ -e /newroot/init ]; then
+        klog "montado $dev OK -> switch_root"
+        $BB mount -o remount,rw /newroot 2>/dev/null   # por si vino de noload
+        $BB mount --move /dev  /newroot/dev  2>/dev/null
+        $BB mount --move /proc /newroot/proc 2>/dev/null
+        $BB mount --move /sys  /newroot/sys  2>/dev/null
+        exec $BB switch_root /newroot /sbin/init
+    fi
+    klog "sin /sbin/init en $dev"
+    $BB umount /newroot 2>/dev/null
+    return 1
+}
 
+# --- Menu en pantalla ---
+i=0; while [ $i -lt 30 ]; do [ -e /dev/fb0 ] && [ -e /dev/input/event0 ] && break; $BB sleep 1; i=$((i+1)); done
 if [ ! -e /dev/fb0 ]; then
-    echo "menupick: NO fb0 — auto-boot pmOS" > /dev/kmsg 2>/dev/null
-    CHOICE=0
+    klog "NO fb0 — auto-boot pmOS"; CHOICE=0
 else
-    # Ejecutar el menu. Devuelve 0, 1 o 2 por stdout.
-    # Auto-boot tras 10s si no hay seleccion.
     CHOICE=$(/bin/menupick "BQ Aquaris E4.5" "postmarketOS" "Android" "Maemo Leste" 2>/dev/null)
     [ -z "$CHOICE" ] && CHOICE=0
 fi
-
-echo "menupick: seleccion=$CHOICE" > /dev/kmsg 2>/dev/null
+klog "seleccion=$CHOICE"
 
 case "$CHOICE" in
-    0)
-        # === postmarketOS: switch_root a mmcblk1p1 (SD) ===
-        echo "menupick: arrancando postmarketOS..." > /dev/kmsg 2>/dev/null
-        i=0; while [ $i -lt 20 ]; do [ -b /dev/mmcblk1p1 ] && break; $BB sleep 1; i=$((i+1)); done
-        $BB mkdir -p /newroot
-        if $BB mount -t ext4 /dev/mmcblk1p1 /newroot 2>/dev/null && [ -e /newroot/sbin/init ]; then
-            $BB mount --move /dev  /newroot/dev  2>/dev/null
-            $BB mount --move /proc /newroot/proc 2>/dev/null
-            $BB mount --move /sys  /newroot/sys  2>/dev/null
-            exec $BB switch_root /newroot /sbin/init
-        fi
-        echo "menupick: FALLO mount pmOS — emergencia" > /dev/kmsg 2>/dev/null
+    2)
+        klog "-> Maemo Leste (mmcblk1p3)"
+        boot_rootfs /dev/mmcblk1p3
+        klog "Maemo no arranco -> fallback pmOS"
+        boot_rootfs /dev/mmcblk1p1
         ;;
-
     1)
-        # === Android: kexec del kernel 3.10 ===
-        echo "menupick: arrancando Android via kexec..." > /dev/kmsg 2>/dev/null
-        # Montar la particion boot de la SD para leer android-boot.img
+        klog "-> Android (kexec)"
         $BB mkdir -p /sdboot
-        # Android-boot.img esta en la SD (mmcblk1p1) o en una particion dedicada
-        if $BB mount -t ext4 /dev/mmcblk1p1 /sdboot 2>/dev/null; then
-            ANDROID_IMG=/sdboot/boot/android-boot.img
-            if [ -f "$ANDROID_IMG" ]; then
-                echo "menupick: encontrado android-boot.img, lanzando kexec..." > /dev/kmsg 2>/dev/null
-                # kexec del boot.img completo (kexec lo parsea)
-                /sbin/kexec --type=zImage --load="$ANDROID_IMG" 2>/dev/null || \
-                /sbin/kexec --load="$ANDROID_IMG" --command-line="console=ttyMT0,921600n1 console=tty0 clk_ignore_unused" 2>/dev/null
-                if [ $? -eq 0 ]; then
-                    $BB umount /sdboot 2>/dev/null
-                    exec /sbin/kexec -e
-                fi
-                echo "menupick: kexec fallo — fallback a pmOS" > /dev/kmsg 2>/dev/null
+        if $BB mount -t ext4 -o ro,noload /dev/mmcblk1p1 /sdboot 2>/dev/null; then
+            IMG=/sdboot/boot/android-boot.img
+            if [ -f "$IMG" ]; then
+                /sbin/kexec --type=zImage --load="$IMG" 2>/dev/null || \
+                /sbin/kexec --load="$IMG" --command-line="console=ttyMT0,921600n1 console=tty0 clk_ignore_unused" 2>/dev/null
+                if [ $? -eq 0 ]; then $BB umount /sdboot 2>/dev/null; exec /sbin/kexec -e; fi
+                klog "kexec fallo"
             else
-                echo "menupick: no android-boot.img en SD — fallback a pmOS" > /dev/kmsg 2>/dev/null
+                klog "no android-boot.img en la SD"
             fi
             $BB umount /sdboot 2>/dev/null
-        else
-            echo "menupick: no SD para android-boot.img — fallback a pmOS" > /dev/kmsg 2>/dev/null
         fi
-        # Fallback: arrancar pmOS
-        CHOICE=0
-        i=0; while [ $i -lt 20 ]; do [ -b /dev/mmcblk1p1 ] && break; $BB sleep 1; i=$((i+1)); done
-        $BB mkdir -p /newroot
-        if $BB mount -t ext4 /dev/mmcblk1p1 /newroot 2>/dev/null && [ -e /newroot/sbin/init ]; then
-            $BB mount --move /dev  /newroot/dev  2>/dev/null
-            $BB mount --move /proc /newroot/proc 2>/dev/null
-            $BB mount --move /sys  /newroot/sys  2>/dev/null
-            exec $BB switch_root /newroot /sbin/init
-        fi
+        klog "Android no arranco -> fallback pmOS"
+        boot_rootfs /dev/mmcblk1p1
         ;;
-
-    2)
-        # === Maemo Leste: switch_root a mmcblk1p3 (SD) ===
-        echo "menupick: arrancando Maemo Leste..." > /dev/kmsg 2>/dev/null
-        i=0; while [ $i -lt 20 ]; do [ -b /dev/mmcblk1p3 ] && break; $BB sleep 1; i=$((i+1)); done
-        if [ ! -b /dev/mmcblk1p3 ]; then
-            echo "menupick: no mmcblk1p3 — fallback a pmOS" > /dev/kmsg 2>/dev/null
-            CHOICE=0
-            i=0; while [ $i -lt 20 ]; do [ -b /dev/mmcblk1p1 ] && break; $BB sleep 1; i=$((i+1)); done
-            $BB mkdir -p /newroot
-            $BB mount -t ext4 /dev/mmcblk1p1 /newroot 2>/dev/null && [ -e /newroot/sbin/init ] && {
-                $BB mount --move /dev  /newroot/dev  2>/dev/null
-                $BB mount --move /proc /newroot/proc 2>/dev/null
-                $BB mount --move /sys  /newroot/sys  2>/dev/null
-                exec $BB switch_root /newroot /sbin/init
-            }
-        else
-            $BB mkdir -p /newroot
-            if $BB mount -t ext4 /dev/mmcblk1p3 /newroot 2>/dev/null && [ -e /newroot/sbin/init ]; then
-                $BB mount --move /dev  /newroot/dev  2>/dev/null
-                $BB mount --move /proc /newroot/proc 2>/dev/null
-                $BB mount --move /sys  /newroot/sys  2>/dev/null
-                exec $BB switch_root /newroot /sbin/init
-            fi
-            echo "menupick: FALLO mount Maemo — fallback a pmOS" > /dev/kmsg 2>/dev/null
-            CHOICE=0
-            $BB mount -t ext4 /dev/mmcblk1p1 /newroot 2>/dev/null && [ -e /newroot/sbin/init ] && {
-                $BB mount --move /dev  /newroot/dev  2>/dev/null
-                $BB mount --move /proc /newroot/proc 2>/dev/null
-                $BB mount --move /sys  /newroot/sys  2>/dev/null
-                exec $BB switch_root /newroot /sbin/init
-            }
-        fi
+    *)
+        klog "-> postmarketOS (mmcblk1p1)"
+        boot_rootfs /dev/mmcblk1p1
         ;;
 esac
 
-# === EMERGENCIA: si todo falla, shell por USB ===
-echo "menupick: EMERGENCIA — dropbear por USB" > /dev/kmsg 2>/dev/null
+# === EMERGENCIA: si todo falla, shell por USB (dropbear en usb0) ===
+klog "EMERGENCIA — dropbear por USB (172.16.42.1)"
 $BB --install -s /bin 2>/dev/null
 $BB mkdir -p /dev/pts; $BB mount -t devpts devpts /dev/pts 2>/dev/null
 [ -e /dev/watchdog ] && printf 'V' > /dev/watchdog 2>/dev/null
