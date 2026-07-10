@@ -89,3 +89,13 @@ OK) → es corrupción de DATOS de ficheros (busybox/libc), que un fsck NO resta
 mmcblk1p1 desde initramfs o desde la Pi con la SD fuera + restaurar binarios; (C) reflashear el rootfs
 pmOS. **El código del proyecto está SEGURO en GitHub — solo el sistema instalado en la SD está dañado.**
 LECCIÓN: nunca forzar apagados en bootloop sin necesidad extrema; usar fastboot para romper el bucle.
+
+## ✅ CORRECCIÓN del INCIDENTE 0710-b: el rootfs NO estaba corrupto (era RUNTIME)
+Auditoría completa de la SD en la Pi (checksums apk de los 37724 ficheros): **37709 ok, solo 15
+"diferentes" y TODOS son configs /etc/ editadas legítimamente** (passwd, group, inittab, fstab,
+sshd_config... contenido válido verificado). busybox, libc-musl, coreutils, phosh: ÍNTEGROS. fsck de
+las 3 particiones (pmos/maemo/SHARED) = limpias. **El segfault de id/ls/cat en el móvil NO era el
+disco → era ESTADO DE RUNTIME corrupto en RAM** (secuela de ciclos M4 + apagados forzados + hardware
+en estado raro). Pronóstico: SD sana → devolver + arranque limpio con #278 (menupick9) debe funcionar.
+Lección revisada: los apagados forzados NO corrompieron el FS (ext4+journal aguantó); el riesgo real
+fue el estado de runtime, que un boot limpio resetea. Aún así, romper bootloops por fastboot > apagón.
