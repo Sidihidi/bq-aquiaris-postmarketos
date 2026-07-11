@@ -1,0 +1,12 @@
+#!/sbin/openrc-run
+description="Disable hildon-desktop rotation"
+depend() {
+    after hildon-desktop
+}
+start() {
+    ebegin "Disabling rotation"
+    su user -c "gconftool-2 -s -t bool /apps/osso/hildon-desktop/ui_can_rotate false" 2>/dev/null
+    su user -c "gconftool-2 -s -t bool /apps/osso/hildon-desktop/orientation_lock true" 2>/dev/null
+    su user -c "gconftool-2 -s -t bool /apps/osso/hildon-desktop/orientation_lock_position false" 2>/dev/null
+    eend 0
+}
