@@ -99,3 +99,25 @@ disco → era ESTADO DE RUNTIME corrupto en RAM** (secuela de ciclos M4 + apagad
 en estado raro). Pronóstico: SD sana → devolver + arranque limpio con #278 (menupick9) debe funcionar.
 Lección revisada: los apagados forzados NO corrompieron el FS (ext4+journal aguantó); el riesgo real
 fue el estado de runtime, que un boot limpio resetea. Aún así, romper bootloops por fastboot > apagón.
+
+## ✅✅ DSI/LCM — SOBREVIVE AL MODESET (0711, #283 / boot-menupick13, fcfedf35)
+El panel Himax hx8389 se quedaba NEGRO tras cualquier modeset (rotación phosh/DPMS; y la rotación
+inicial de hildon = el "Maemo no bootea": logs del kernel → negro). **RAÍZ**: los DCS del panel
+re-enviados en `.enable`/`.disable` DENTRO del atomic commit agotan el timeout de
+`mtk_dsi_wait_for_idle`/`wait_for_irq_done` → `mtk_dsi_reset_engine()` a mitad del commit → rompe
+frame-done → `commit wait timed out` → pipeline apagado. **FIX (panel, esencial)**: bring-up del
+panel UNA vez (flag `bool up`; primer prepare+enable con power+reset+DCS init) y luego
+`disable`/`unprepare`/re-`prepare`/re-`enable` = NO-OPS → cero DCS en modesets → cero reset_engine.
+Independiente de `mtk_dsi.c`. **Validado HW**: pmOS por SSH (`wlr-randr --output DSI-1 --transform
+90` → dmesg limpio + grim girada con contenido) y Maemo (dmesg limpio, Xorg completa el modeset).
+Fuente + findings en `drivers/done/dsi/` (panel md5 1652efdf). Residual Maemo = hildon Clutter 0.8
+eglx sobre Mesa/lima que no pinta el escritorio (`.xsession-errors`: xrecord/canberra) → **NO es el
+DSI, es capa Clutter/GL (territorio Mac, ver HANDOFF-DRIVERS-BOOT6)**.
+
+### ⚠️ INCIDENTE 0711 — colisión de sesiones en el árbol DSI
+La sesión Mac y la principal editaban `mtk_dsi.c` del MISMO build-krillin a la vez (Mac añadió el
+hack `mode_changed`/reinit + `stop`→reset_engine; cambió bec2560d→6ec2d51d DURANTE mi build) y
+reconstruyó `boot-menupick-dsifix.img` (d9a1346b→e48413db) sin marcarlo. Se resolvió porque el fix
+vive en el PANEL (neutraliza el hack de Mac). **REGLA reforzada**: ficheros DSI (`mtk_dsi.c`,
+`panel-himax-hx8389.c`) = UN dueño a la vez; el usuario asignó el DSI a la sesión principal (0711).
+Backups en la Pi: `*.GANADOR-0711`, `mtk_dsi.c.bak-mac-reinit-0711`, imagen `boot-menupick13-DSIFIX-GANADOR.img`.
