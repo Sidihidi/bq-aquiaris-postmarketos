@@ -1,0 +1,21 @@
+#!/sbin/openrc-run
+description="USB networking + SSH for krillin"
+depend() {
+    after modules
+    before net
+}
+start() {
+    ebegin "Starting krillin USB networking"
+    mkdir -p /run/sshd
+    ip link set usb0 up 2>/dev/null
+    ip addr add 172.16.42.1/24 dev usb0 2>/dev/null
+    ip route add default via 172.16.42.2 2>/dev/null
+    echo "nameserver 8.8.8.8" > /etc/resolv.conf
+    /usr/sbin/sshd 2>/dev/null
+    eend 0
+}
+stop() {
+    ebegin "Stopping krillin USB"
+    pkill sshd 2>/dev/null
+    eend 0
+}
