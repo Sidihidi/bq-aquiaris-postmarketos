@@ -1,0 +1,8 @@
+# Fix: mtk_crtc_atomic_disable espera drm_crtc_wait_one_vblank que hace timeout
+# cuando el DSI esta busy tras modeset/rotacion. Reemplazar por msleep(50).
+#
+# En mtk_crtc.c, funcion mtk_crtc_atomic_disable:
+# ANTES: drm_crtc_wait_one_vblank(crtc);
+# DESPUES: msleep(50);
+#
+# Tambien aniadir: #include <linux/delay.h> al inicio del fichero
