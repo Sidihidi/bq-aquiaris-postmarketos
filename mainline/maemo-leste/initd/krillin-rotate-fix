@@ -1,0 +1,13 @@
+#!/sbin/openrc-run
+description="Fix display rotation for krillin"
+depend() {
+    after hildon-desktop
+}
+start() {
+    ebegin "Fixing display rotation"
+    (
+        sleep 10
+        DISPLAY=:0 xrandr --output DSI-1 --rotate normal 2>/dev/null
+    ) &
+    eend 0
+}
