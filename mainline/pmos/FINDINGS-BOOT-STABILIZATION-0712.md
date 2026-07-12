@@ -50,6 +50,17 @@ skew. El sistema limpiaba a medias (sshd + phosh por caminos propios) = el "arra
 - **Verificar en reboot real** cuando la batería esté segura (config correcta + verificada en vivo,
   pero el boot fresco es la prueba definitiva).
 
+## ✅ VERIFICADO EN REBOOT REAL (0712)
+Reboot limpio → **boot LIMPIO**: uptime 58s, **hora correcta sin skew** (fix hwclock OK),
+`rc.log` sin un solo ERROR/cascada/segfault, y `localmount, dbus, networkmanager (RUNNING),
+bluetooth, chronyd, local` = **started solos**. dbus socket, iio-sensor-proxy, carga y phosh vivos.
+- **Única fragilidad restante**: `polkit` (need dbus) perdió una **carrera de arranque** contra el
+  system bus → falló en OpenRC. Pero polkit es **dbus-activatable** → `polkitd` acaba corriendo
+  activado por D-Bus bajo demanda (el claim de sensores de monitor-sensor funciona = accel+luz+prox).
+- **Blindaje añadido**: `etc/local.d/zzz-boot-heal.start` — red de seguridad que en 2º plano
+  reintenta dbus/polkit chequeando el PROCESO real (`pgrep -x polkitd`, no la contabilidad de OpenRC,
+  para no pelearse con la instancia dbus-activada). Cubre esta y futuras carreras contra dbus.
+
 ## Para Maemo (el otro rootfs del dual-boot)
 Este fix es de OpenRC (pmOS). Maemo tiene su propio init → necesita su propia auditoría. **Lo
 compartido que ya mejora en ambos**: el RTC mt6323 quedó puesto a hora real (hardware común), y el

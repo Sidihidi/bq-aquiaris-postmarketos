@@ -1,0 +1,15 @@
+#!/bin/sh
+# zzz-boot-heal.start — red de seguridad de fin de boot (estabilización 0712).
+# Reintenta en 2º plano los servicios que pueden PERDER una carrera de arranque contra
+# el system D-Bus. Visto: polkit (need dbus) arranca antes de que el bus atienda -> falla.
+# Chequea el PROCESO real (no la contabilidad de OpenRC): polkit es dbus-activatable, así
+# que si polkitd ya corre (activado por D-Bus) NO se toca; solo se arranca si NO hay proceso.
+(
+  for try in 1 2 3; do
+    sleep 3
+    pgrep -x dbus-daemon >/dev/null 2>&1 || rc-service dbus start >/dev/null 2>&1
+    pgrep -x polkitd     >/dev/null 2>&1 || rc-service polkit start >/dev/null 2>&1
+    pgrep -x polkitd >/dev/null 2>&1 && break
+  done
+) >/dev/null 2>&1 &
+exit 0
