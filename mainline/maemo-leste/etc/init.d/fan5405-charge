@@ -1,0 +1,8 @@
+#!/sbin/openrc-run
+# Mantenedor de carga FAN5405 para Maemo Leste (dual-boot krillin).
+# Ejecuta el daemon python de i2c-directo (no necesita i2c-tools).
+description="FAN5405 charge maintainer"
+command=/usr/bin/python3
+command_args="/usr/local/sbin/fan5405-charge.py"
+command_background=true
+pidfile=/run/fan5405-charge.pid
