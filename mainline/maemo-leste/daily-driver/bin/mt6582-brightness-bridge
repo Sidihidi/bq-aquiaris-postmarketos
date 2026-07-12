@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+# mt6582-brightness-bridge (Maemo) — AUTORIDAD del backlight, ligera.
+#   tklock "locked"   -> backlight 0 (apaga al bloquear)
+#   tklock "unlocked" -> nivel del slider (gconf display_brightness 1..5 -> 2..max)
+# EFICIENCIA (tras el thrash de 1GB): cachea el bus de sesion (no escanea /proc cada vez),
+# lee el slider por gconf solo 1 de cada 5 vueltas, e intervalo 2s. Minimiza spawns.
+import os, time, glob, subprocess
+
+BL = "/sys/class/backlight/backlight"
+_bus = None
+
+def ri(p, d=None):
+    try: return int(open(p).read().strip())
+    except Exception: return d
+
+def wr(v):
+    try: open(BL + "/brightness", "w").write(str(int(v)))
+    except Exception: pass
+
+def find_bus():
+    for envf in glob.glob("/proc/[0-9]*/environ"):
+        try:
+            pid = envf.split("/")[2]
+            if open("/proc/%s/comm" % pid).read().strip() != "hildon-desktop":
+                continue
+            for kv in open(envf, "rb").read().split(b"\0"):
+                if kv.startswith(b"DBUS_SESSION_BUS_ADDRESS="):
+                    return kv.split(b"=", 1)[1].decode()
+        except Exception:
+            continue
+    return None
+
+def tklock():
+    try:
+        out = subprocess.check_output(
+            ["dbus-send", "--system", "--print-reply", "--dest=com.nokia.mce",
+             "/com/nokia/mce/request", "com.nokia.mce.request.get_tklock_mode"],
+            text=True, timeout=4, stderr=subprocess.DEVNULL)
+        return "locked" if '"locked"' in out else "unlocked"
+    except Exception:
+        return "unlocked"
+
+def slider():
+    global _bus
+    for _ in range(2):
+        try:
+            env = dict(os.environ)
+            if _bus: env["DBUS_SESSION_BUS_ADDRESS"] = _bus
+            return int(subprocess.check_output(
+                ["gconftool-2", "-g", "/system/osso/dsm/display/display_brightness"],
+                env=env, text=True, timeout=5, stderr=subprocess.DEVNULL).strip())
+        except Exception:
+            _bus = find_bus()   # el bus cacheado fallo -> re-descubrir una vez
+    return 4
+
+def main():
+    maxb = ri(BL + "/max_brightness", 10) or 10
+    global _bus
+    _bus = find_bus()
+    prof = 4
+    i = 0
+    while True:
+        try:
+            if tklock() == "locked":
+                wr(0)
+            else:
+                if i % 5 == 0:       # leer el slider 1 de cada 5 vueltas (~10s)
+                    prof = slider()
+                wr(max(2, min(maxb, round(prof * maxb / 5.0))))
+        except Exception:
+            pass
+        i += 1
+        time.sleep(2)
+
+if __name__ == "__main__":
+    main()

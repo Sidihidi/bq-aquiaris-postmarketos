@@ -1,0 +1,15 @@
+#!/usr/bin/env python3
+# charge-status — estado del cargador FAN5405 por i2c DIRECTO (sin i2c-tools, para Maemo).
+# Formato compatible con el script `battery`: incluye "STAT=<estado>".
+import fcntl, os, sys
+try:
+    fd = os.open("/dev/i2c-0", os.O_RDWR)
+    fcntl.ioctl(fd, 0x0703, 0x6a)
+    os.write(fd, bytes([0x00]))
+    c0 = os.read(fd, 1)[0]
+    st = (c0 >> 4) & 3
+    name = {0: "READY", 1: "CARGANDO", 2: "COMPLETA", 3: "FALLO"}[st]
+    print("FAN5405 STAT=%s (CON0=0x%02x)" % (name, c0))
+except Exception:
+    print("STAT=READY")
+    sys.exit(0)
