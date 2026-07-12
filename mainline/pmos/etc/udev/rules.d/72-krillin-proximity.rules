@@ -1,0 +1,6 @@
+# tmd2772: umbral "cerca" para iio-sensor-proxy (lejos ~0-8; NEAR_LEVEL tuneable).
+# Sin esta propiedad, iio-sensor-proxy dice "Found proximity sensor but no
+# PROXIMITY_NEAR_LEVEL udev property" y NO expone la proximidad.
+# NOTA: el crudo tapado apenas sube (~18) -> el emisor IR necesita config del
+# tmd2772 (PPULSE/PDRIVE en DT) para separar cerca/lejos; pendiente (sin app consumidora).
+SUBSYSTEM=="iio", ATTR{name}=="tmd2772", ENV{PROXIMITY_NEAR_LEVEL}="100"

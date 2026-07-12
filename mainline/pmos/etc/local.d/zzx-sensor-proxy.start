@@ -1,0 +1,11 @@
+#!/bin/sh
+# Arranca el stack de sensores (system D-Bus + iio-sensor-proxy) de forma robusta.
+# CLAVE: en este boot OpenRC NO levanta dbus (dep 'localmount needs service root'),
+# y iio-sensor-proxy es un servicio del SYSTEM bus -> sin el system bus NO hay
+# auto-rotacion, ni ALS, ni proximidad via net.hadess.SensorProxy. Este script lo
+# garantiza pase lo que pase con OpenRC.
+mkdir -p /run/dbus
+pgrep -f "dbus-daemon --system" >/dev/null 2>&1 || dbus-daemon --system --fork
+sleep 1
+pgrep -f "libexec/iio-sensor-proxy" >/dev/null 2>&1 || \
+  start-stop-daemon --start --background --exec /usr/libexec/iio-sensor-proxy
