@@ -1,0 +1,10 @@
+#!/bin/sh
+[ -e /sys/module/test_power ] || insmod /usr/local/lib/test_power.ko 2>/dev/null
+# Guardia por el script CONCRETO: `--exec /usr/bin/python3` matchea cualquier python3
+# (start-stop-daemon ignora los args tras `--` al decidir "ya corre") -> si otro daemon
+# python arranca antes, este NO se lanzaba y `local` reportaba fallo. pgrep del path exacto
+# lo hace idempotente y sin confusion. `exit 0` para que el servicio `local` quede limpio.
+pgrep -f "/usr/local/bin/battery-upower" >/dev/null 2>&1 || \
+  start-stop-daemon --start --background --make-pidfile --pidfile /run/battery-upower.pid \
+    --exec /usr/bin/python3 -- /usr/local/bin/battery-upower
+exit 0
