@@ -48,6 +48,14 @@ alimentar). **Abriendo la app de cámara → dmesg muestra `[OV8865Raw]` streami
 la trasera es **OV8865** (8MP), **confirmando la inferencia** de `wip/camera/FEASIBILITY-CAMARA-0711.md`.
 OV8865 tiene driver mainline (`drivers/media/i2c/ov8865.c`) → vía RAW viable. Cámara = última prioridad.
 
+## NVRAM / NV del módem (extraído — material para M3, no H1)
+Set de NV extraído a la Pi (`~/mainline/downstream/stock-nvram-0713/`, NO en repo = datos del dispositivo):
+- `nvram.img` (5MB, raw, md5 `8cbdb4fe`) — partición nvram (mmcblk0 @0x400000).
+- `protect_f.img` / `protect_s.img` (10MB c/u, **ext4**, md5 `95a7a10b` / `c5519ab8`) — NV protegido (mirror).
+- `/data/nvram/md/NVRAM/NVD_IMEI/MP0B_001` (120B) = IMEI **CIFRADO** (MTK ofusca; patrón de 12B repetido,
+  no BCD en claro → no cross-check con el IMEI plaintext, que está en memoria local privada, NO aquí).
+Para M3 (registro en red) hará falta esta NV **intacta** (calibración RF + IMEI). Para H1/H2 no se usa.
+
 ## Siguiente (H1)
 Con el firmware y la identidad confirmados, H1 = añadir el dominio MTCMOS del MD a `mt6582-spm.c`
 (secuencia en el plan §1) **con config LIMPIO (sin EXTRA_FIRMWARE)** y el `ioremap` PEREZOSO
