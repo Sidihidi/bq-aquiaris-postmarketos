@@ -254,9 +254,21 @@ struct mt6582_spm {
 	struct device *dev;
 	void __iomem *base;
 	void __iomem *bootvec;	/* INFRACFG_AO+0x800: vector de resume del BootROM */
+	void __iomem *mcusys;	/* MCUSYS_CFGREG 0x10200000 (CA7_CACHE_CONFIG @0) */
+	u32 l2ctlr_boot;	/* L2CTLR del LK (latencias L2) — se pierde con el
+				 * MTCMOS del cluster; el cpu_wake_up stock lo repone */
+	u32 cacfg_boot;		/* CA7_CACHE_CONFIG del LK */
 	u32 *fw;		/* copia coherente (el IM la lee por DMA) */
 	dma_addr_t fw_phys;
 };
+
+static inline u32 read_l2ctlr(void)
+{
+	u32 v;
+
+	asm volatile("mrc p15, 1, %0, c9, c0, 2" : "=r"(v));
+	return v;
+}
 
 static struct mt6582_spm *gspm;
 
@@ -435,6 +447,30 @@ static int spm_suspend_enter(suspend_state_t state)
 		cpu_cluster_pm_enter();
 		pr_info("SPMDBG spm: cpu_suspend CPU0 dormant\n");
 		cpu_suspend(0, mt6582_spm_finisher);
+		/* HIPOTESIS ciclo-6 (0710): el MTCMOS del cluster resetea la
+		 * config del L2 (latencias) y CA7_CACHE_CONFIG que puso el LK;
+		 * correr con los valores de reset = inestabilidad marginal que
+		 * estalla tras N ciclos. Restaurar YA, y loguear la deriva
+		 * (si difiere => hipotesis CONFIRMADA). */
+		{
+			u32 l2 = read_l2ctlr(), ca;
+
+			if (l2 != s->l2ctlr_boot) {
+				pr_info("SPMDBG L2CTLR drift 0x%x -> LK 0x%x\n",
+					l2, s->l2ctlr_boot);
+				asm volatile("mcr p15, 1, %0, c9, c0, 2"
+					     : : "r"(s->l2ctlr_boot));
+				isb();
+			}
+			if (s->mcusys) {
+				ca = readl(s->mcusys);
+				if (ca != s->cacfg_boot) {
+					pr_info("SPMDBG CA7_CACHE_CONFIG drift 0x%x -> LK 0x%x\n",
+						ca, s->cacfg_boot);
+					writel(s->cacfg_boot, s->mcusys);
+				}
+			}
+		}
 		pr_info("SPMDBG spm: RESUMED\n");
 		cpu_cluster_pm_exit();
 		cpu_pm_exit();
@@ -537,6 +573,15 @@ static int mt6582_spm_probe(struct platform_device *pdev)
 	s->bootvec = ioremap(0x10001800, 0x8);
 	if (!s->bootvec)
 		dev_warn(&pdev->dev, "sin bootvec: M3 (cpu_pdn) deshabilitado\n");
+
+	/* capturar la config de cache del LK (referencia para restaurar
+	 * tras cada ciclo dormant — se pierde con el MTCMOS del cluster) */
+	s->mcusys = ioremap(0x10200000, 0x10);
+	s->l2ctlr_boot = read_l2ctlr();
+	if (s->mcusys)
+		s->cacfg_boot = readl(s->mcusys);
+	dev_info(&pdev->dev, "LK: L2CTLR=0x%x CA7_CACHE_CONFIG=0x%x\n",
+		 s->l2ctlr_boot, s->cacfg_boot);
 
 	spm_hw_init(s);
 	gspm = s;

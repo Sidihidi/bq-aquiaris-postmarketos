@@ -1,0 +1,34 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# drivers/net/wireless/mtk_mtwifi/Kconfig
+#
+# Entrada Kconfig del port del driver full-MAC MediaTek MT6582 'mt_wifi' a
+# linux-7.0.12 (postmarketOS / BQ krillin).
+#
+# Para engancharlo al arbol:  en drivers/net/wireless/Kconfig anadir
+#     source "drivers/net/wireless/mtk_mtwifi/Kconfig"
+# y en drivers/net/wireless/Makefile
+#     obj-$(CONFIG_MTK_MTWIFI) += mtk_mtwifi/
+
+config MTK_MTWIFI
+	tristate "MediaTek MT6582 mt_wifi full-MAC WLAN (BQ krillin, AHB-PIO)"
+	depends on CFG80211
+	depends on ARM || COMPILE_TEST
+	select WIRELESS_EXT
+	select WEXT_PRIV
+	default m
+	help
+	  Port STA-only del driver full-MAC MediaTek MT6582 'mt_wifi' (era
+	  Android 3.10) a linux-7.0.12. El firmware corre el MAC completo; el
+	  host habla con el chip por un backend HIF AHB en modo PIO
+	  (os/linux/hif/mt6582-hif.c) y expone cfg80211 via el glue nuevo
+	  (os/linux/glue/gl_kal_*.c + gl_init.c + gl_cfg80211.c).
+
+	  Requiere el blob de firmware en
+	    /lib/firmware/mediatek/mt6582/WIFI_RAM_CODE
+
+	  P2P, BT-over-WiFi, TDLS y chip-reset estan deshabilitados en este
+	  build STA-only.
+
+	  Para compilarlo como modulo, elegir M. El modulo se llamara
+	  mtk_mtwifi.
