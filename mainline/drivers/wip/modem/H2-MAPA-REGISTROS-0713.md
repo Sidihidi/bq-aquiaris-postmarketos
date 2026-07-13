@@ -40,10 +40,25 @@ Base AP **0x1020A000**, MD **0x1020B000**. Offsets: CON+0x0, BUSY+0x4, START+0x8
 RCHNUM+0x10, ACK+0x14, TXCHDATA+0x100, RXCHDATA+0x100+128(0x180). Run-time data offset 0x140.
 IRQ CCIF0_AP = **132** (GIC_SPI 100, level-low) → DT `<GIC_SPI 100 IRQ_TYPE_LEVEL_LOW>`.
 
-## 4. Carveout de shared-mem (reserved-memory)
-`arm_memblock_steal(size, SZ_32M)` = 24MB (MD1_MEM_SIZE 22MB + MD1_SMEM_SIZE 2MB) alineado a 32MB.
-En mainline = nodo `reserved-memory` en el DTS (p.ej. `modem-region@bc000000 { reg=<0xbc000000 0x1800000>; no-map; }`,
-bajo ramoops 0xBF300000). El `smem_addr` (la física del carveout) alimenta la fórmula del BANK-remap.
+## 4. Carveout de shared-mem (reserved-memory) — ✅ HECHO Y VERIFICADO EN HW (menupick22)
+Nodo (dentro de `reserved-memory {}`, junto a framebuffer/ramoops):
+```dts
+modem-region@b8000000 {
+    reg = <0xb8000000 0x1800000>;   /* 24MB = 22 MD + 2 SMEM, alineado a 32MB */
+    no-map;
+};
+```
+**Verificado**: `OF: reserved mem: 0xb8000000..0xb97fffff (24576 KiB) nomap non-reusable modem-region@b8000000`.
+⚠️ **GOTCHAs de colocación** (2 iteraciones costaron):
+1. **NO @0xbc000000** (el 1er intento): **cae DENTRO del CMA** (`cma: Reserved 64 MiB at 0xbb000000` →
+   0xbb000000-0xbf000000) → el kernel lo ignora silenciosamente. Hay que ir **por debajo del CMA**.
+2. **0xb8000000** (32MB-aligned, bajo CMA, termina en 0xb9800000) = OK, se reserva. (fb@0xBF400000 +
+   ramoops@0xBF300000 arriba; CMA 0xbb-0xbf; libre por debajo.)
+3. Al editar el DTS **decompilado**: insertar el nodo con ancla INEQUÍVOCA (`framebuffer-region@bf400000`),
+   NO `ranges;` (hay varios `ranges;`; uno en un `simple-bus` que se lo tragó → nodo en el bus equivocado
+   = no reservado). Es `smem_addr = 0xb8000000` el que alimenta la fórmula del BANK-remap (des en H3).
+DTS de trabajo: `ganador.dts` en la Pi (decompilado de `ganador.dtb` + este nodo). **Pendiente**: portar
+el nodo al DTS COMPARTIDO cuando se coordine con el Mac (ahora aislado en nuestro dtb).
 
 ## 5. Estado H2 y siguiente
 - ✅ RE completo (este doc). Registros y fórmula listos.
@@ -52,6 +67,10 @@ bajo ramoops 0xBF300000). El `smem_addr` (la física del carveout) alimenta la f
   `0xffffffff` (que sería fallo de bus/región no mapeada). Confirma que el **mailbox AP↔MD del CCIF es
   alcanzable** (CON=0=idle) y los BANK regs también → **de-riskea H3**. Móvil sano tras el dump.
   Dump: `CON=BUSY=TCHNUM=RCHNUM=0`, `AP0=AP1=MD1_0=MD1_1=0`.
+- ✅ **H2b VERIFICADO EN HW (menupick22)**: carveout de 24MB @0xb8000000 reservado (§4). El móvil arranca
+  con la memoria del MD reservada. **H2 sustancialmente completo** (memoria + mapeos verificados).
+- ⏳ Falta para H2/H3: escribir el BANK-remap con la fórmula (§1) usando `des=0xb8000000` + ioremaps
+  boot-slave/RGU/CCIF en el driver + el handshake CCCI. Va junto con H3 (donde el MD usa la vista DRAM).
 - ⏳ Implementar: (a) reserved-memory en DTS [OJO: DTS compartido roto por el Mac — usar base buena +
   extraer dtb, ver [[H1]]], (b) ioremaps CCIF/boot-slave/RGU en el driver, (c) `set_{ap,md}_smem_remap`
   con la fórmula → escribir BANK4_MAP. (d) Verificable de verdad solo en H3 (cuando el MD arranque y use
