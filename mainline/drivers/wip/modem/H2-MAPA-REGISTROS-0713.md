@@ -47,6 +47,11 @@ bajo ramoops 0xBF300000). El `smem_addr` (la física del carveout) alimenta la f
 
 ## 5. Estado H2 y siguiente
 - ✅ RE completo (este doc). Registros y fórmula listos.
+- ✅ **H2a VERIFICADO EN HW (menupick19, dump por sysfs `spm_md_dump`)**: CCIF@0x1020A000 y los
+  BANK4_MAP son **accesibles desde mainline** — los reads dan `0x00000000` (idle/sin remap), NO
+  `0xffffffff` (que sería fallo de bus/región no mapeada). Confirma que el **mailbox AP↔MD del CCIF es
+  alcanzable** (CON=0=idle) y los BANK regs también → **de-riskea H3**. Móvil sano tras el dump.
+  Dump: `CON=BUSY=TCHNUM=RCHNUM=0`, `AP0=AP1=MD1_0=MD1_1=0`.
 - ⏳ Implementar: (a) reserved-memory en DTS [OJO: DTS compartido roto por el Mac — usar base buena +
   extraer dtb, ver [[H1]]], (b) ioremaps CCIF/boot-slave/RGU en el driver, (c) `set_{ap,md}_smem_remap`
   con la fórmula → escribir BANK4_MAP. (d) Verificable de verdad solo en H3 (cuando el MD arranque y use

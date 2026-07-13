@@ -621,6 +621,57 @@ static int spm_md_poweron_set(const char *val, const struct kernel_param *kp)
 static const struct kernel_param_ops spm_md_poweron_ops = { .set = spm_md_poweron_set };
 module_param_cb(spm_md_poweron, &spm_md_poweron_ops, NULL, 0200);
 
+/* H2a: dump de CCIF (mailbox AP-MD @0x1020A000) + BANK4_MAP (vista DRAM del MD).
+ * SOLO LECTURAS en espacio AP (INFRACFG/MCUSYS/CCIF), sin escrituras -> seguro.
+ * Confirma que el HW del CCIF es accesible desde mainline (de-risk H3).
+ * Disparar: echo 1 > /sys/module/mt6582_spm/parameters/spm_md_dump
+ */
+static int spm_md_dump(struct mt6582_spm *s)
+{
+	void __iomem *ccif, *infracfg;
+	u32 con, busy, tch, rch;
+	u32 ap0, ap1, md0, md1;
+
+	ccif = ioremap(0x1020A000, 0x100);
+	infracfg = ioremap(0x10001000, 0x400);
+	if (!ccif || !infracfg) {
+		if (ccif) iounmap(ccif);
+		if (infracfg) iounmap(infracfg);
+		dev_err(s->dev, "H2 dump: ioremap fallo\n");
+		return -ENOMEM;
+	}
+	con  = readl(ccif + 0x00);
+	busy = readl(ccif + 0x04);
+	tch  = readl(ccif + 0x0c);
+	rch  = readl(ccif + 0x10);
+	/* AP_BANK4_MAP0/1 = MCUSYS(0x10200000)+0x200/0x204 (s->mcusys mapea 0x10) -> local */
+	{
+		void __iomem *mcu = ioremap(0x10200000, 0x400);
+		ap0 = mcu ? readl(mcu + 0x200) : 0xdeadbeef;
+		ap1 = mcu ? readl(mcu + 0x204) : 0xdeadbeef;
+		if (mcu) iounmap(mcu);
+	}
+	md0 = readl(infracfg + 0x308);
+	md1 = readl(infracfg + 0x30c);
+
+	dev_info(s->dev, "H2 CCIF@0x1020A000: CON=0x%08x BUSY=0x%08x TCHNUM=0x%08x RCHNUM=0x%08x\n",
+		 con, busy, tch, rch);
+	dev_info(s->dev, "H2 BANK4_MAP: AP0=0x%08x AP1=0x%08x MD1_0=0x%08x MD1_1=0x%08x (0=sin remap)\n",
+		 ap0, ap1, md0, md1);
+	iounmap(ccif);
+	iounmap(infracfg);
+	return 0;
+}
+
+static int spm_md_dump_set(const char *val, const struct kernel_param *kp)
+{
+	if (!gspm)
+		return -ENODEV;
+	return spm_md_dump(gspm);
+}
+static const struct kernel_param_ops spm_md_dump_ops = { .set = spm_md_dump_set };
+module_param_cb(spm_md_dump, &spm_md_dump_ops, NULL, 0200);
+
 static int mt6582_spm_probe(struct platform_device *pdev)
 {
 	struct mt6582_spm *s;
