@@ -42,12 +42,11 @@ Copiados a la Pi: `modem.img`, `WMT_SOC.cfg`, `catcher_filter_1_wg_n.bin` (los d
   LineageOS (sin CONFIG_DEVMEM) → no se pudo leer MMIO. El criterio de éxito de H1 (`SPM_PWR_STATUS`
   bit0=1) se verifica igualmente en NUESTRO kernel tras el power-on.
 
-## Nota de cámara (Hito 0, colateral — pendiente de confirmar)
-El dmesg del stock muestra el driver por defecto **`ov12830mipiraw`** (OV12830, 13MP) en la lista de
-sensores, PERO al boot dio `No Sensor Found` (I2C fail = sensor sin alimentar sin la app). Esto
-**contradice la inferencia OV8865 (8MP)** de `wip/camera/FEASIBILITY-CAMARA-0711.md`. Para cerrarlo:
-abrir la app de cámara en stock y capturar el `CHECK_SENSOR_ID` con éxito (chip-ID real). Cámara =
-última prioridad, así que queda anotado.
+## Nota de cámara (Hito 0, colateral — RESUELTO)
+Al boot el stock listaba `ov12830mipiraw` como default de sondeo, pero dio `No Sensor Found` (sensor sin
+alimentar). **Abriendo la app de cámara → dmesg muestra `[OV8865Raw]` streaming activo (1964 hits)**:
+la trasera es **OV8865** (8MP), **confirmando la inferencia** de `wip/camera/FEASIBILITY-CAMARA-0711.md`.
+OV8865 tiene driver mainline (`drivers/media/i2c/ov8865.c`) → vía RAW viable. Cámara = última prioridad.
 
 ## Siguiente (H1)
 Con el firmware y la identidad confirmados, H1 = añadir el dominio MTCMOS del MD a `mt6582-spm.c`

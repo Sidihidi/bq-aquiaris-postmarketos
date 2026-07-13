@@ -4,6 +4,12 @@
 > **VEREDICTO: CONDITIONAL-GO para una cámara RAW degradada (sin 3A); NO-GO para cámara de
 > producto (calidad Android).** El NO-GO previo acertó para "cámara usable" pero **omitió que el
 > sensor real del krillin YA tiene driver V4L2 en mainline** → hay un "hito 0" casi gratis.
+>
+> **✅ CONFIRMADO EN HW 0713 (LineageOS stock, cámara abierta)**: la TRASERA es **OV8865** — dmesg
+> muestra `[OV8865Raw]` streaming activo (SetGain/shutter/preview, 1964 hits), cero de OV5648/OV12830.
+> El `ov12830mipiraw` que aparecía en el boot era solo el default de la lista de sondeo (falló "No Sensor
+> Found" sin alimentar). La inferencia de abajo (OV8865 trasera) queda **verificada**; OV8865 tiene
+> driver mainline `drivers/media/i2c/ov8865.c` → la vía RAW es viable. (Frontal sin confirmar aún.)
 
 ## 1. Sensores exactos (evidencia)
 Defconfig downstream: `CONFIG_CUSTOM_KERNEL_IMGSENSOR="ov5648_mipi_raw ov8865_mipi_raw t4k04_mipi_raw ov12830_mipi_raw"` (superset; el driver sondea por I2C cuál está presente).
