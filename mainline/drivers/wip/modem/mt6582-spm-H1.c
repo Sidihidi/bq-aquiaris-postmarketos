@@ -29,6 +29,8 @@
 #include <asm/cp15.h>
 
 /* offsets sobre 0x10006000 (mt_spm.h del downstream) */
+#include <linux/firmware.h>
+
 #define SPM_POWERON_CONFIG_SET		0x0000
 #define SPM_POWER_ON_VAL0		0x0010
 #define SPM_POWER_ON_VAL1		0x0014
@@ -671,6 +673,139 @@ static int spm_md_dump_set(const char *val, const struct kernel_param *kp)
 }
 static const struct kernel_param_ops spm_md_dump_ops = { .set = spm_md_dump_set };
 module_param_cb(spm_md_dump, &spm_md_dump_ops, NULL, 0200);
+
+/* ===== Hito M1 H3: arrancar el MD (modem processor) ===== */
+/* Carveout del MD (DT modem-region@b8000000) y su vista DRAM. */
+#define MD_SMEM_PHYS	0xb8000000
+#define MD_SMEM_SIZE	0x1800000
+#define KERN_EMI_BASE	0x80000000
+#define MD_INVALID_ADDR	0x3E000000
+#define MD_INVALID_OFF	0x02000000
+
+/* H3a: cargar el firmware MOLY al inicio del carveout (raw copy, como load_std_firmware) */
+static int spm_md_load(struct mt6582_spm *s)
+{
+	const struct firmware *fw;
+	void __iomem *dst;
+	u32 w0, wlast;
+	int ret;
+
+	ret = request_firmware(&fw, "modem.img", s->dev);
+	if (ret) {
+		dev_err(s->dev, "H3 load: request_firmware(modem.img) fallo %d\n", ret);
+		return ret;
+	}
+	dst = ioremap(MD_SMEM_PHYS, MD_SMEM_SIZE);
+	if (!dst) {
+		release_firmware(fw);
+		dev_err(s->dev, "H3 load: ioremap carveout fallo\n");
+		return -ENOMEM;
+	}
+	if (fw->size > MD_SMEM_SIZE) {
+		iounmap(dst); release_firmware(fw);
+		dev_err(s->dev, "H3 load: firmware %zu > carveout\n", fw->size);
+		return -EFBIG;
+	}
+	memcpy_toio(dst, fw->data, fw->size);
+	w0 = readl(dst);
+	wlast = readl(dst + ((fw->size & ~0x3u) - 4));
+	dev_info(s->dev, "H3 load: modem.img %zu B -> 0xb8000000; w0=0x%08x (esperado 0xe59ff018) wlast=0x%08x\n",
+		 fw->size, w0, wlast);
+	iounmap(dst);
+	release_firmware(fw);
+	return 0;
+}
+
+/* H3b: BANK-remap = la vista de DRAM del MD apunta al carveout. Formula 1:1 del downstream. */
+static int spm_md_remap(struct mt6582_spm *s)
+{
+	void __iomem *mcu, *infra;
+	const u32 IA = MD_INVALID_ADDR, O = MD_INVALID_OFF;
+	u32 apd = MD_SMEM_PHYS;
+	u32 mdd = MD_SMEM_PHYS - KERN_EMI_BASE;
+	u32 ap0, ap1, md0, md1;
+
+	ap0 = (((apd>>24)|0x1)&0xFF) + ((((IA+O*14)>>16)|(1<<8))&0xFF00)
+	    + ((((IA+O*15)>>8)|(1<<16))&0xFF0000) + ((((IA+O*16))|(1<<24))&0xFF000000);
+	ap1 = ((((IA+O*17)>>24)|0x1)&0xFF) + ((((IA+O*18)>>16)|(1<<8))&0xFF00)
+	    + ((((IA+O*19)>>8)|(1<<16))&0xFF0000) + ((((IA+O*20))|(1<<24))&0xFF000000);
+	md0 = (((mdd>>24)|0x1)&0xFF) + ((((IA+O*0)>>16)|(1<<8))&0xFF00)
+	    + ((((IA+O*1)>>8)|(1<<16))&0xFF0000) + ((((IA+O*2))|(1<<24))&0xFF000000);
+	md1 = ((((IA+O*3)>>24)|0x1)&0xFF) + ((((IA+O*4)>>16)|(1<<8))&0xFF00)
+	    + ((((IA+O*5)>>8)|(1<<16))&0xFF0000) + ((((IA+O*6))|(1<<24))&0xFF000000);
+
+	mcu = ioremap(0x10200000, 0x400);
+	infra = ioremap(0x10001000, 0x400);
+	if (!mcu || !infra) {
+		if (mcu) iounmap(mcu);
+		if (infra) iounmap(infra);
+		return -ENOMEM;
+	}
+	writel(ap0, mcu + 0x200);
+	writel(ap1, mcu + 0x204);
+	writel(md0, infra + 0x308);
+	writel(md1, infra + 0x30c);
+	dev_info(s->dev, "H3 remap: AP0=0x%08x AP1=0x%08x MD0=0x%08x MD1=0x%08x (des=0x%08x)\n",
+		 ap0, ap1, md0, md1, apd);
+	iounmap(mcu);
+	iounmap(infra);
+	return 0;
+}
+
+/* H3c: soltar el MD (WDT off + boot-slave keys) y sondear el CCIF por actividad del MD. */
+static int spm_md_release(struct mt6582_spm *s)
+{
+	void __iomem *rgu, *vec, *key, *en, *ccif;
+	u32 con, busy, rch, rx;
+	int i, seen = 0;
+
+	rgu = ioremap(0x20050000, 0x40);
+	vec = ioremap(0x20190000, 0x4);
+	key = ioremap(0x2019379C, 0x4);
+	en  = ioremap(0x20195488, 0x4);
+	ccif = ioremap(0x1020A000, 0x100);
+	if (!rgu || !vec || !key || !en || !ccif) {
+		if (rgu) iounmap(rgu); if (vec) iounmap(vec); if (key) iounmap(key);
+		if (en) iounmap(en); if (ccif) iounmap(ccif);
+		return -ENOMEM;
+	}
+	writel(0x2200, rgu + 0x00);		/* WDT_MD_MODE = KEY = disable */
+	writel(0x3567C766, key);
+	writel(0x0, vec);
+	writel(0xA3B66175, en);
+	dev_info(s->dev, "H3 release: MD soltado (WDT off + keys). Sondeando CCIF@0x1020A000 5s...\n");
+	for (i = 0; i < 50; i++) {
+		con = readl(ccif + 0x00);
+		busy = readl(ccif + 0x04);
+		rch = readl(ccif + 0x10);
+		rx = readl(ccif + 0x180);
+		if (con || busy || rch || rx) {
+	dev_info(s->dev, "H3 release: ACTIVIDAD del MD @t=%dms! CON=0x%08x BUSY=0x%08x RCHNUM=0x%08x RX0=0x%08x\n",
+		 i*100, con, busy, rch, rx);
+			seen = 1;
+			break;
+		}
+		msleep(100);
+	}
+	if (!seen)
+		dev_info(s->dev, "H3 release: SIN actividad tras 5s. CON=0x%08x BUSY=0x%08x RCHNUM=0x%08x RX0=0x%08x\n",
+		 readl(ccif+0), readl(ccif+4), readl(ccif+0x10), readl(ccif+0x180));
+	iounmap(rgu); iounmap(vec); iounmap(key); iounmap(en); iounmap(ccif);
+	return 0;
+}
+
+static int spm_md_load_set(const char *v, const struct kernel_param *k)
+{ return gspm ? spm_md_load(gspm) : -ENODEV; }
+static int spm_md_remap_set(const char *v, const struct kernel_param *k)
+{ return gspm ? spm_md_remap(gspm) : -ENODEV; }
+static int spm_md_release_set(const char *v, const struct kernel_param *k)
+{ return gspm ? spm_md_release(gspm) : -ENODEV; }
+static const struct kernel_param_ops spm_md_load_ops = { .set = spm_md_load_set };
+static const struct kernel_param_ops spm_md_remap_ops = { .set = spm_md_remap_set };
+static const struct kernel_param_ops spm_md_release_ops = { .set = spm_md_release_set };
+module_param_cb(spm_md_load, &spm_md_load_ops, NULL, 0200);
+module_param_cb(spm_md_remap, &spm_md_remap_ops, NULL, 0200);
+module_param_cb(spm_md_release, &spm_md_release_ops, NULL, 0200);
 
 static int mt6582_spm_probe(struct platform_device *pdev)
 {
