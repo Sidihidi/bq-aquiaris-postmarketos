@@ -41,19 +41,29 @@ finos que costaron (todos resueltos):
 4. dlsym de `__system_property_{area_init,add,get}` (el v1 petaba al relocar por versión @@LIBC).
 Compilar/uso: cabecera del `.c`. Markers `[shim] service.nvram_init="Ready"` confirman la inyección.
 
-## ⏭️ Lo que falta: NMEA CON DATOS (→ fix)
-El motor dispara `mtk_gps_sys_nmea_output_to_app` pero aún **no se ven sentencias `$G...` con datos**
-(ni en el log, ni en writes, ni en /dev/gps). Diagnóstico del tráfico al DSP (strace read/write/ioctl,
-fd 11 = /dev/stpgps): mnld hace `read(11)`×60, `write(11)`×19, **`ioctl(11)` termios de TTY
-(TCSETS B115200…) = ENOTTY** (porque `pmtk.conn=serial` trata el STP como UART; también pasa en Android,
-presumiblemente no-fatal). Próximos pasos para el NMEA:
-1. **Confirmar si el DSP RESPONDE** a mnld: ¿los `read(11)` devuelven frames `AA F0` o 0/bloqueo? (El Mac
-   ya vio el DSP hablar 35 frames con OTRO runner; verificar con mnld.) Si no responde → revisar el
-   power/burst de arranque del DSP (¿la secuencia gpsdrv pwrctl/RST correcta?).
-2. **Sky view**: en interior no hay fix (0 satélites); aun sin fix, el motor debería emitir `$GPGGA`
-   vacío + `$GPGSV`. Si ni eso sale, el motor no está recibiendo medidas del DSP (punto 1).
-3. **Ruta de salida del NMEA**: mnld tiene fd12→/dev/gps y fd13→socket(HAL). Cuando haya NMEA, engancharlo
-   a gpsd/geoclue (la cadena `zzz-gps.start` ya existe) o leer /dev/gps.
+## ⏭️ Lo que falta: NMEA CON DATOS — frontier = READ-BACK del DSP (0714)
+El motor dispara `mtk_gps_sys_nmea_output_to_app` (10x/run) pero **no salen sentencias `$G...` con datos**.
+Diagnóstico DEFINITIVO del tráfico al DSP (strace read/write/ioctl, fd 11 = /dev/stpgps, hilo daemon):
+- ✅ mnld **ENVÍA el protocolo AAF0 correcto**: `write(11, AAF0-burst, 116)` + frames t=0x05
+  `write(11, "\xaa\xf0\x06\x00\x05\xfe\x04\x00\x0d\x01\xaa\x0f", 12)`. (El burst 116B coincide con el
+  arranque stock.)
+- ❌ **mnld RE-ENVÍA el burst en BUCLE y NUNCA hace `read(11)` del daemon** → el DSP no se lee → el
+  handshake no completa → el motor emite nmea_output pero VACÍO (sin medidas).
+- Los `ioctl(11)` termios (TCSETS B115200…) fallan **ENOTTY** (`pmtk.conn=serial` trata el STP como UART;
+  también en Android = no-fatal).
+
+**El frontier ES el read-back del DSP.** Hipótesis a investigar (orden):
+1. **¿Hay un hilo LECTOR de /dev/stpgps que no arranca?** (En stock, un thread aparte lee el STP y
+   despacha frames.) Revisar en el strace COMPLETO si algún tid hace `read(11)` que bloquea
+   (`<unfinished>`), o si el lector nunca se crea. Si no se crea → ver por qué (¿otra prop? ¿otro gate en
+   `linux_gps_init`/`FUN_00017048`/`FUN_00018458`, decompilables con el mismo método Ghidra).
+2. **Power/arranque del DSP vía gpsdrv**: la secuencia `pwrctl` 0→1→2 (OFF/ON/RST) del driver
+   `mt6582-gpsdrv.c` — ¿enciende el DSP de verdad? El Mac vio el DSP hablar 35 frames AAF0 con OTRO runner
+   (Fase A), así que el HW responde; con mnld hay que confirmar que el power se aplica igual.
+3. **Sky view**: interior = 0 satélites; aun sin fix el motor debería emitir `$GPGGA` vacío + `$GPGSV`
+   si recibe medidas. Sin read-back (punto 1/2) no llega ni a eso.
+4. **Ruta de salida**: cuando haya NMEA, mnld escribe en fd12→/dev/gps y fd13→socket(HAL); enganchar a
+   gpsd/geoclue (`zzz-gps.start` ya existe).
 
 ## Estado en el móvil (Alpine/pmOS)
 Shim v3 limpio en `/system/lib/libxlogshim.so` (v2 en `.v2`). Setup del Mac intacto: `gpsdrv` cargado,
