@@ -145,5 +145,37 @@ abrir el DSP. La lógica de "listo" está DENTRO de `libmnl` (no en la glue abie
 Recomendación: **(1)** para cerrar de verdad; **(2)** para un PoC rápido de que el resto de la cadena
 (open `/dev/stpgps` → burst → libmnl → NMEA) funciona antes de invertir en el driver.
 
-*Receta 2026-07-14 (sesión Mac). mnld corre y recibe el START del HAL; el último gate = el handshake de
-power/ready del DSP por `/sys/class/gpsdrv` (dentro de libmnl). Fix = portar `gps.c` o sembrar el status.*
+## 🧩 STATUS 0714 (tarde-2) — `gps.c` PORTADO (funciona) + arquitectura COMPLETA + `/dev/stpgps` ABIERTO
+**Portado el driver**: `mt6582-gpsdrv.c` (~300L, fiel al `gps.c`/mt3326 del downstream, mainline-limpio).
+Compilado como módulo (`.ko`) y **cargado en la pmOS viva (#293)**: crea el `/sys/class/gpsdrv/gps/`
+{pwrctl,state,status,suspend,pwrsave,rdelay} REAL + `/dev/gps`. Hallazgo del port: `mt3326_gps_power` es
+un **stub** (el power del combo va por WMT/STP, ya ON) y `/dev/gps` es un **buffer loopback** (no va al STP;
+el dato del DSP va por `/dev/stpgps`) → port autocontenido, sin STP ni power real.
+
+**Con el gpsdrv real, mnld escribe pwrctl/state bien** (INIT: pwrctl=0+state=1; START: pwrctl=2=RST) — pero
+seguía sin abrir el DSP. **Arquitectura COMPLETA RE-ada** (`MNLD__src__mnld_6620.c:792`): mnld hace
+**`fork()` + `execv` de un binario SEPARADO** `/system/xbin/libmnlp_mt<chip>` (o `/system/xbin/libmnla` por
+defecto — sin el property `persist.radio.mediatek.chipid` sale el default). **ESE `libmnlp` (=el runner de
+Fase A `mnl_process_6620.c`+`libmnl_6628.a`) es quien abre `/dev/stpgps` y corre libmnl (el motor PVT).**
+Solo habíamos desplegado `mnld`.
+
+**Desplegado el runner** (`~/gps/fase-a/mnlp_static`, ELF ARM **estático** → corre sin bionic) en
+`/system/xbin/libmnla` (+ `libmnlp_mt6628/6620`) → **mnld lo fork+exec-ó y ABRIÓ `/dev/stpgps`** (visto:
+un proceso con `/dev/stpgps` en sus fds). ¡La cadena entera funciona hasta el DSP! Pero: **NMEA=0** y el
+runner es **flaky** (una corrida abrió el DSP, otra no) → el runner de Fase A (build propio, riesgo ABI
+soft/hard-float) necesita depuración, y/o falta cielo despejado para datos.
+
+### ⏭️ Último tramo (para cerrar el fix)
+1. **Estabilizar el runner libmnlp**: usar el **stock `libmnlp` bionic** si se extrae (mejor que el build
+   estático de Fase A, evita el riesgo ABI), o depurar el `mnlp_static` (que arranca y abre el DSP pero no
+   emite). Verificar que recibe bien los fds del socketpair (`argv[2],argv[3]`) de mnld.
+2. Confirmar el **START 0xAAF0** al `/dev/stpgps` (strace del runner) + respuesta del DSP.
+3. **Cielo despejado** para el primer fix (interior = 0 satélites, sin NMEA de posición).
+4. Encadenar NMEA (mnld2hal / pty) → gpsd → geoclue → Phosh.
+
+**Piezas listas y versionadas**: `mt6582-gpsdrv.c` (driver, compila+carga+crea interfaz ✓),
+`gps-bionic-shim.c` (xlog no-op ✓), bundle bionic + calibración en `.123`. Deploy del runner:
+`mnlp_static → /system/xbin/libmnla`.
+
+*Receta 2026-07-14 (sesión Mac). gps.c PORTADO y funcionando; arquitectura completa mapeada; `/dev/stpgps`
+abierto por el runner. Falta estabilizar el libmnlp runner + cielo despejado para el fix.*
