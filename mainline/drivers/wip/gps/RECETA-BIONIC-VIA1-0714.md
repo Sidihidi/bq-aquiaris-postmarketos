@@ -88,5 +88,35 @@ Escalón de éxito: (a) lee `/data/nvram/APCFG/APRDEB/GPS` sin ENOENT → (b) ab
 0xAAF0 → (c) DSP responde → (d) mnld emite `$GPGGA/$GPRMC`. Luego NMEA→pty→gpsd→geoclue→Phosh, y **fix exterior**.
 Si peta pidiendo `/dev/nvram` (chardev MTK ausente en mainline) = el riesgo abierto → shim/portar ese chardev.
 
-*Receta 2026-07-14 (sesión Mac), sobre los binarios reales de `.123`. **Los 2 huecos ya están cerrados y el
-bundle listo**; falta solo desplegar en pmOS y correr mnld. Riesgo abierto: `/dev/nvram` chardev MTK.*
+## 🎉 STATUS 0714 tarde — **mnld CORRE en pmOS (bionic) y queda a 1 comando del GPS**
+Probado en HW (móvil #293, pmOS): el runtime **bionic funciona en el kernel mainline** (el linker + 12 libs
+cargan y ejecutan). mnld arranca **del todo**, con la **radio GPS ON** (`func_on[GPS]: RADIO ENCENDIDO` en
+dmesg + `/dev/stpgps` registrado), crea sus sockets HAL (`/data/gps_mnl/hal2mnld`) y **se queda IDLE
+esperando el comando de inicio de sesión del HAL** — NO abre `/dev/stpgps` ni manda el START hasta recibirlo.
+
+### Gates que hubo que superar (todos resueltos, en orden real):
+1. `libc++.so` faltaba en el bundle → **añadida** (+ `libhardware.so`). *(Actualizar el bundle: son 13 libs, no 11.)*
+2. `__xlog_buf_printf` (xlog de MTK, la liblog de LineageOS no lo exporta) → **shim no-op** (`gps-bionic-shim.c`).
+3. `bind()` del socket a `/data/gps_mnl/hal2mnld` fallaba ENOENT → **crear `mkdir -p /data/gps_mnl`**.
+4. `/sys/class/gpsdrv/gps/status` (interfaz sysfs del driver GPS **downstream** de MTK, ausente en mainline)
+   → **interpositor `open`/`openat`** en `gps-bionic-shim.c` redirige `/sys/class/gpsdrv*` a
+   `/data/gps_mnl/fakestatus` (`printf 1 > /data/gps_mnl/fakestatus`). *(El riesgo `/dev/nvram` NO se materializó:
+   la calibración se leyó bien del fichero `/data/nvram/APCFG/APRDEB/GPS`.)*
+
+### Receta de arranque FINAL (verificada, mnld corre):
+```bash
+# prefijo /system desplegado (bundle) + shim compilado en /system/lib/libxlogshim.so
+mkdir -p /data/gps_mnl && printf 1 > /data/gps_mnl/fakestatus
+chmod +x /system/bin/linker /system/xbin/mnld
+env LD_PRELOAD=/system/lib/libxlogshim.so /system/xbin/mnld   # arranca, radio ON, idle en hal2mnld
+```
+
+### ⏭️ ÚLTIMO ESLABÓN (siguiente sesión): el comando de inicio de sesión del HAL
+mnld escucha en el socket UNIX-dgram **`/data/gps_mnl/hal2mnld`** los comandos que la HAL de Android
+(`gps.default.so`) le manda. Falta enviarle el **"start navigation"** → dispara: `open /dev/stpgps` →
+**START 0xAAF0** al DSP → medidas crudas → libmnl calcula → **NMEA**. RE-able del `gps.default.so` extraído
+(en `stock-gps-0713/lib/`, tiene la codificación de los mensajes a `hal2mnld`) o del protocolo de mnld.
+Con ese comando + cielo despejado = **fix**. El shim (`gps-bionic-shim.c`) es nuestro código, versionado aquí.
+
+*Receta 2026-07-14 (sesión Mac). **mnld corre en pmOS bajo bionic — de-riesgada toda la vía**; queda 1 paso:
+el comando de sesión del HAL por `hal2mnld`.*
