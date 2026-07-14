@@ -1,3 +1,27 @@
+# GPS Vía 1 (mnld) — ✅✅ PIPELINE COMPLETO Y FUNCIONAL EN pmOS; solo falta cielo (0714 casa)
+
+> ## ★★★★ RESOLUCIÓN FINAL (0714 noche, debug kernel con contadores)
+> Recompilé `mt6582-btif.c` con contadores debugfs en `gps_read`/RX (flasheado boot-debug, verificado,
+> RESTAURADO el kernel bueno `d7fe5484` después). Corriendo mnld, los contadores demuestran que **TODO
+> EL PIPELINE FUNCIONA**:
+> ```
+> gps_rx=56        ← el DSP entrega 56 frames AAF0 al gps_fifo (RX del driver OK)
+> gps_rd_calls=56  ← mnld LLAMA a gps_read (su reader SÍ lee)
+> gps_rd_data=55   ← mnld RECIBE los datos (gps_read devuelve frames a mnld)
+> gps_rd_eintr=0   ← CERO interrupciones por signal (la hipótesis de starvation era FALSA)
+> ```
+> Y mnld PROCESA los frames → produce NMEA válido: **`$GPGSV,1,1,0` = 0 satélites en vista**. El "reader
+> bloqueado / no consume" de mis análisis previos era un **ARTEFACTO del strace** (`-s` truncaba el
+> display de los reads). **DSP → driver → mnld → NMEA: funciona end-to-end.** Los 0 satélites = **INTERIOR
+> sin señal** (los frames traen payload 0xCA = ruido del correlador sin lock); en stock (jun) había 10
+> satélites por tener vista al cielo. **→ El GPS software está COMPLETO. Para un fix real: llevar el móvil
+> al EXTERIOR y correr mnld varios minutos (cold start).** Cadena de arranque: shim v3 (`libxlogshim.so`)
+> + `mt6582-gpsdrv.ko` (cargar a mano/boot script) + `env GPS_SET_CHIPID=1 … /system/xbin/mnld` + START.
+> Pendiente de pulido (no bloqueante): auto-cargar gpsdrv al boot; enganchar la NMEA de /dev/gps a
+> gpsd/geoclue/Phosh (`zzz-gps.start`); AGPS/almanaque para TTFF más rápido. Driver instrumentado en
+> `~/mainline/linux-7.0.12/drivers/soc/mediatek/mt6582-btif.c` (contadores con comentario /* DEBUG */,
+> quitar o dejar — son inofensivos).
+
 # GPS Vía 1 (mnld) — ★ GATE RESUELTO: mnld ABRE /dev/stpgps y corre el motor en pmOS (0714 casa)
 
 > Continuación de `RECETA-BIONIC-VIA1-0714.md` (sesión Mac). **RESUELTO el gate final** con Ghidra
