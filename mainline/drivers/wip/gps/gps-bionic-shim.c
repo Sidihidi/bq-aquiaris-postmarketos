@@ -54,3 +54,32 @@ int __xlog_buf_vprintf(int prio, const char *tag, const char *fmt, va_list ap)
  * AGPS es OPCIONAL (no bloquea el fix básico) -> no-op para poder correr el
  * libmnlp stock (bionic) con la libmnl.so stock (ABI correcto). */
 long mtk_gps_sys_agps_disaptcher_callback(long a, long b, long c, long d) { return 0; }
+
+/* Interpone property_get() de libcutils: pmOS NO tiene el property service de
+ * Android (/dev/socket/property_service -> ENOENT), así que property_get sale
+ * vacío. mnld usa `persist.radio.mediatek.chipid` para ELEGIR qué libmnlp
+ * forkear (launch_daemon_thread, MNLD_src_mnld_6620.c): si no casa con ningún
+ * chip hace `goto error` y NO ejecuta el hijo -> el motor nunca arranca.
+ * Devolvemos "0x6582" para ese key -> mnld forkea /system/xbin/libmnlp_mt6582. */
+static int shim_streq(const char *a, const char *b)
+{
+    while (*a && *a == *b) { a++; b++; }
+    return *(const unsigned char *)a == *(const unsigned char *)b;
+}
+static int shim_cpy(char *dst, const char *src)
+{
+    int i = 0;
+    while (src[i]) { dst[i] = src[i]; i++; }
+    dst[i] = 0;
+    return i;
+}
+int property_get(const char *key, char *value, const char *default_value)
+{
+    if (key && value && shim_streq(key, "persist.radio.mediatek.chipid"))
+        return shim_cpy(value, "0x6582");
+    if (value && default_value)
+        return shim_cpy(value, default_value);
+    if (value)
+        value[0] = 0;
+    return 0;
+}

@@ -269,3 +269,56 @@ shim `libxlogshim.so` (con xlog visible) en `/system/lib`; `sc/EPO.DAT` en el cw
 *Receta 2026-07-14 (sesión Mac, noche-4). **El motor GPS bionic corre y produce NMEA a 1Hz en pmOS mainline.**
 Falta sólo enrutar ese NMEA a `/dev/gps` (fork de mnld o fd standalone) + cielo despejado. Fase A (glibc)
 descartada por el mutex ABI. Móvil: multiboot sector 83968; ver [[reference-mtkclient-krillin]].*
+
+## 🔬 STATUS 0714 (noche-4b) — CONECTAR LA SALIDA: mapa COMPLETO del data-flow + los gates
+
+Objetivo de la sesión: enrutar el NMEA a un fd consumible. **Resultado: el data-flow está mapeado byte a byte;
+la salida limpia NO es un fix rápido — necesita portar mnld o un decodificador binario (trabajo de casa).**
+
+### Qué hace el motor standalone (probado)
+Con `libmnlp_mt6582 1Hz=y` (ó argc=4 `libmnlp <fd0> <fd1> <assist>`): navega, llama a
+`mtk_gps_sys_nmea_output_to_app` ~1Hz. **Pero standalone NO emite NMEA a NINGÚN sitio accesible:**
+- **`dae_snd_fd` (el fd1 del pipe) NO recibe el NMEA** — le pasé un fichero por fd1 y quedó a 0 bytes.
+- El motor SÍ escribe **reportes BINARIOS de 116 B que empiezan `AA F0` (0xAAF0, protocolo MTK, la posición)**
+  a `dae_snd_fd` — pero `dae_snd_fd` **quedó en fd 0** (default; `write(0,…)=EBADF`), NO tomó mi arg de fd.
+  (Los fds del motor colisionan: usa fds bajos 3-8 internamente; pasarle fd5/fd6 los machaca — usar fds altos
+  pero aun así `dae_snd_fd` no honró el arg → el stock parsea distinto o lo resetea.)
+- **NO hay NMEA en stdout, ni en `__xlog` (stderr), ni en `logdw` (ALOGD).** Forcé `debug.debug_nmea=1` +
+  `debug.mnl=ff` vía `/data/misc/mnl.prop` (formato `key=val`, claves en `set_prop`: `dev.dsp/dev.gps/
+  pmtk.conn/debug.debug_nmea/debug.mnl…`) y nada. El NMEA se genera DENTRO de libmnl pero no se serializa
+  standalone. → **el `mtk_gps_sys_nmea_output_to_app` del stock NO escribe el NMEA a un fd standalone;
+  la posición sale como el binario 0xAAF0 que mnld convierte a NMEA.**
+
+### Por qué mnld no forkea el hijo (los gates del entorno Android en pmOS)
+mnld LEE mis comandos (`read(3,"\0")` INIT + `read(3,"\3")` START ✓), escribe `pwrctl`/`state` a
+`/sys/class/gpsdrv` ✓ (`mnl_write_attr` OK: `char buf[]={attr+'0'}`, sizeof=1, sin bug), entra en
+`launch_daemon_thread` — **pero NO completa el `fork()`+`execl`** (0 `execute:`, 0 `we get MT6582`, 0 hijo
+`libmnla`). Gates encontrados (mnld espera el entorno Android que pmOS no tiene):
+1. **`chip_detector` en bucle** (21× en el xlog) — no detecta el combo chip en pmOS.
+2. **`property_get("persist.radio.mediatek.chipid")` falla** (no hay property service:
+   `/dev/socket/property_service`+`/dev/__properties__` → ENOENT). En el hijo forkeado, si no casa con un chip
+   hace `goto error` (NO `execl`). **La interposición LD_PRELOAD de `property_get` NO funciona en bionic**
+   (solo interpone símbolos INDEFINIDOS; `property_get` está definido en libcutils → gana libcutils). El shim
+   la trae igualmente por si el linker de otra build la respeta.
+3. **AGPS**: `bind /data/agps_supl/agps_to_mnl` falla (ENOENT) — ruidoso, probablemente no bloqueante.
+
+### Herramientas construidas esta sesión (en el móvil / repo)
+- **Listener de `logdw`** (`/tmp/logdw.py`): bind `SOCK_DGRAM /dev/socket/logdw` → captura TODO el ALOGD/ALOGE
+  (así se leyeron los ERR de MNL2AGPS). Sin interposición.
+- **Shim con `property_get` + xlog conmutable** (`gps-bionic-shim.c`, en repo): `GPS_XLOG_QUIET=1` silencia.
+- `mnl.prop` de config, `sc/EPO.DAT`, `launch.py` (lanza el motor en modo pipe con fds altos).
+
+### ⏭️ Cerrar la salida (dos vías, ambas = TRABAJO DE CASA, no triviales)
+- **(A) Portar mnld más allá de los gates** (la limpia): stubear/satisfacer `chip_detector` +
+  `property_get(chipid)=0x6582` (via un mini property-service en `/dev/socket/property_service`, como el
+  listener de logdw, o parcheando el binario mnld) + AGPS → mnld forkea el hijo bionic, lee el 0xAAF0 del `c2p`
+  y lo convierte a NMEA → escribe donde lea el HAL/gpsd. Requiere RE de `chip_detector` en `mnld_6620.c`.
+- **(B) Decodificador 0xAAF0→NMEA propio**: darle al motor un `dae_snd_fd` VÁLIDO (arreglar por qué no honra
+  el arg), capturar los reportes binarios 0xAAF0 de 116 B, y portar el parser de mnld (posición→sentencia
+  NMEA). Evita pelear con el entorno Android de mnld pero hay que decodificar el binario.
+
+Luego (cualquier vía): NMEA → `/dev/gps`/socket → gpsd → geoclue → Phosh, + **cielo despejado** (interior=0 sat).
+
+*Noche-4b: el "connect an output" resultó ser el tramo duro real — el NMEA del motor NO se serializa
+standalone (sale como binario 0xAAF0 que mnld convierte), y mnld tiene gates de entorno Android en pmOS
+(chip_detector/property/AGPS). Data-flow 100% mapeado; falta portar mnld o el decodificador 0xAAF0.*
