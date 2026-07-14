@@ -1,0 +1,61 @@
+#!/bin/sh
+# GPS del krillin (0714): cadena mnld (stock, Vía 1) -> gpsd -> geoclue/Phosh.
+# Reemplaza el bridge viejo mtkgps_aaf0 (superado: no calcula posición; solo libmnl/mnld puede).
+#   1) carga el módulo gpsdrv (crea /dev/gps loopback + /sys/class/gpsdrv/gps)
+#   2) lanza mnld bajo el shim bionic (lee /dev/stpgps del DSP, calcula NMEA con libmnl, la escribe a /dev/gps)
+#   3) le manda INIT(0x00)+START(0x03) por el socket hal2mnld
+#   4) socat relaya /dev/gps -> PTY /run/gpsnmea (gpsd exige apertura EXCLUSIVA; mnld ya tiene /dev/gps abierto)
+#   5) gpsd lee el PTY
+#   6) gps-share.sock sirve la NMEA de gpsd a geoclue (network-nmea). geoclue.conf: modem-gps=off (si no,
+#      sería el proveedor exclusivo y taparía network-nmea).
+# Fix real = con cielo despejado (interior = 0 satélites). Ver mainline/drivers/wip/gps/HANDOFF-CHIPDETECTOR-0714.md
+export PATH=/usr/sbin:/sbin:/usr/bin:/bin:$PATH
+KO=/lib/modules/$(uname -r)/mt6582-gpsdrv.ko
+SHIM=/system/lib/libxlogshim.so
+MNLD=/system/xbin/mnld
+DIR=/data/gps_mnl
+PTY=/run/gpsnmea
+[ -x "$MNLD" ] && [ -e "$SHIM" ] || exit 0		# sin el stack de mnld, no hay GPS (no bloquear el boot)
+
+(
+  mkdir -p "$DIR"
+  # 1) gpsdrv (idempotente)
+  lsmod | grep -q gpsdrv || insmod "$KO" 2>/dev/null
+  # esperar los devices (btif=/dev/stpgps built-in; gpsdrv=/dev/gps)
+  i=0; while { [ ! -e /dev/stpgps ] || [ ! -e /dev/gps ]; } && [ $i -lt 60 ]; do sleep 0.25; i=$((i+1)); done
+  [ -e /dev/stpgps ] && [ -e /dev/gps ] || exit 0
+
+  # 2) mnld bajo el shim (property injection: chipid + service.nvram_init=Ready)
+  start-stop-daemon --start --background --make-pidfile --pidfile /run/mnld.pid \
+    --exec /usr/bin/env -- GPS_SET_CHIPID=1 GPS_XLOG_QUIET=1 \
+    LD_LIBRARY_PATH=/system/lib LD_PRELOAD="$SHIM" "$MNLD"
+  sleep 3
+
+  # 3) INIT+START al socket de comandos de mnld (hal2mnld)
+  python3 -c 'import socket,time
+s=socket.socket(socket.AF_UNIX,socket.SOCK_DGRAM)
+for b in (b"\x00",b"\x03"):
+  try: s.sendto(b,"/data/gps_mnl/hal2mnld")
+  except OSError: pass
+  time.sleep(0.5)' 2>/dev/null
+
+  # 4) relay /dev/gps -> PTY (gpsd exige exclusiva; mnld tiene /dev/gps abierto para escribir)
+  rm -f "$PTY"
+  start-stop-daemon --start --background --make-pidfile --pidfile /run/gps-relay.pid \
+    --exec /usr/bin/socat -- -u /dev/gps PTY,link=$PTY,raw,echo=0
+  i=0; while [ ! -e "$PTY" ] && [ $i -lt 20 ]; do sleep 0.2; i=$((i+1)); done
+
+  # 5) gpsd sobre el PTY (matar cualquier gpsd viejo, p.ej. del servicio OpenRC o apuntando a /dev/gps0;
+  #    pgrep -x de busybox no casa la ruta completa -> usar -f)
+  pkill -f "sbin/gpsd" 2>/dev/null; sleep 0.5
+  start-stop-daemon --start --background --make-pidfile --pidfile /run/gpsd.pid \
+    --exec /usr/sbin/gpsd -- -N -n "$PTY"
+  sleep 1
+
+  # 6) gps-share.sock: sirve la NMEA de gpsd a geoclue (network-nmea)
+  rm -f /var/run/gps-share.sock
+  start-stop-daemon --start --background --make-pidfile --pidfile /run/gps-share.pid \
+    --exec /usr/bin/socat -- UNIX-LISTEN:/var/run/gps-share.sock,fork,mode=0666 EXEC:"gpspipe -r"
+) &
+
+exit 0
