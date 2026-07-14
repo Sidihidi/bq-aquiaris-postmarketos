@@ -70,7 +70,32 @@ pero eso es NO-fatal (mnld sigue).
 nunca se llena → el reader se bloquea → NMEA vacío. El DSP está ON y el driver RX es correcto, así que el
 DSP simplemente no ACKea el burst de mnld.
 
-### ⏭️ Frontier restante: ¿por qué el DSP no responde al burst de mnld?
+### ★★ DESCUBRIMIENTO (0714): el pipeline COMPLETO funcionó en STOCK (referencia `mnld-live.strace`)
+Las capturas del Mac `~/gps/mnld-{init,live}.strace` (20 jun, entorno STOCK Android: paths
+`/data/agps_supl/`, `/dev/nvram`, `/dev/__properties__`) muestran mnld **produciendo NMEA REAL con
+satélites**: `read(13, "\xaa\xf0…", 512)=307` (el DSP RESPONDIENDO frames AAF0) → `write(14,
+"$GPGGA,235958,3736.6702,N,00058.4496,W…$GPGSV,3,1,10,21,69,171,,05,69,288,…")` = **10 satélites en
+vista** (posición de España, la del usuario). ⇒ **mnld + DSP + libmnl FUNCIONAN cuando el driver relaya
+bien los frames AAF0.** El problema es una diferencia pmOS↔stock, NO del stack de userspace.
+
+**Diagnóstico definitivo del origen**: el init stock lee de la MISMA NVRAM (`/data/nvram/APCFG/APRDEB/GPS`)
+el MISMO `dev.dsp=/dev/stpgps` + la MISMA cal TCXO; es el MISMO binario `mnld`. La ÚNICA diferencia es
+**el driver del kernel detrás de `/dev/stpgps`**: stock = connsys STP-GPS; pmOS = `mt6582-btif.c` (built-in).
+El DSP respondía en stock; con btif calla. El pwrctl del gpsdrv (`mt6582-gpsdrv.c`, módulo) es NO-OP
+(`mt6582_gps_power` = stub, echo-registers) → descartado. El power real (btif `func_on(GPS)`) está OK.
+
+### ⏭️ Frontier restante: ¿por qué el DSP no responde vía `mt6582-btif.c`?
+El driver btif SE VE correcto: `gps_write→stp_send(STP_TYPE_GPS)` (framing STP igual que BT/FM que SÍ
+funcionan; `gps_tx[1024]` no trunca; `stp_send` OK), RX demux `STP_TYPE_GPS→kfifo_in(gps_fifo)+wake`
+(línea 412). `func_on(GPS)` da OK. Pero el DSP no manda frames GPS de vuelta. Test DECISIVO pendiente:
+**probe en el kernel** — añadir `dev_info` en `gps_write` (TX GPS) y en la rama `STP_TYPE_GPS` del hilo RX
+(RX GPS) de `mt6582-btif.c`, recompilar (built-in → rebuild+reflash menupick) y correr mnld:
+- Si aparece "GPS RX<-" en dmesg → el DSP SÍ responde → el bug está en mnld/reader (o el gps_fifo).
+- Si sólo "GPS TX->" → el DSP calla vía btif → comparar el framing/canal STP-GPS con el stock connsys
+  (fuente downstream perdida; reconstruir de la doc MTK o del binario stock). Hipótesis: el DSP GPS
+  necesita un paso de init/patch por STP que el func_on stock hacía y btif no, o el canal STP difiere.
+
+**Original (menos probable):**
 El Mac vio el DSP hablar **35 frames AAF0 bidireccionales** con el runner **Fase A** → el HW+driver PUEDEN
 entregar frames GPS. Algo difiere entre mnld y Fase A. Investigar (orden):
 1. **Comparar el TX de mnld vs Fase A** (dominio del Mac — coordinar, NO en paralelo): ¿Fase A enviaba un
