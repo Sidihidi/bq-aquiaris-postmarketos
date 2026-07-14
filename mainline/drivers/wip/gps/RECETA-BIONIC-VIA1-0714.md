@@ -200,5 +200,72 @@ en nuestro HW?) **RESUELTA: sí**. `dsp_dev=/dev/stpgps` ✓, `nmea_port=/dev/gp
    → el stock maneja el DSP + emite NMEA a `/dev/gps`, y mnld lo relaya a `mnld2hal`.
 Luego: NMEA `/dev/gps` → gpsd → geoclue → Phosh, y **cielo despejado** para el fix (interior = 0 sat).
 
-*Receta 2026-07-14 (sesión Mac). **El DSP GPS habla 0xAAF0 en ambos sentidos en nuestro HW** — lo más duro,
-resuelto. Falta solo la salida NMEA: ABI del runner de Fase A, o el fork fiable del libmnlp stock.*
+## 🧪 STATUS 0714 (noche-3) — **ABI DESCARTADO**; el bloqueo del NMEA está más adentro
+Recompilado el runner con toolchain **soft-float** (`gcc-arm-linux-gnueabi`, instalado; `-mfloat-abi=soft`
+por defecto) → `mnlp_soft`. **Enlaza LIMPIO, sin `--no-warn-mismatch`** (el ABI ahora casa con los blobs
+soft-float; sin `VFP_args`). **Resultado en HW: IDÉNTICO al hard-float** — abre `/dev/stpgps` + **manda 36
+frames AA F0** al DSP + **abre `/dev/gps`** (el nmea_port), pero **CERO NMEA** (ni un `$GP` write, `/dev/gps`
+vacío). → **El ABI NO era la causa.** (Contradice el temor de Fase A, pero confirmado empíricamente.)
+
+**El bloqueo del NMEA está DENTRO de libmnl/la cadena de salida**, no en el ABI. Hipótesis a investigar
+(siguiente sesión):
+1. **libmnl no emite NMEA de estado sin medidas** — el DSP responde AA F0 pero quizá son ACK/status, no
+   pseudorangos (0 satélites en interior). El stock SÍ emitía `$GPGSA,A,1` en interior (H0) → diferencia con
+   `libmnl_6628.a` (¿otra versión?) o falta un trigger/config. **Probar con CIELO DESPEJADO** (variable real).
+2. **El callback de salida NMEA** — libmnl entrega el NMEA por un callback (`mtk_gps_sys_nmea_output_to_app`)
+   que la glue (`mnl_process_6620.c`) debe cablear a `/dev/gps`/socket. Verificar que ese callback está
+   implementado y no stubeado en los shims de Fase A. **← candidato nº1** (revisar el glue).
+3. Puede que el motor necesite la **orquestación de mnld** (comando por el pipe) para pasar de "adquirir" a
+   "emitir NMEA" — aunque single_process() corra standalone.
+
+Binarios: `mnlp_static` (hard, `~/gps/fase-a/`), `mnlp_soft` (soft, ídem). Build soft:
+`arm-linux-gnueabi-gcc -O2 -I inc -I shim -include shim/compat.h -c src/*.c` + `-c shim/bionic_shims.c` +
+`-static -o mnlp_soft obj_*.o lib/*.a -lpthread -lm -lrt`.
+
+## 🔑 STATUS 0714 (noche-4) — **CAUSA RAÍZ CERRADA: glibc ≠ bionic (pthread_mutex_t) + el motor bionic SÍ produce NMEA**
+
+### 1) Por qué el runner de Fase A NUNCA emitió NMEA (mutex, no float)
+Corriendo `mnlp_soft` con strace + captura, el runner **CRASHEA**:
+```
+Fatal glibc error: ../nptl/pthread_mutex_lock.c:94 (__pthread_mutex_cond_lock):
+  assertion failed: mutex->__data.__owner == 0
+```
+El ABI que importaba **NO era float — es el layout de `pthread_mutex_t`**: `libmnl_6628.a` se compiló contra
+headers **bionic** (mutex de 4 bytes) y al enlazarlo con **glibc** (Fase A estático, mutex de 24-40 B) el hilo
+del motor corrompe el struct → aserción fatal de glibc → **el hilo muere → 0 NMEA**. Las comms del DSP (byte a
+byte, sin mutex caliente) sí iban; la sincronización de hilos del PVT, no. **→ Recompilar Fase A es un CALLEJÓN
+SIN SALIDA** (glibc es fundamentalmente incompatible con el `.a` bionic por el tamaño del mutex). Cerrado.
+
+### 2) El `libmnlp` STOCK bionic CORRE en mainline y **PRODUCE NMEA a 1Hz**
+Corrido `env LD_LIBRARY_PATH=/system/lib LD_PRELOAD=/system/lib/libxlogshim.so /system/xbin/libmnlp_mt6582 1Hz=y`
+(directo, el kernel usa `PT_INTERP=/system/bin/linker`). Con el **shim de xlog ahora VISIBLE** (reenvía a
+stderr; `GPS_XLOG_QUIET=1` lo silencia) se ve la narración entera:
+`main → mnl_utl_load_property → single_process → mtk_gps_sys_init(×5) → linux_gps_init → **mtk_gps_sys_nmea_output_to_app ×40 (≈1Hz)**`.
+**El motor bionic ESTÁ EMITIENDO NMEA** (llama al callback de salida periódicamente). Y por el camino:
+lee `/data/nvram/APCFG/APRDEB/GPS` ✓, **abre `/dev/stpgps` + `read()`=`AA 58` del DSP** ✓, arranca **5 hilos** ✓.
+ABI-nativo → **sin crash de mutex**.
+
+**Gate resuelto**: standalone salía con `exit 255` en `openat("sc/EPO.DAT",O_RDWR)=ENOENT` (ruta RELATIVA al
+cwd). Fix = `mkdir sc; dd if=/dev/zero of=sc/EPO.DAT bs=1 count=2304` (EPO vacío = cold start; sólo exige que
+exista). Con eso pasa de EPO y navega.
+
+### 3) El único hueco que queda: el **fd de salida del NMEA**
+Standalone, `mtk_gps_sys_nmea_output_to_app` se llama a 1Hz **pero el NMEA se descarta**: el fd de "la app" es
+el **pipe que normalmente crea mnld** (fork+execv con `argv[1]=fd0 argv[2]=fd1`), ausente en standalone → 0
+bytes en `/dev/gps`. Dos formas de cerrarlo (para casa, con móvil + **cielo despejado**):
+- **(a) Vía mnld (la intencionada)**: mnld forkea `/system/xbin/libmnla` (default sin el prop
+  `persist.radio.mediatek.chipid`) → **poner ahí el STOCK bionic** (`cp libmnlp_mt6582 → /system/xbin/libmnla`,
+  ya hecho) → mnld le da el pipe, lee el NMEA y lo relaya. **PENDIENTE**: mnld **no forkeó el hijo** con solo
+  `INIT(0x00)+START(0x03)` por `hal2mnld` (queda en `launch_daemon_thread`/`mtk_gps_sys_init`, aparece
+  `mtk_gps_exit_proc`). Falta la **secuencia/estado exactos** que disparan el fork (¿ack de INIT?, ¿estado
+  DSP-ready por `/sys/class/gpsdrv`?, ¿el prop del chipid para elegir `libmnlp_mt6582`?). RE del state-machine
+  de `mnld` (`MNLD__src__mnld_6620.c`) = el siguiente paso.
+- **(b) Cablear el fd standalone**: darle al `single_process()` un fd de salida válido apuntando a `/dev/gps`
+  (más control, evita pelear con el fork de mnld). Requiere ver dónde el stock coge el "app fd" y forzarlo.
+
+**Reglas de arranque (verificadas)**: driver `mt6582-gpsdrv.ko` cargado (`/dev/gps` + `/dev/stpgps` existen);
+shim `libxlogshim.so` (con xlog visible) en `/system/lib`; `sc/EPO.DAT` en el cwd; `mkdir -p /data/gps_mnl`.
+
+*Receta 2026-07-14 (sesión Mac, noche-4). **El motor GPS bionic corre y produce NMEA a 1Hz en pmOS mainline.**
+Falta sólo enrutar ese NMEA a `/dev/gps` (fork de mnld o fd standalone) + cielo despejado. Fase A (glibc)
+descartada por el mutex ABI. Móvil: multiboot sector 83968; ver [[reference-mtkclient-krillin]].*
