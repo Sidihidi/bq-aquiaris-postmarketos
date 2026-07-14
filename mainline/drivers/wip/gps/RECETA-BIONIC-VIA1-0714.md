@@ -322,3 +322,36 @@ Luego (cualquier vía): NMEA → `/dev/gps`/socket → gpsd → geoclue → Phos
 *Noche-4b: el "connect an output" resultó ser el tramo duro real — el NMEA del motor NO se serializa
 standalone (sale como binario 0xAAF0 que mnld convierte), y mnld tiene gates de entorno Android en pmOS
 (chip_detector/property/AGPS). Data-flow 100% mapeado; falta portar mnld o el decodificador 0xAAF0.*
+
+## 🧩 STATUS 0714 (noche-4c) — Vía A intentada: property RESUELTO, pero el fork de mnld es un muro (binario ≠ fuente)
+
+Intento de la **vía A** (que mnld forkee el hijo). Dos resultados:
+
+### ✅ AVANCE REAL: el gate del chipid/property RESUELTO con el área de bionic
+La interposición LD_PRELOAD de `property_get` no va en bionic, pero **poblar el ÁREA real de properties SÍ**:
+en el `constructor` del shim → `__system_property_area_init()` + `__system_property_add("persist.radio.mediatek.chipid",29,"0x6582",6)`
+(símbolos exportados por `/system/lib/libc.so`, verificado). **Crea `/dev/__properties__` (128KB) con el chipid**
+(`strings` lo confirma: `persist.radio.mediatek.chipid`=`0x6582`), y **el bionic lo abre y lo lee** (fd 3). Así
+`property_get` del stock funciona NORMAL, sin interponer, y se hereda al hijo forkeado. **Técnica reutilizable
+para correr cualquier daemon Android/bionic en pmOS que dependa de properties.** (Conmutable: `GPS_SET_CHIPID=1`.)
+
+### ❌ MURO: mnld NO llega al `fork()` — y la fuente `nu3001` NO coincide con el binario
+Con o sin property, mnld es **idéntico y consistente**: `start_mnl_process` → escribe `pwrctl`/`state` a
+`/sys/class/gpsdrv` ✓ → **`launch_daemon_thread` se traza (×4) pero NUNCA hace `pipe()` ni `fork()`** (strace
+`-f -e pipe,pipe2,clone,fork,vfork` = 0 forks, 0 pipes; 0 hijos `libmnla`; `mtk_gps_exit_proc`=0). Según
+`nu3001/MNLD__src__mnld_6620.c` (la fuente que leí) **entre el `MND_TRC()` de entrada y el `pipe()` no hay NADA**
+→ imposible que se trace la entrada y no llame a pipe. **Conclusión: el binario `mnld` de LineageOS NO es esta
+versión de la fuente** — hace algo distinto antes del fork (¿otra detección de chip?, ¿un gate de estado?, ¿AGPS
+bloqueante?). El RE remoto sobre la fuente equivocada es poco fiable.
+
+### ⏭️ Para casa (con el móvil en mano)
+- **Desensamblar el `mnld` real** (`/system/xbin/mnld`, ~72KB, ARM) alrededor de `start_mnl_process`/
+  `launch_daemon_thread` para ver el gate real del fork (Ghidra/objdump), O
+- **Arrancar LineageOS** (dual-boot) y `strace -f` su `mnld` durante un fix real → ver la secuencia CORRECTA
+  (qué properties/ficheros/estado necesita antes de forkear) y replicarla, O
+- **gdb interactivo** sobre el mnld en pmOS (breakpoint en el fork) para ver por qué no llega.
+- El property ya no es el gate (resuelto). El bloqueo es el camino al fork dentro del binario mnld.
+- Alternativa: **vía B** (decodificador 0xAAF0→NMEA propio) sigue en pie y NO depende de mnld.
+
+*Noche-4c: property/chipid gate RESUELTO (área bionic real, reutilizable). El fork de mnld sigue bloqueado
+pero la causa es que la fuente nu3001 ≠ binario — necesita desensamblado/gdb/Lineage-ref (casa).*

@@ -83,3 +83,26 @@ int property_get(const char *key, char *value, const char *default_value)
         value[0] = 0;
     return 0;
 }
+
+/* Al cargar el shim (LD_PRELOAD, antes de main) en el proceso mnld/bionic: crear
+ * el ÁREA de properties de bionic y añadir el chipid que mnld necesita para elegir
+ * `/system/xbin/libmnlp_mt6582`. Como la interposición de property_get NO va en
+ * bionic (solo símbolos indefinidos), en vez de eso poblamos el área REAL con la
+ * propia API de bionic → property_get() del stock la lee normal, y el área se
+ * hereda al hijo forkeado (que la consulta antes del execl). Símbolos exportados
+ * por /system/lib/libc.so (verificado). */
+extern int __system_property_area_init(void);
+extern int __system_property_add(const char *name, unsigned namelen,
+                                 const char *value, unsigned valuelen);
+
+__attribute__((constructor))
+static void gps_shim_setup_props(void)
+{
+    /* conmutable: solo si GPS_SET_CHIPID=1 (para aislar si esto afecta al fork de mnld) */
+    char *e = getenv("GPS_SET_CHIPID");
+    if (!(e && e[0] == '1'))
+        return;
+    __system_property_area_init();
+    /* "persist.radio.mediatek.chipid" = 29 chars ; "0x6582" = 6 chars */
+    __system_property_add("persist.radio.mediatek.chipid", 29, "0x6582", 6);
+}
