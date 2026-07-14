@@ -13,3 +13,8 @@
 
 int __xlog_buf_printf(int a, const char *b, const char *c, ...) { return 0; }
 int __xlog_buf_vprintf(int a, const char *b, const char *c, void *d) { return 0; }
+
+/* Callback AGPS que libmnl.so referencia y que en el stock provee mnld/agpsd.
+ * AGPS es OPCIONAL (no bloquea el fix básico) -> no-op para poder correr el
+ * libmnlp stock (bionic) con la libmnl.so stock (ABI correcto). */
+long mtk_gps_sys_agps_disaptcher_callback(long a, long b, long c, long d) { return 0; }

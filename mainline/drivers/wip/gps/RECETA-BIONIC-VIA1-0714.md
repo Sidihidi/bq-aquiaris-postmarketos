@@ -177,5 +177,28 @@ soft/hard-float) necesita depuración, y/o falta cielo despejado para datos.
 `gps-bionic-shim.c` (xlog no-op ✓), bundle bionic + calibración en `.123`. Deploy del runner:
 `mnlp_static → /system/xbin/libmnla`.
 
-*Receta 2026-07-14 (sesión Mac). gps.c PORTADO y funcionando; arquitectura completa mapeada; `/dev/stpgps`
-abierto por el runner. Falta estabilizar el libmnlp runner + cielo despejado para el fix.*
+## 🛰️ STATUS 0714 (noche-2) — **EL DSP GPS ESTÁ VIVO Y COMUNICÁNDOSE** (0xAAF0 bidireccional)
+Corriendo el **runner de Fase A DIRECTO** (`/system/xbin/libmnla 1Hz=y`, salta a `single_process()` porque
+mnld pasa argc=5 y el `main` espera argc==3/4): **abre `/dev/stpgps`, escribe frames `AA F0` al DSP** (incl.
+`AA F0 09 00 05 FE ...` = el tipo-0x05 del START) **Y EL DSP RESPONDE** con frames `AA F0` (ej.
+`read=AA F0 0E 00 31 FE ...`). **35 frames AA F0 en 40s.** → La parte más incierta (¿el DSP arranca y habla
+en nuestro HW?) **RESUELTA: sí**. `dsp_dev=/dev/stpgps` ✓, `nmea_port=/dev/gps` ✓ (verificados en el binario).
+
+**PERO: 0 NMEA.** Dos runners, dos problemas complementarios:
+- **(A) Runner de Fase A** (`mnlp_static`, glue abierto + `libmnl_6628.a`, estático): **habla con el DSP** pero
+  **NUNCA emite NMEA** (ni un `$GP`) → encaja con el **riesgo ABI soft/hard-float** de Fase A (las comms del
+  DSP son byte/int → OK; el PVT/salida NMEA usa floats por valor → roto). Fix = recompilar con **sysroot
+  soft-float** (`-mfloat-abi=soft`, instalar el multilib `gnu/stubs-soft.h`) para casar el ABI de los blobs.
+- **(B) `libmnlp` STOCK bionic** (`libmnlp_mt6582`, usa la `libmnl.so` stock = **ABI correcto**): **linka**
+  (tras stubear el símbolo AGPS `mtk_gps_sys_agps_disaptcher_callback` no-op en el shim) y **abre
+  `/dev/stpgps`**, pero standalone **no lo maneja** — su `main` **necesita el pipe + comandos de mnld**
+  (argc==3/4). Y **el `fork()`+`execv` de mnld al hijo es FRÁGIL** (a veces lanza el runner, a veces no).
+
+### ⏭️ Para cerrar (dos vías, cualquiera vale)
+1. **Arreglar el ABI del runner de Fase A** (recompilar soft-float) → emite NMEA standalone (más control). O
+2. **Arreglar el fork de mnld** para que lance de forma fiable el **libmnlp STOCK** (ABI-correcto) con el pipe
+   → el stock maneja el DSP + emite NMEA a `/dev/gps`, y mnld lo relaya a `mnld2hal`.
+Luego: NMEA `/dev/gps` → gpsd → geoclue → Phosh, y **cielo despejado** para el fix (interior = 0 sat).
+
+*Receta 2026-07-14 (sesión Mac). **El DSP GPS habla 0xAAF0 en ambos sentidos en nuestro HW** — lo más duro,
+resuelto. Falta solo la salida NMEA: ABI del runner de Fase A, o el fork fiable del libmnlp stock.*
