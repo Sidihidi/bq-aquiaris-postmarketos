@@ -52,18 +52,38 @@ Diagnóstico DEFINITIVO del tráfico al DSP (strace read/write/ioctl, fd 11 = /d
 - Los `ioctl(11)` termios (TCSETS B115200…) fallan **ENOTTY** (`pmtk.conn=serial` trata el STP como UART;
   también en Android = no-fatal).
 
-**El frontier ES el read-back del DSP.** Hipótesis a investigar (orden):
-1. **¿Hay un hilo LECTOR de /dev/stpgps que no arranca?** (En stock, un thread aparte lee el STP y
-   despacha frames.) Revisar en el strace COMPLETO si algún tid hace `read(11)` que bloquea
-   (`<unfinished>`), o si el lector nunca se crea. Si no se crea → ver por qué (¿otra prop? ¿otro gate en
-   `linux_gps_init`/`FUN_00017048`/`FUN_00018458`, decompilables con el mismo método Ghidra).
-2. **Power/arranque del DSP vía gpsdrv**: la secuencia `pwrctl` 0→1→2 (OFF/ON/RST) del driver
-   `mt6582-gpsdrv.c` — ¿enciende el DSP de verdad? El Mac vio el DSP hablar 35 frames AAF0 con OTRO runner
-   (Fase A), así que el HW responde; con mnld hay que confirmar que el power se aplica igual.
-3. **Sky view**: interior = 0 satélites; aun sin fix el motor debería emitir `$GPGGA` vacío + `$GPGSV`
-   si recibe medidas. Sin read-back (punto 1/2) no llega ni a eso.
-4. **Ruta de salida**: cuando haya NMEA, mnld escribe en fd12→/dev/gps y fd13→socket(HAL); enganchar a
-   gpsd/geoclue (`zzz-gps.start` ya existe).
+### DIAGNÓSTICO COMPLETO (0714, Ghidra mnld + dmesg + strace + fuente del driver)
+Cadena de init tras el gate (decompilada, `FUN_000184b0`): `mtk_gps_sys_init` OK → `FUN_00017048`
+(=linux_gps_init: `open(/dev/stpgps)` + ioctls STP cmd 7/8 + `mtk_gps_sys_function_register` +
+**`mtk_gps_mnl_run()` que DEBE devolver 0x12**) → `FUN_00018458` (sigaction SIGTERM) → `FUN_00017e64`.
+El motor `mtk_gps_mnl_run` SÍ corre (dispara `mtk_gps_sys_nmea_output_to_app` 10×) y su reader
+(tid separado) queda **BLOQUEADO en `read(/dev/stpgps)`** esperando datos.
+
+**El DSP está ENCENDIDO** (dmesg boot: `func_on[GPS]: *** RADIO ENCENDIDO ***` + `CHIP LISTO + BT/GPS ON`).
+**El driver del char device es correcto** (`drivers/soc/mediatek/mt6582-btif.c`, `gps_fops`):
+`gps_write`→`stp_send(STP_TYPE_GPS)` (el burst sale), `gps_read`←`gps_fifo` (bloquea si vacío), y el hilo
+RX demuxea bien: `if (type==STP_TYPE_GPS) { kfifo_in(gps_fifo); wake_up(gps_wq); }` (línea ~412).
+`gps_fops` **NO tiene `.unlocked_ioctl`** → los ioctls STP de mnld (cmd 7/8, versión de chip) dan ENOTTY,
+pero eso es NO-fatal (mnld sigue).
+
+**⇒ El blocker exacto: mnld ESCRIBE el burst AAF0 al DSP (por STP) pero el DSP NO RESPONDE** → `gps_fifo`
+nunca se llena → el reader se bloquea → NMEA vacío. El DSP está ON y el driver RX es correcto, así que el
+DSP simplemente no ACKea el burst de mnld.
+
+### ⏭️ Frontier restante: ¿por qué el DSP no responde al burst de mnld?
+El Mac vio el DSP hablar **35 frames AAF0 bidireccionales** con el runner **Fase A** → el HW+driver PUEDEN
+entregar frames GPS. Algo difiere entre mnld y Fase A. Investigar (orden):
+1. **Comparar el TX de mnld vs Fase A** (dominio del Mac — coordinar, NO en paralelo): ¿Fase A enviaba un
+   init/secuencia distinta? ¿mnld re-envía el burst cada ~4 frames (visto en strace: burst→3×t=05→burst) y
+   eso RESETEA el DSP antes de que responda? Probar: mandar el burst UNA vez (sin el re-envío de mnld) y
+   leer /dev/stpgps con timeout — ¿responde? (capturar el burst 116B completo con `strace -s 300` de una
+   run larga, luego replay directo).
+2. **La cal TCXO en el burst**: el burst 116B lleva los TCXO de NVRAM (`/data/nvram/APCFG/APRDEB/GPS`);
+   si están mal, el DSP podría ignorarlo. Verificar que la NVRAM GPS es la real del móvil.
+3. **Sky view**: aun así el DSP debería ACKear el init (reportar 0 satélites) sin necesidad de cielo; que
+   no ACKee = init/protocolo, no falta de satélites.
+4. **Ruta de salida** (cuando haya frames): mnld → fd12=/dev/gps + fd13=socket(HAL) → gpsd/geoclue
+   (`zzz-gps.start` ya existe).
 
 ## Estado en el móvil (Alpine/pmOS)
 Shim v3 limpio en `/system/lib/libxlogshim.so` (v2 en `.v2`). Setup del Mac intacto: `gpsdrv` cargado,
