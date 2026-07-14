@@ -37,7 +37,22 @@ llega al fork()"). Comprobado:
   driver `mt6582-gpsdrv.c` reporta siempre **"0, none"** (visto en el status) → libmnl no ve "listo" →
   `mtk_gps_exit_proc`. La lógica exacta de "listo" está DENTRO de libmnl (no RE-able por fuente).
 
+## Probado (casa 0714, NO cerró): sysfs_notify + state=START en el gpsdrv
+Hipótesis: libmnl hace `poll()` de `status`/`state` esperando un `sysfs_notify` tras `pwrctl=RST`.
+Parcheado `mt6582-gpsdrv.c`: en la rama `GPS_PWRCTL_RST` → `o->state=GPS_STATE_START` +
+`sysfs_notify(kobj,"status")`+`sysfs_notify(kobj,"state")` (+ notify en cada `state_store`). Recompilado
+(.ko) y recargado. **Resultado**: el `state` SÍ transiciona a 2 (START) tras el `pwrctl=RST` de mnld, pero
+el flujo del mnld.log es **idéntico** (`launch_daemon_thread → mtk_gps_sys_init → launch_daemon_thread →
+mtk_gps_exit_proc → main`). **El gate NO es el poll de status/state.** Está más adentro, en `mtk_gps_sys_init`
+(la init del DSP DENTRO del `libmnl` cerrado — el daemon-thread se aborta ahí, no en la interfaz gpsdrv).
+El driver con el notify quedó cargado en el móvil (inofensivo; arguablemente correcto). No RE-able por
+la interfaz del driver → hace falta desensamblar `libmnl.so` (Ghidra) el `mtk_gps_sys_init`/`launch_daemon`
+para ver qué comprueba antes de forkear el runner (¿otro fd? ¿un ioctl a stpgps? ¿un valor concreto?).
+
 ## ⏭️ Para cerrar (candidatos, orden de valor)
+0. **Desensamblar `libmnl.so`** (`/system/lib/libmnl.so`, ARM, con Ghidra) el `mtk_gps_sys_init` +
+   `launch_daemon_thread`: ver qué comprueba/abre justo antes del fork del runner y por qué hace
+   `mtk_gps_exit_proc`. Es el gate real y está en el binario cerrado. (chip_detector ya no bloquea.)
 1. **Hallar el valor "listo" que libmnl espera del gpsdrv** y hacer que el driver `mt6582-gpsdrv.c` lo
    reporte tras `pwrctl` (state/status). Sin strace en el móvil, opciones: (a) desensamblar el `libmnl.so`
    (Ghidra) el read de `/sys/class/gpsdrv/gps/{state,status}` tras el `write pwrctl`; (b) probar valores en
