@@ -84,7 +84,27 @@ el MISMO `dev.dsp=/dev/stpgps` + la MISMA cal TCXO; es el MISMO binario `mnld`. 
 El DSP respondía en stock; con btif calla. El pwrctl del gpsdrv (`mt6582-gpsdrv.c`, módulo) es NO-OP
 (`mt6582_gps_power` = stub, echo-registers) → descartado. El power real (btif `func_on(GPS)`) está OK.
 
-### ⏭️ Frontier restante: ¿por qué el DSP no responde vía `mt6582-btif.c`?
+### ★★★ CORRECCIÓN MAYOR (0714 noche): EL DSP ESTÁ VIVO Y PRODUCE FRAMES AAF0 EN pmOS
+Test directo (leer `/dev/stpgps` SIN mnld, `dd`/python): el DSP **emite frames de medida 0xAAF0
+continuamente**: `aa f0 0c 80 28 fe … aa 0f` (tipo 0x28), `aa f0 3d 80 29 fe …` (tipo 0x29) — IGUAL que
+en stock. El 4º byte varía (0x10/0x30/0x80 = campo de secuencia, NO un flag de error; el 0x00 de stock
+era un instante). Y siguen saliendo **incluso mientras mnld corre** (lectura concurrente los recibe).
+⇒ **HW + kernel (`mt6582-btif.c` STP-GPS) + DSP FUNCIONAN.** Mi diagnóstico anterior de "DSP callado"
+era FALSO — el DSP nunca estuvo callado; el fallo es que **mnld no CONSUME los frames**.
+
+**El blocker real (aislado): el reader de mnld no lee los frames del DSP.** strace: el hilo reader de
+mnld hace `read(11) <unfinished>` ×N = BLOQUEADO, y NO consume `/dev/stpgps` (mi `dd` concurrente SÍ
+recibe los frames del mismo `gps_fifo`). Comportamiento **NO determinista** entre runs: a veces mnld
+abre `/dev/stpgps` y escribe el burst (run de uptime 10h), a veces el reader bloquea en un fd que NO es
+stpgps y mnld sólo emite NMEA placeholder (`$GPGGA,…,8960.0000,N,00000.0000,E,0` = polo norte = "sin
+datos"). Hipótesis: race/bug en el arranque del motor (mtk_gps_mnl_run) al pasar el dsp_fd al reader, o
+el `kfifo_reset` del driver en cada `gps_open` descartando frames si mnld reabre. **La cadena de fix
+resuelta (gate) está OK; falta cerrar esta última milla del reader de mnld** (RE de `mtk_gps_mnl_run` en
+la `libmnl.so` NO-stripped `gps-fm-extract/lib/`, o comparar el fd-passing con el flujo stock de
+`mnld-live.strace`). Regresión menor: el `.ko` `mt6582-gpsdrv` NO auto-carga al boot (el Mac lo insmod-eó
+a mano) → añadir `insmod` a un boot script (`~/gpsdrv-mod/mt6582-gpsdrv.ko`).
+
+### ⏭️ (histórico) Frontier: ¿por qué el DSP no responde vía `mt6582-btif.c`? — RESPONDIDO: SÍ responde
 El driver btif SE VE correcto: `gps_write→stp_send(STP_TYPE_GPS)` (framing STP igual que BT/FM que SÍ
 funcionan; `gps_tx[1024]` no trunca; `stp_send` OK), RX demux `STP_TYPE_GPS→kfifo_in(gps_fifo)+wake`
 (línea 412). `func_on(GPS)` da OK. Pero el DSP no manda frames GPS de vuelta. Test DECISIVO pendiente:
