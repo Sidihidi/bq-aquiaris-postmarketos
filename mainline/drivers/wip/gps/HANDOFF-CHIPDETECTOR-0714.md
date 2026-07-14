@@ -1,101 +1,66 @@
-# GPS Vía 1 (mnld) — chip_detector RESUELTO; gate final = bucle `mtk_gps_sys_init` de mnld (Ghidra) — 0714 (casa)
+# GPS Vía 1 (mnld) — ★ GATE RESUELTO: mnld ABRE /dev/stpgps y corre el motor en pmOS (0714 casa)
 
-> Continuación de `RECETA-BIONIC-VIA1-0714.md` (sesión Mac). Avancé el gate: **mnld ya PASA
-> chip_detector** con el shim v2; el blocker se movió a `launch_daemon_thread → mtk_gps_exit_proc`.
->
-> **CIERRE de esta sesión (strace fino)**: descartado el candidato del read-offset del gpsdrv (era el EOF del
-> config `/data/misc/mnl.prop`). El gpsdrv funciona bien. El gate real es el **bucle interno de
-> `mtk_gps_sys_init` de mnld** que nunca abre `/dev/stpgps` → necesita **Ghidra sobre `mnld`** (o la Vía A
-> soft-float, que evita el binario cerrado). Ver §"El gate real".
+> Continuación de `RECETA-BIONIC-VIA1-0714.md` (sesión Mac). **RESUELTO el gate final** con Ghidra
+> local (Windows) sobre el binario `mnld`. El stack GPS stock ahora corre en pmOS, ABRE el DSP
+> (`/dev/stpgps`) y el motor genera eventos NMEA. Reproducible (2/2 runs, sin crash).
 
-## Lo que estaba pasando (y lo arreglado)
-El `mnld` stock (Vía 1) se quedaba en **bucle de `chip_detector`** → nunca forkeaba el runner. Raíz
-localizada por strings del `mnld`: lee el property **`persist.mtk.wcn.combo.chipid`** (NO el
-`persist.radio.mediatek.chipid` que ponía el shim v1). En pmOS no hay área de properties de bionic →
-`property_get` devuelve vacío → chip_detector falla.
+## ★ RESUMEN EJECUTIVO (lo conseguido)
+`mnld` + `libmnl.so` stock, bajo el shim bionic (`libxlogshim.so`), en pmOS (Alpine/musl), ahora:
+`main → chip_detector → epoll → START → mtk_gps_sys_init OK → linux_gps_init → **ABRE /dev/stpgps** →
+mtk_gps_sys_nmea_output_to_app (motor produciendo NMEA)`. Verificado: `stpgps_pid` vivo, `SIGSEGV=0`,
+`nmea_output_calls=10` por run. **La Vía 1 llega al DSP.**
 
-**Fix (shim v2, `gps-bionic-shim-v2.c`, VALIDADO)**: poblar el área de properties de bionic con el chipid
-correcto. Dos claves respecto al v1:
-1. La clave correcta = **`persist.mtk.wcn.combo.chipid` = "0x6582"** (28 chars). (Se añade también la
-   `persist.radio.mediatek.chipid` por si acaso.)
-2. Usar **`dlsym`** en runtime para `__system_property_area_init`/`__system_property_add` (SÍ los exporta
-   `/system/lib/libc.so`, versión `@@LIBC`) — el v1 los referenciaba directo y petaba al relocar el shim
-   `-nostdlib` con "symbol not found". Con dlsym el shim carga limpio.
-Compilar: `arm-linux-gnueabihf-gcc -shared -nostdlib -fPIC -O1 -o libxlogshim.so gps-bionic-shim-v2.c -ldl`.
-Correr: `env GPS_SET_CHIPID=1 LD_LIBRARY_PATH=/system/lib LD_PRELOAD=/system/lib/libxlogshim.so /system/xbin/mnld`.
+## El gate final (RE con Ghidra, ghidra-mnld/)
+Objdump fallaba (Thumb-2 stripped) → **Ghidra headless local** (`ghidra_12.1.2`, Java) sobre `mnld`
+(72KB, md5 `300daa4c…`, idéntico al del móvil). Scripts `FindGate.java`/`GetRefs.java`, salidas
+`*-decomp.txt`/`*-refs.txt`. Hallazgo (`FUN_000140fc` = `mtk_gps_sys_init`):
+```c
+do {                                        // bucle 20x, 500ms cada uno
+    property_get("service.nvram_init", buf, 0);
+    if (strcmp(buf, "Ready") == 0) break;   // ← rompe SÓLO si la prop == "Ready"
+    usleep(500000);
+} while (++i != 0x14);
+if (i == 0x14) return -1;                    // agotado → ERROR → el motor NUNCA abre el DSP
+// éxito → NVM_GetFileDesc(LID 0x1b) [NO-fatal] → return 0
+```
+La KEY del `property_get` = **`service.nvram_init`**, el valor esperado = **`"Ready"`** (strings en
+`refs.txt` @0x1b854/@0x1b867). En Android lo pone el `nvram_daemon`; en pmOS no existe → el gate no pasa
+nunca. `FUN_00014ef4` (el que abre `/dev/stpgps` + `read_NVRAM`) está gated tras ese éxito.
 
-**Resultado**: el flujo del `mnld.log` ahora avanza: `main → chip_detector` (una vez, ya no bucle) `→
-epoll_init → socket_handler → start_mnl_process → launch_daemon_thread → mtk_gps_sys_init →
-launch_daemon_thread → mtk_gps_exit_proc`. **chip_detector superado.** (El shim v2 ya está desplegado en
-`/system/lib/libxlogshim.so` del móvil; backup del v1 en `.v1`.)
+## El FIX (shim v3, `gps-bionic-shim-v2.c`, VALIDADO)
+Inyectar en el área de properties de bionic: `service.nvram_init="Ready"` (+ los chipid del v2). Detalles
+finos que costaron (todos resueltos):
+1. **Lazy-init, no constructor**: el `__attribute__((constructor))` del build `-nostdlib` NO corría
+   fiable en el linker bionic (y si corría, era ANTES de `environ` → `getenv`=NULL → envenenaba el flag).
+   → la inyección va en la 1a llamada real a `__xlog_buf_printf`.
+2. **CAS atómico** (`__sync_bool_compare_and_swap`): mnld es multihilo; 2 hilos llamando a la vez hacían
+   doble `area_init`/`prop_add` → SIGSEGV. Sólo 1 hilo inyecta.
+3. **`unlink("/dev/__properties__")` antes de `area_init`**: bionic mapea ese backing READ-ONLY para
+   lectores; si una run previa lo dejó, el `area_init` de la nueva run lo mapea r/o → `prop_add` SIGSEGV
+   en `área+4`. Borrarlo lo hace fresco/escribible → auto-reparable en cada arranque.
+4. dlsym de `__system_property_{area_init,add,get}` (el v1 petaba al relocar por versión @@LIBC).
+Compilar/uso: cabecera del `.c`. Markers `[shim] service.nvram_init="Ready"` confirman la inyección.
 
-## El SIGUIENTE blocker (bien acotado): launch_daemon_thread no forkea
-Tras enviar `INIT(0x00)+START(0x03)` al socket `hal2mnld`, mnld llega a `launch_daemon_thread` pero hace
-**`mtk_gps_exit_proc` ANTES de forkear** el runner (coincide con la nota del Mac: "launch_daemon_thread no
-llega al fork()"). Comprobado:
-- **No es el runner que muere**: el runner stock (`libmnlp_mt6582`) corre bien **a mano** con el env del
-  shim (llega a `main` + carga properties) — probado con un wrapper `libmnla`/`libmnlp_mt6582` que inyecta
-  `LD_PRELOAD`+`LD_LIBRARY_PATH` y exec-a el binario real. O sea, el runner NO es el problema; es mnld que
-  no llega a lanzarlo.
-- **Sospecha fuerte = el gate del "DSP listo"** (nota Mac noche): en START, libmnl (cerrado) escribe
-  `pwrctl` y **espera que `/sys/class/gpsdrv/gps/status` diga "listo"** antes de forkear/abrir el DSP. El
-  driver `mt6582-gpsdrv.c` reporta siempre **"0, none"** (visto en el status) → libmnl no ve "listo" →
-  `mtk_gps_exit_proc`. La lógica exacta de "listo" está DENTRO de libmnl (no RE-able por fuente).
+## ⏭️ Lo que falta: NMEA CON DATOS (→ fix)
+El motor dispara `mtk_gps_sys_nmea_output_to_app` pero aún **no se ven sentencias `$G...` con datos**
+(ni en el log, ni en writes, ni en /dev/gps). Diagnóstico del tráfico al DSP (strace read/write/ioctl,
+fd 11 = /dev/stpgps): mnld hace `read(11)`×60, `write(11)`×19, **`ioctl(11)` termios de TTY
+(TCSETS B115200…) = ENOTTY** (porque `pmtk.conn=serial` trata el STP como UART; también pasa en Android,
+presumiblemente no-fatal). Próximos pasos para el NMEA:
+1. **Confirmar si el DSP RESPONDE** a mnld: ¿los `read(11)` devuelven frames `AA F0` o 0/bloqueo? (El Mac
+   ya vio el DSP hablar 35 frames con OTRO runner; verificar con mnld.) Si no responde → revisar el
+   power/burst de arranque del DSP (¿la secuencia gpsdrv pwrctl/RST correcta?).
+2. **Sky view**: en interior no hay fix (0 satélites); aun sin fix, el motor debería emitir `$GPGGA`
+   vacío + `$GPGSV`. Si ni eso sale, el motor no está recibiendo medidas del DSP (punto 1).
+3. **Ruta de salida del NMEA**: mnld tiene fd12→/dev/gps y fd13→socket(HAL). Cuando haya NMEA, engancharlo
+   a gpsd/geoclue (la cadena `zzz-gps.start` ya existe) o leer /dev/gps.
 
-## Probado (casa 0714, NO cerró): sysfs_notify + state=START en el gpsdrv
-Hipótesis: libmnl hace `poll()` de `status`/`state` esperando un `sysfs_notify` tras `pwrctl=RST`.
-Parcheado `mt6582-gpsdrv.c`: en la rama `GPS_PWRCTL_RST` → `o->state=GPS_STATE_START` +
-`sysfs_notify(kobj,"status")`+`sysfs_notify(kobj,"state")` (+ notify en cada `state_store`). Recompilado
-(.ko) y recargado. **Resultado**: el `state` SÍ transiciona a 2 (START) tras el `pwrctl=RST` de mnld, pero
-el flujo del mnld.log es **idéntico** (`launch_daemon_thread → mtk_gps_sys_init → launch_daemon_thread →
-mtk_gps_exit_proc → main`). **El gate NO es el poll de status/state.** Está más adentro, en `mtk_gps_sys_init`
-(la init del DSP DENTRO del `libmnl` cerrado — el daemon-thread se aborta ahí, no en la interfaz gpsdrv).
-El driver con el notify quedó cargado en el móvil (inofensivo; arguablemente correcto). No RE-able por
-la interfaz del driver → hace falta desensamblar `libmnl.so` (Ghidra) el `mtk_gps_sys_init`/`launch_daemon`
-para ver qué comprueba antes de forkear el runner (¿otro fd? ¿un ioctl a stpgps? ¿un valor concreto?).
+## Estado en el móvil (Alpine/pmOS)
+Shim v3 limpio en `/system/lib/libxlogshim.so` (v2 en `.v2`). Setup del Mac intacto: `gpsdrv` cargado,
+calibración TCXO (`/data/nvram/APCFG/APRDEB/GPS`), `mnld`/`libmnlp_mt6582`/`libmnl.so` en /system,
+config `/data/misc/mnl.prop` (`dev.dsp=/dev/stpgps pmtk.conn=serial`). Arranque validado:
+`env GPS_SET_CHIPID=1 LD_LIBRARY_PATH=/system/lib LD_PRELOAD=/system/lib/libxlogshim.so /system/xbin/mnld`
++ enviar `\x00\x03` al socket `hal2mnld`.
 
-## ★★ STRACE del mnld (casa 0714) — MECANISMO REVELADO (corrige la suposición del fork)
-`strace -f` de mnld (con chipid+shim) muestra la secuencia real tras el START:
-- Abre los sysfs del gpsdrv (status/pwrctl/state/suspend/pwrsave) OK, crea un **socketpair [8,9]**,
-  lee la config (`dev.dsp=/dev/stpgps dev.gps=/dev/gps debug_nmea=1 pmtk.conn=serial`).
-- **NO hay fork+execv de un runner separado**: hace **`clone(CLONE_THREAD)`** = un HILO (el motor corre
-  DENTRO de mnld usando `libmnl.so` directamente). → **la Vía 1 NO necesita el runner libmnlp aparte**
-  (adiós al problema del ABI/args del runner). El símbolo `mnld` tenía los strings del gate (no libmnl):
-  `launch_daemon_thread`/`mtk_gps_sys_init`/`mtk_gps_exit_proc` son log-tags de mnld.
-- **Secuencia gpsdrv**: mnld escribe `pwrctl` **0→1→2** (OFF→ON→RST) en el fd, y luego lo **lee VACÍO**
-  (`read(fd,"")=0`) — porque las 3 escrituras avanzaron el offset del fd más allá del valor del sysfs.
-- **`/dev/stpgps` NUNCA se abre** → el hilo principal **gira en `mtk_gps_sys_init` SIN syscalls** (espera
-  una condición en memoria) → nunca llega al DSP.
-- El hilo daemon (tid nuevo) hace `connect(/dev/socket/property_service)` = **ENOENT** (no existe en pmOS).
-
-## ⚠️ Candidato #1 (read-offset del gpsdrv) DESCARTADO
-Análisis fino de la secuencia cruda del strace: el `read(fd,"")=0` que parecía un read del gpsdrv es en
-realidad el **EOF del fichero de config `/data/misc/mnl.prop`** (mnld lo lee OK, 86 bytes:
-`dev.dsp=/dev/stpgps dev.gps=/dev/gps debug_nmea=1 mnl=ff pmtk.conn=serial`). Los writes al gpsdrv van
-cada uno a un **fd fresco** (openat por cada write) → NO hay problema de offset. El driver del gpsdrv
-**funciona bien**; NO es el gate. (El patch de sysfs_notify queda como mejora inofensiva.)
-
-## ⏭️ El gate real (refinado): el bucle de `mtk_gps_sys_init` DENTRO de mnld
-Secuencia tras el START: `pwrctl=2`(RST) → lee la config OK → `mnl_utl_load_property` → **bucle de
-`mtk_gps_sys_init`** (función INTERNA de mnld, no de libmnl — el string está en mnld) que **NUNCA intenta
-abrir `/dev/stpgps`** (0 openat de stpgps en todo el strace) → tras ~20 vueltas, `mtk_gps_exit_proc`.
-El bucle no hace syscalls → espera una condición en memoria. Candidatos restantes:
-1. **Ghidra sobre `mnld`** (72KB, Thumb-2 stripped): desensamblar/decompilar `mtk_gps_sys_init` para ver
-   qué comprueba antes de abrir el DSP y por qué reintenta+abandona. Es EL gate y es RE de binario.
-   (objdump NO sirve: mal-desensambla el Thumb; Ghidra auto-detecta.) ⚠️ Disco de la Pi al 93% — Ghidra
-   ocupa ~400MB, liberar espacio primero o correrlo en otra máquina (¿la del Mac?).
-2. **property_service** (menor probabilidad): el hilo daemon falla al `connect(/dev/socket/property_service)`;
-   si `mtk_gps_sys_init` espera un property que el daemon SETea por ahí, un property_service mínimo lo
-   desbloquearía. Verificar primero con Ghidra si el bucle depende de eso.
-3. **Alternativa (Vía A, ABI) — SIN RE de binario cerrado**: recompilar el runner de Fase A (`mnlp_static`)
-   con sysroot **soft-float** → habla con el DSP (ya probado por el Mac) Y emitiría NMEA — evita TODO el
-   gate de mnld/`mtk_gps_sys_init`. Es la vía que NO depende de decompilar mnld; si Ghidra se atasca, esta
-   es el camino de menor riesgo hacia NMEA.
-
-## Estado en el móvil (limpio)
-Setup del Mac intacto: `gpsdrv` cargado, calibración TCXO real (`/data/nvram/APCFG/APRDEB/GPS`), runners
-en `/system/xbin/`, **shim v2 en `/system/lib/libxlogshim.so`** (v1 en `.v1`). Binarios restaurados (sin
-wrappers). Scripts de arranque de mnld: ver los `gps-mnld-run*.sh` (esta sesión, en scratchpad) o la
-receta de arriba.
-
-*Casa (Fable 5), 2026-07-14. chip_detector cerrado; siguiente = el gate del "DSP listo" del gpsdrv.*
+*Casa (Opus 4.8), 2026-07-14. Gate service.nvram_init RESUELTO por RE Ghidra; el DSP se abre; falta el
+NMEA con datos (DSP measurements + cielo despejado).*
