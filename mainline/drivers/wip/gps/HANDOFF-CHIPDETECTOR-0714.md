@@ -1,4 +1,19 @@
-# GPS Vía 1 (mnld) — ✅✅ PIPELINE COMPLETO Y FUNCIONAL EN pmOS; solo falta cielo (0714 casa)
+# GPS Vía 1 (mnld) — ⚠️ TUBERÍA MONTADA pero NO ADQUIERE / SIN FIX (corregido 0715)
+
+> ## ⚠️ CORRECCIÓN 0715 — el GPS NO está terminado (lo de "completo" fue prematuro)
+> El usuario probó **pegado a una ventana DONDE LineageOS SÍ pilla satélites**, y pmOS da **0 satélites**
+> → **fallo REAL de adquisición** (no falta de cielo). La TUBERÍA fluye (DSP→mnld→gpsd→geoclue, probado)
+> pero el DSP no detecta señal (frames 0xAAF0 = ruido 0xCA). Estado: DSP vivo y buscando, TCXO correcto
+> (NVRAM 26MHz), reloj OK (2026). Añadido el **EPO** (`/data/misc/EPO.DAT`+`EPOHAL.DAT`, de
+> `http://epodownload.mediatek.com/EPO.DAT`, 276KB; mnld lo abre) pero en 80s seguía 0 sat.
+> **SOSPECHA #1: la RF/LNA del GPS no se enciende/config en pmOS como en stock** (func_on(GPS) da OK, pero
+> puede faltar power del LNA de antena o cal RF específica del GPS → 0 señal → 0 detección). #2: falta
+> inyección de hora+posición aproximada. **Pendiente REAL**: comparar la init RF/power del GPS stock vs
+> pmOS (regulador/GPIO del LNA, co_clock, cal), y/o inyección AGPS de posición. Todo lo de abajo (gate,
+> DSP vivo, reader OK, integración gpsd/geoclue) sigue siendo válido y es la TUBERÍA — pero sin adquisición
+> no hay fix.
+
+## (previo) TUBERÍA end-to-end montada en pmOS (0714 casa)
 
 > ## ★★★★ RESOLUCIÓN FINAL (0714 noche, debug kernel con contadores)
 > Recompilé `mt6582-btif.c` con contadores debugfs en `gps_read`/RX (flasheado boot-debug, verificado,
