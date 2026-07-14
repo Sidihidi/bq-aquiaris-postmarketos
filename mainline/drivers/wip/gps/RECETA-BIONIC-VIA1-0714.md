@@ -355,3 +355,39 @@ bloqueante?). El RE remoto sobre la fuente equivocada es poco fiable.
 
 *Noche-4c: property/chipid gate RESUELTO (área bionic real, reutilizable). El fork de mnld sigue bloqueado
 pero la causa es que la fuente nu3001 ≠ binario — necesita desensamblado/gdb/Lineage-ref (casa).*
+
+## 🎯 STATUS 0714 (noche-4d) — VÍA B: **el stream binario 0xAAF0 del motor CAPTURADO** (falta decodificar + cielo)
+
+Vía B (decodificador propio, sin mnld). **Fundamento LOGRADO: capturado el stream de salida del motor.**
+
+### Cómo capturarlo (truco del fd 0)
+El motor escribe sus reportes a `dae_snd_fd`, que standalone **queda en fd 0** (default). Antes fallaba
+(`write(0,…)=EBADF`, fd0=/dev/null read-only). **Fix: hacer fd 0 ESCRIBIBLE** → `os.dup2(open('/tmp/report.bin',
+O_RDWR|O_CREAT), 0)` antes del `execv` del `libmnlp_mt6582 20 21 0`. → `report.bin` se llena de frames `0xAAF0`
+(1460 B en 35s). Script: `/tmp/launchB.py` en el móvil.
+
+### Formato de frame (observado en HW)
+```
+AA F0 | len(2 LE) | tipo(2) | datos | checksum(2) | AA 0F
+```
+- **`AA F0 6E 00 08 FE …payload 106B… 3B 17 AA 0F`** = tipo `0xFE08`, len 110 → el reporte GORDO (posición/medidas).
+- **`AA F0 06 00 05 FE 04 00 0D 01 AA 0F`** = tipo `0xFE05`, len 6 → status/heartbeat (repetido).
+`0xAAF0`/`0xAA0F` = mismo framing que el DSP (`/dev/stpgps`). El motor reenvía sus reportes a `dae_snd_fd`.
+
+### Bloqueos para el decodificador
+1. **TODAS las fuentes son otra versión que los binarios** (mnld/libmnlp/protocolo): `mnlrcv_handler` de nu3001
+   lee **comandos de 1 byte**, no frames 0xAAF0; la `main()` usa `android_get_control_socket` (el binario usa
+   `hal2mnld`). → **no se puede decodificar el frame fiablemente desde la fuente**; hay que hacerlo empírico.
+2. **Interior = frame DUMMY**: el `0xFE08` capturado tiene datos placeholder (`48 49 4A…4F` = "HIJKLMNO"
+   secuencial) + ceros = **sin fix (0 satélites)**. No hay lat/lon reales que localizar.
+
+### ⏭️ Camino viable (empírico) — necesita CIELO DESPEJADO
+1. **Capturar `report.bin` con un fix real** (móvil con vista al cielo, USB conectado).
+2. **Localizar lat/lon en los bytes** cruzando con coordenadas conocidas (los `double LLH[4]` del struct
+   `mtk_gps_type.h` = 8 bytes IEEE-754; buscar el patrón de una lat ~40°/lon conocidos en el frame `0xFE08`).
+3. **Construir el decodificador** `0xAAF0 → NMEA` ($GPGGA/$GPRMC/$GPGSA/$GPGSV) en python/C.
+4. NMEA → `/dev/gps` → gpsd → geoclue → Phosh.
+Los structs (`double dfLat/dfLon`, `LLH[4]`) sirven de guía de TIPOS; los OFFSETS se sacan del frame real.
+
+*Noche-4d: VÍA B — stream 0xAAF0 del motor capturado (truco del fd0 escribible) + formato de frame mapeado.
+Decodificar necesita datos REALES (cielo despejado) porque las fuentes son otra versión. Sin fix = frame dummy.*
