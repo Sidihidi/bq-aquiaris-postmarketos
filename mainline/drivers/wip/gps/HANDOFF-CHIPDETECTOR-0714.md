@@ -49,10 +49,32 @@ El driver con el notify quedó cargado en el móvil (inofensivo; arguablemente c
 la interfaz del driver → hace falta desensamblar `libmnl.so` (Ghidra) el `mtk_gps_sys_init`/`launch_daemon`
 para ver qué comprueba antes de forkear el runner (¿otro fd? ¿un ioctl a stpgps? ¿un valor concreto?).
 
-## ⏭️ Para cerrar (candidatos, orden de valor)
-0. **Desensamblar `libmnl.so`** (`/system/lib/libmnl.so`, ARM, con Ghidra) el `mtk_gps_sys_init` +
-   `launch_daemon_thread`: ver qué comprueba/abre justo antes del fork del runner y por qué hace
-   `mtk_gps_exit_proc`. Es el gate real y está en el binario cerrado. (chip_detector ya no bloquea.)
+## ★★ STRACE del mnld (casa 0714) — MECANISMO REVELADO (corrige la suposición del fork)
+`strace -f` de mnld (con chipid+shim) muestra la secuencia real tras el START:
+- Abre los sysfs del gpsdrv (status/pwrctl/state/suspend/pwrsave) OK, crea un **socketpair [8,9]**,
+  lee la config (`dev.dsp=/dev/stpgps dev.gps=/dev/gps debug_nmea=1 pmtk.conn=serial`).
+- **NO hay fork+execv de un runner separado**: hace **`clone(CLONE_THREAD)`** = un HILO (el motor corre
+  DENTRO de mnld usando `libmnl.so` directamente). → **la Vía 1 NO necesita el runner libmnlp aparte**
+  (adiós al problema del ABI/args del runner). El símbolo `mnld` tenía los strings del gate (no libmnl):
+  `launch_daemon_thread`/`mtk_gps_sys_init`/`mtk_gps_exit_proc` son log-tags de mnld.
+- **Secuencia gpsdrv**: mnld escribe `pwrctl` **0→1→2** (OFF→ON→RST) en el fd, y luego lo **lee VACÍO**
+  (`read(fd,"")=0`) — porque las 3 escrituras avanzaron el offset del fd más allá del valor del sysfs.
+- **`/dev/stpgps` NUNCA se abre** → el hilo principal **gira en `mtk_gps_sys_init` SIN syscalls** (espera
+  una condición en memoria) → nunca llega al DSP.
+- El hilo daemon (tid nuevo) hace `connect(/dev/socket/property_service)` = **ENOENT** (no existe en pmOS).
+
+## ⏭️ Para cerrar (candidatos CONCRETOS del strace, orden de valor)
+1. **El read-vacío del gpsdrv** (sospecha #1): mnld escribe pwrctl 0→1→2 y lo lee → 0 bytes (offset del fd
+   acumulado). El driver `mt6582-gpsdrv.c` usa `DEVICE_ATTR` estándar (sysfs con offset). El
+   `mt3326_gps` real quizá devuelve el valor en CADA read (o mnld reabre en el device real). **Probar**:
+   hacer que pwrctl/state/status del driver devuelvan el valor ignorando `*ppos` (custom `read` o resetear
+   la posición), para que el `read` de mnld tras los writes le dé el valor esperado (¿pwrctl==ON=1?).
+2. **El property_service** (sospecha #2): el hilo daemon falla al `connect(property_service)` → si necesita
+   SETear un property para señalar readiness (que el hilo principal poll-ea), el gate persiste. Fix =
+   property_service mínimo (socket UNIX que acepte sets y llame `__system_property_add`), o pre-setear el
+   property que espera (hallar cuál con las strings de mnld / desensamblado).
+3. Desensamblar `libmnl.so`/`mnld` (Ghidra; objdump falla = Thumb-2 stripped) el `mtk_gps_sys_init` para
+   ver la condición exacta del bucle.
 1. **Hallar el valor "listo" que libmnl espera del gpsdrv** y hacer que el driver `mt6582-gpsdrv.c` lo
    reporte tras `pwrctl` (state/status). Sin strace en el móvil, opciones: (a) desensamblar el `libmnl.so`
    (Ghidra) el read de `/sys/class/gpsdrv/gps/{state,status}` tras el `write pwrctl`; (b) probar valores en
