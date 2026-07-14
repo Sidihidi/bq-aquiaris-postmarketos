@@ -391,3 +391,17 @@ Los structs (`double dfLat/dfLon`, `LLH[4]`) sirven de guía de TIPOS; los OFFSE
 
 *Noche-4d: VÍA B — stream 0xAAF0 del motor capturado (truco del fd0 escribible) + formato de frame mapeado.
 Decodificar necesita datos REALES (cielo despejado) porque las fuentes son otra versión. Sin fix = frame dummy.*
+
+### Parser + inventario (noche-4e)
+Parser en el repo: **`aaf0-parse.py`** (parsea el stream, tabula tipos, y — con fix real — busca candidatos a
+`double` lat/lon en los frames). Inventario capturado en INTERIOR (35 frames / 1460 B):
+- `0xFE05` len 6 ×25 = status/heartbeat.
+- `0xFE08` len 110 ×10 = reporte de medidas/estado (datos dummy sin fix).
+La fuente NO documenta estos tipos (0xFE = protocolo de wire del DSP; los headers solo tienen structs de
+medida: pseudorango/doppler). Confirmar si `0xFE08` lleva la posición (o son medidas crudas del DSP que
+requerirían correr el PVT) **necesita un `report.bin` con FIX REAL**. **Límite físico: el GPS necesita cielo.**
+
+### ✅ Integridad de `~/mainline/linux-7.0.12` (0714) — INTACTO
+Tras perderse `downstream/`+`pkg/`, verificado el árbol de trabajo: **101/101 ficheros del patch presentes**,
+**drop-in `mtk_mtwifi` completo (141)**, sin ficheros 0-byte, `.config` OK, y **`zImage` compilado (14-jul
+00:39)** = el árbol compila → sano. **Nada que restaurar.** `downstream/` se recupera desde `bq/aquaris-E4.5`.
