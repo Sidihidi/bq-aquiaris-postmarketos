@@ -118,5 +118,32 @@ mnld escucha en el socket UNIX-dgram **`/data/gps_mnl/hal2mnld`** los comandos q
 (en `stock-gps-0713/lib/`, tiene la codificación de los mensajes a `hal2mnld`) o del protocolo de mnld.
 Con ese comando + cielo despejado = **fix**. El shim (`gps-bionic-shim.c`) es nuestro código, versionado aquí.
 
-*Receta 2026-07-14 (sesión Mac). **mnld corre en pmOS bajo bionic — de-riesgada toda la vía**; queda 1 paso:
-el comando de sesión del HAL por `hal2mnld`.*
+## 🔬 STATUS 0714 (noche) — RE del comando HAL HECHO + gate real localizado
+**El comando del HAL RE-verificado y PROBADO en HW**: el protocolo `hal2mnld` = **bytes sueltos**
+(`enum` en `mnl_common_6620.h`): `INIT=0x00 · STOP=0x02 · START=0x03 · RESTART=0x04 · RESTART_HOT=0x05…`.
+Enviado `0x00`+`0x03` por un socket UNIX-dgram a `/data/gps_mnl/hal2mnld` (con un listener nuestro en
+`/data/gps_mnl/mnld2hal` haciendo de HAL) → **mnld LOS RECIBE** (`read(3,"\0")`+`read(3,"\3")` en el strace).
+
+**Pero mnld NO abre aún `/dev/stpgps`** — descubierto el gate REAL: en `START`, mnld (vía el `libmnl`
+CERRADO) **controla el power del DSP por `/sys/class/gpsdrv/gps/{pwrctl,state,status,suspend,pwrsave}`**
+(escribe "2" y **espera a que el status diga "listo"** antes de abrir el DSP). Confirmado en el binario:
+`dsp_dev(/dev/stpgps)` + esas 5 rutas sysfs. Nuestro interpositor manda TODAS a un solo `fakestatus`
+→ el status no transiciona como mnld espera → mnld se queda **puliendo el status con un POSIX-timer**, sin
+abrir el DSP. La lógica de "listo" está DENTRO de `libmnl` (no en la glue abierta) → no RE-able por fuente.
+
+### ⏭️ Camino (bien definido) para cerrar el GPS
+**El DSP YA está encendido en nuestro HW** (`func_on[GPS]` por el open de `/dev/stpgps` al boot) y
+`dsp_dev=/dev/stpgps`. Solo falta que mnld **crea que el DSP está listo** por la interfaz gpsdrv:
+1. **[Robusto] Portar el driver `gps.c` (`mt3326_gps`) del downstream** (~1107 LOC, wrapper FINO del STP):
+   crea el `/sys/class/gpsdrv/gps/` real + `/dev/gps`; al escribir pwrctl "arranca" (para nosotros = el
+   canal STP GPS, ya ON) y reporta `state=listo`. Es el fix propio y limpio (estilo del proyecto).
+2. **[Hack rápido] Interpositor más listo**: redirigir cada `/sys/class/gpsdrv/gps/X` a un fichero
+   SEPARADO (`/data/gps_mnl/gpsdrv_X`) y **pre-sembrar `state`/`status` con el valor "listo"** que espera
+   `libmnl` (desconocido → hallarlo trazando los `read` de mnld tras el `write "2"`, o probando valores).
+   Si acierta el valor → mnld abre `/dev/stpgps` → **START 0xAAF0** → NMEA. Barato pero de valor incierto.
+
+Recomendación: **(1)** para cerrar de verdad; **(2)** para un PoC rápido de que el resto de la cadena
+(open `/dev/stpgps` → burst → libmnl → NMEA) funciona antes de invertir en el driver.
+
+*Receta 2026-07-14 (sesión Mac). mnld corre y recibe el START del HAL; el último gate = el handshake de
+power/ready del DSP por `/sys/class/gpsdrv` (dentro de libmnl). Fix = portar `gps.c` o sembrar el status.*
