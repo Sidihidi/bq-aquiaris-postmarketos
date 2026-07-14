@@ -40,6 +40,18 @@ socat -u UNIX-CONNECT:/var/run/gps-share.sock -   # sirve $GPGGA/$GPGSV... a geo
 Con `mode:1` y `$GPGSV,1,1,0` (0 satélites) = correcto en interior. **Para un FIX: exterior + varios
 minutos (cold start).** Entonces `mode` pasa a 2/3, la posición se puebla, y geoclue/Phosh la reciben.
 
+## Apps para PROBAR el GPS en Phosh (0714)
+No hay app de mapas gráfica en los repos habilitados (solo Alpine main+community; **falta el repo de
+pmOS** → no hay gnome-maps/pure-maps). Opciones que SÍ funcionan:
+- **`xgps` (Satélites GPS)** — cliente gpsd GRÁFICO (Python GTK3, corre en Wayland sin Xwayland). Muestra
+  el cielo con los satélites, barras de señal y el fix/posición. **La mejor para la prueba de exterior**
+  (ves los satélites aparecer). Añadido al menú con `/usr/share/applications/xgps.desktop`
+  (`Exec=xgps localhost`). Requirió instalar `py3-cairo` + `py3-gpsd` (dan el módulo python `gps`).
+- **"Where am I?"** — ya venía (`geoclue-where-am-i.desktop`, `/usr/libexec/geoclue-2.0/demos/where-am-i`).
+  Demo de geoclue: abre terminal y muestra la ubicación que geoclue entrega (prueba la cadena hasta las apps).
+- **`cgps` / `gpsmon`** (terminal, `gpsd-clients`) — vista de texto de fix/satélites/posición en vivo.
+Todas leen del gpsd que monta `zzz-gps.start`. Interior = 0 satélites / sin fix; **exterior = satélites y fix**.
+
 ## Pendiente / mejoras (no bloqueante)
 - **AGPS/almanaque** para TTFF más rápido (el primer fix en frío tarda; con asistencia = segundos). El
   stock inyectaba efemérides por SUPL (`/data/agps_supl/`, PMTK710) — ver `STOCK-mnld-live.strace`.
