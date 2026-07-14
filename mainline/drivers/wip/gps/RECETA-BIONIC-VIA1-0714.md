@@ -64,5 +64,29 @@ START 0xAAF0** → (c) el DSP **responde** (reads con datos en /dev/stpgps) → 
 3. Correr mnld con strace → escalón (a)→(d). Si peta en `/dev/nvram`, portar/shimear el chardev.
 4. NMEA → gpsd → geoclue → Phosh. **Fix real en EXTERIOR.**
 
-*Receta 2026-07-14 (sesión Mac), sobre los binarios reales de `.123`. Los 2 huecos (3 libs nvram + fichero
-GPS de nvram) son extraíbles por adb del Lineage que ya arranca. Riesgo abierto: `/dev/nvram` chardev MTK.*
+## ✅ STATUS 0714 — los 2 huecos CERRADOS + bundle listo (sesión Mac)
+Extraídos por adb del LineageOS (adbd ya root), staged en `.123` (`stock-gps-0713/`, proprietarios NO al repo):
+- **3 libs nvram** ✓ ELF ARM válidas: `libcustom_nvram.so`(51K) `libnvram_platform.so`(5.3K) `libnvram_sec.so`(9.3K).
+- **Calibración GPS** ✓ REAL (no ceros): `APCFG/APRDEB/GPS` (54B) contiene `"/dev/stpgps"` + `gps_tcxo_hz=`
+  **`0x018CBA80 = 26 000 000 = 26 MHz`** (TCXO real) + `APRDCL/FILE_VER`.
+- **Bundle ensamblado**: `~/gps-bionic-prefix.tar.gz` (1.8M) = el prefijo `/system` (linker+11 libs+mnld+gps.conf)
+  + `/data/nvram/APCFG/{APRDEB/GPS,APRDCL/FILE_VER}`, listo para extraer en `/` de pmOS.
+
+### Despliegue + run (cuando pmOS esté arrancado; el móvil está ahora en Lineage)
+```bash
+# desde la Pi, con pmOS vivo en root@172.16.42.1:
+cat ~/gps-bionic-prefix.tar.gz | ssh root@172.16.42.1 'tar xzf - -C /'   # crea /system + /data/nvram
+# arrancar el radio GPS (WMT func_on[GPS]) — abrir /dev/stpgps; confirmar que existe
+ssh root@172.16.42.1 'ls -l /dev/stpgps'
+# correr mnld (proceso bionic) con strace:
+ssh root@172.16.42.1 'strace -f -s 512 -e openat,read,write,ioctl /system/xbin/mnld 2>/tmp/mnld.strace & sleep 25;
+  echo "--- nvram/TCXO leidos? ---"; grep -aE "APRDEB/GPS|ENOENT.*nvram" /tmp/mnld.strace | tail;
+  echo "--- START 0xAAF0 al DSP? ---"; grep -aE "stpgps|\\\\xaa\\\\xf0" /tmp/mnld.strace | tail;
+  echo "--- NMEA emitido? ---"; grep -aE "GPGGA|GPRMC|GPGSV" /tmp/mnld.strace | tail'
+```
+Escalón de éxito: (a) lee `/data/nvram/APCFG/APRDEB/GPS` sin ENOENT → (b) abre `/dev/stpgps` + escribe START
+0xAAF0 → (c) DSP responde → (d) mnld emite `$GPGGA/$GPRMC`. Luego NMEA→pty→gpsd→geoclue→Phosh, y **fix exterior**.
+Si peta pidiendo `/dev/nvram` (chardev MTK ausente en mainline) = el riesgo abierto → shim/portar ese chardev.
+
+*Receta 2026-07-14 (sesión Mac), sobre los binarios reales de `.123`. **Los 2 huecos ya están cerrados y el
+bundle listo**; falta solo desplegar en pmOS y correr mnld. Riesgo abierto: `/dev/nvram` chardev MTK.*
