@@ -71,3 +71,35 @@ subir en func_on(GPS) y bajar en func_off. (Y opcional: mux del GPS_SYNC — ver
 
 *Mac (Fable 5), 2026-07-15. Fuente GPL de BQ clonada; init RF del GPS identificada = GPS_LNA GPIO high.
 Ref en `stock-ref/`. Falta el nº de GPIO (LineageOS dmesg) para cablearlo.*
+
+---
+## ✅ CONFIRMADO 0715 (Mac): GPS_LNA = **GPIO 47** + fix probado (drives high)
+Número sacado del log de arranque de **LineageOS** guardado (`~/android-cap/lineage/kmsg-boot-clean.log`):
+```
+wmt_plat_dump_pin_conf: GPS_LNA(GPIO-2147483601)   -> 0x8000002F = 0x80000000|47 -> GPIO 47
+                        GPS_SYNC(not defined)      -> el krillin NO usa GPS_SYNC
+```
+→ **la ÚNICA init RF que falta = conducir el GPIO 47 a HIGH.** (`downstream` recuperado en
+`~/mainline/downstream/bq-src/`; DrvGen x86 en `mediatek/dct/` + `qemu-i386` en la Pi por si hiciera falta.)
+
+### Probado en HW (userspace, sin recompilar)
+- Herramienta `gpio-hold.c` (cross-compilada armhf → `/data/gpio-hold` del móvil): usa `/dev/gpiochip0`
+  (el pinctrl mainline gestiona modo/dir) y MANTIENE la línea. `gpio-hold 47 1` →
+  **`gpio-47 (|gps-lna) out hi` ✓** (el pinctrl lo aceptó, sin conflicto).
+- Con LNA ON + cadena GPS corriendo. **En INTERIOR sigue 0 sat / 1 payload** (lógico: sin cielo no hay señal
+  que amplificar). **Validar = móvil al cielo** con GPIO 47 high → `gpspipe -w | grep -E 'GPGSV|nSat'`.
+
+### Test rápido (móvil, con cielo)
+```sh
+setsid /data/gpio-hold 47 1 &            # enciende el LNA (mantener corriendo)
+/etc/local.d/zzz-gps.start               # arranca la cadena
+gpspipe -w | grep -E 'GPGSV|nSat|mode'   # con cielo: satelites > 0 si el LNA lo arregla
+```
+
+### Fix PERMANENTE en el driver (`drivers/soc/mediatek/mt6582-btif.c`)
+DTS (nodo del consys/btif): `gps-lna-gpios = <&eint 47 GPIO_ACTIVE_HIGH>;`
+Driver: en probe `b->gps_lna = devm_gpiod_get_optional(b->dev,"gps-lna",GPIOD_OUT_LOW);`
+y **tras** `func_on(b, STP_TYPE_GPS, "GPS")` (~L388): `gpiod_set_value_cansleep(b->gps_lna, 1);`
+(alt legacy, gpiochip0 base=0: `gpio_request(47,"gps-lna"); gpio_direction_output(47,1);`)
+En `func_off(GPS)` bajarlo. El stock también hace `PIN_STA_INIT` del LNA en el power-on del CONSYS
+(`mtk_wcn_consys_hw_gpio_ctrl`), pero drive-high en GPS-on es lo que enciende el amplificador.
