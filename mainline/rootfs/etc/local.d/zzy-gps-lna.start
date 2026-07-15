@@ -1,0 +1,9 @@
+#!/bin/sh
+# GPS RF fix (0715): enciende el LNA de la antena GPS = GPIO 47 a HIGH al boot.
+# Sin esto el frontend RF del GPS no recibe -> 0 satelites (el stock lo hace en func_on(GPS);
+# ver mainline/drivers/wip/gps/RESPUESTA-RF-INIT-GPS-0715.md). Corre ANTES de zzz-gps.start.
+# Parche userspace temporal hasta hornearlo en mt6582-btif.c (gps-lna-gpios = <&eint 47>).
+[ -x /data/gpio-hold ] || exit 0
+pkill -f "gpio-hold 47" 2>/dev/null
+setsid /data/gpio-hold 47 1 >/dev/null 2>&1 &
+exit 0
