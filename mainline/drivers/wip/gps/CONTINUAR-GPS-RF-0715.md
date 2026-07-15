@@ -131,3 +131,31 @@ toleraba). → No se pudo probar el GPS con ROMv1 limpiamente; el chip se colgó
 
 *Mac (Fable), 0715 noche. El delta de firmware CONFIRMADO (ROMv1 vs mt6572_82) y aplicado, pero el ROMv1
 cuelga el chip por el doble bring-up no serializado. Falta serializar + re-test, o portar el wmt_lib completo.*
+
+---
+## 0715 noche-2: ROMv1 REFUTADO como vía (cuelga el chip) — el patch NO es el delta del GPS
+Probado el ROMv1 con re-sync tras el patch (#299): **el chip queda MUDO tras cargar el ROMv1** — 30 intentos
+de GEN_HCR de re-sync, TODOS timeout. No es que tarde en re-arrancar: **el ROMv1 no arranca con nuestro
+bring-up simplificado.** El stock lo carga con el `wmt_lib` COMPLETO (init_table_1_2/4/5 = query/set/query STP,
+multi-patch con metadata, calibration, coex, crystal_trim) — portarlo entero es un proyecto grande, y no está
+claro que arregle el GPS.
+
+**Reinterpretación clave**: con el `mt6572_82` (40KB) el **WiFi funciona PERFECTO** (WPA2+DHCP+HTTPS, cerrado),
+BT OK, GPS enciende radio + el DSP habla (aunque ruido 0xCA). Si el mt6572_82 fuese "el patch equivocado del
+chip", el WiFi no iría. → **el mt6572_82 es válido para nuestro bring-up; el patch NO es el delta del GPS.**
+El ruido 0xCA es otra cosa.
+
+**REVERTIDO a #300** (mt6572_82 built-in, GSYNC+COEX sí, RESYNC quitado) = estado funcional (WiFi/BT + GPS
+radio-on, GPS ruidoso). `/lib/firmware` restaurado también.
+
+### Candidatos que QUEDAN (los otros 2 del ground-truth, sin tocar aún)
+1. **NVRAM de calibración RF de fábrica**: el WIFI NVRAM (`/data/nvram/APCFG/APRDEB/WIFI`, byte 0x6D =
+   crystal trim) está VACÍO en pmOS; el stock lo tiene (en Lineage `/data/nvram/...` o protect_f/s). Sin el
+   trim de fábrica, el TCXO del CONSYS no se afina — candidato para el GPS (aunque el WiFi lo tolere).
+   **Sacar el WIFI NVRAM de LineageOS (adb pull) + portar `crystal_triming_set` al btif.**
+2. **Comandos del HAL/mnld del stock al DSP** (`/dev/stpgps` write burst al iniciar sesión): snoopear en
+   LineageOS qué escribe mnld al arrancar vs pmOS. Usamos el MISMO libmnlp, pero el HAL `gps.default.so`
+   (ausente en pmOS) puede mandar comandos de config RF/referencia que activan la adquisición.
+
+*Mac (Fable), 0715 noche-2. El patch del CONSYS REFUTADO como delta del GPS (ROMv1 cuelga; mt6572_82 válido).
+Quedan: NVRAM crystal-trim de fábrica, y los comandos del HAL al DSP. Estado funcional restaurado (#300).*
