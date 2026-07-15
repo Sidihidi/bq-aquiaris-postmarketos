@@ -381,6 +381,18 @@ static int bring_up_chip(struct mt6582_btif *b)
 				 plen, plen > 0 ? min_t(int, plen, 8) : 0, rx);
 	}
 
+	/* COEX antenna config (stock wmt_stp_init_coex -> WMT_COEX_SETTING_CONFIG con
+	 * coex_wmt_ant_mode=1 del WMT_SOC.cfg del krillin). Configura el enrutado de antena
+	 * del combo; el stock lo hace en sw_init. Sin esto el path RF puede quedar mal ruteado. */
+	{
+		static const u8 coex[6] = { 0x01, 0x10, 0x02, 0x00, 0x01, 0x01 };
+		dev_info(b->dev, "coex: enviando COEX ant_mode=1...\n");
+		if (wmt_cmd(b, coex, 6, (const u8[]){0x02,0x10}, 2, "COEX"))
+			dev_warn(b->dev, "COEX fallo (sigo)\n");
+		else
+			dev_info(b->dev, "*** COEX OK ***\n");
+	}
+
 	ret = func_on(b, 0, "BT");
 	if (ret) return ret;
 	/* Init RF del GPS (stock wmt_func_gps_pre_ctrl, ANTES del func_on GPS):
@@ -396,8 +408,11 @@ static int bring_up_chip(struct mt6582_btif *b)
 			0x00, 0x00, 0x00, 0x10,	/* val  0x1<<28  LE */
 			0x00, 0x00, 0x00, 0x70,	/* mask 0x7<<28  LE */
 		};
+		dev_info(b->dev, "GPS: enviando GSYNC (reg 0x80050078 bits[30:28]=1)...\n");
 		if (wmt_cmd(b, gsync, 20, (const u8[]){0x02,0x08}, 2, "GSYNC-GPS"))
-			dev_warn(b->dev, "GSYNC GPS fallo (sigo)\n");
+			dev_warn(b->dev, "*** GSYNC GPS FALLO ***\n");
+		else
+			dev_info(b->dev, "*** GSYNC GPS OK ***\n");
 	}
 
 	/* GPS encendido aquí (síncrono, antes del kthread RX) para no competir por rxbuf.
