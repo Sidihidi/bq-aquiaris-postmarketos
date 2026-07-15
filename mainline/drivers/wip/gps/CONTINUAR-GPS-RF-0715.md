@@ -62,3 +62,39 @@ primero — probar otros parámetros / un segundo cal enfocado a GPS. Y el "co_c
 - ⚠️ NVRAM GPS real del móvil en `/data/nvram/APCFG/APRDEB/GPS` (54B, TCXO). No borrar.
 
 *Casa (Opus 4.8), 2026-07-15. Tubería GPS hecha; falta la init RF del GPS (necesita referencia del stock).*
+
+---
+## 0715 tarde (Mac): fuente GPL de BQ recuperada + init RF portada + DIAGNÓSTICO del ruido 0xCA
+Clonado `github.com/bq/aquaris-E4.5` (rama aquaris-E4.5) → tenemos el SOURCE del combo/wmt (antes solo fw).
+**Portada al kernel (#297) TODA la init RF del GPS que el stock hace**, verificada byte a byte contra el source:
+- **RF-CAL**: nuestro `01 14 01 00 01` es **byte-idéntico** al `calibration_table` del stock (WMT_CORE_START_RF_CALIBRATION). ✓ ya estaba bien.
+- **COEX** (`WMT_COEX_SETTING_CONFIG` 01 10 .. ant_mode=1, del WMT_SOC.cfg krillin): AÑADIDO → `*** COEX OK ***` (chip lo acepta).
+- **GSYNC** (reg chip `0x80050078` bits[30:28]=1, `mtk_wcn_soc_gps_sync_ctrl`): AÑADIDO → `*** GSYNC GPS OK ***` (chip lo acepta).
+- **func_on(GPS)** ✓ + **LNA GPIO47 high** (userspace) ✓.
+- crystal_trim: se salta (NVRAM WIFI vacío); co_clock: no aplica (co_clock_flag=0).
+
+### DIAGNÓSTICO (leído /dev/stpgps directo): el DSP recibe **RUIDO 0xCA**
+Frames crudos del DSP (tipos 0xFE28/29/42) con el payload **LLENO de bytes `0xCA`** = el correlador **no
+engancha NINGUNA señal**. NO es frecuencia (el search Doppler ±5-10kHz cubriría el offset del TCXO, y el WiFi
+va) → **es AMPLITUD: a la antena/mixer no le llega señal RF útil.** Reguladores RF TODOS on (vcn28/vcn18/VTCXO).
+Móvil personal al lado = 18 satélites (hay señal ambiente + hw OK, LineageOS pilla 10).
+
+### → El muro: el LNA / path RF de la antena (o algo del firmware que el source no muestra)
+El ruido 0xCA con RF alimentado apunta a que **el LNA de la antena no amplifica**: o **GPIO47 NO es el pin
+correcto**, o el LNA necesita **alimentación además del enable** (un regulador/bias que no vemos en el source),
+o el path de antena del combo no está ruteado pese al COEX. El source del kernel NO tiene más init RF del GPS
+que la ya portada → lo que falta está en el **HAL/firmware** o es un **detalle de HW del krillin** invisible en
+el source genérico.
+
+### ⏭️ ÚNICO camino definitivo: GROUND-TRUTH desde LineageOS
+Arrancar LineageOS (GPS funciona) y con el GPS encendido + viendo satélites, capturar:
+1. **Todos los GPIOs** (`cat /sys/kernel/debug/gpio`) → comparar con pmOS: **qué GPIO(s) mueve el stock para
+   el GPS que nosotros no** (candidato: el LNA real; ver si GPIO47 está high en stock o es OTRO pin).
+2. **Reguladores** (`/sys/class/regulator` o el PMIC) → qué LDO extra enciende para el GPS.
+3. El tráfico WMT/STP al combo (si se puede snoopear el btif).
+El delta GPIO/regulador entre stock-con-fix y pmOS-sin-fix = EXACTAMENTE lo que falta. (Alternativa parcial:
+montar la data de Android para el NVRAM — no montó, cifrada/F2FS.)
+
+*Mac (Fable), 0715 tarde. Init RF del kernel 100% portada del source GPL; el DSP sigue en ruido 0xCA =
+problema de LNA/path-RF de antena no visible en el source. Necesita ground-truth de GPIOs/reguladores del
+LineageOS con GPS activo.*
