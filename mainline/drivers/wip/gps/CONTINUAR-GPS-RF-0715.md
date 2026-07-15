@@ -98,3 +98,36 @@ montar la data de Android para el NVRAM — no montó, cifrada/F2FS.)
 *Mac (Fable), 0715 tarde. Init RF del kernel 100% portada del source GPL; el DSP sigue en ruido 0xCA =
 problema de LNA/path-RF de antena no visible en el source. Necesita ground-truth de GPIOs/reguladores del
 LineageOS con GPS activo.*
+
+---
+## 0715 noche: DELTA REAL = el patch del CONSYS (ROMv1 vs mt6572_82), pero con complicación
+**Ground-truth de firmware (LineageOS)**: el stock carga **`ROMv1_patch_1_0/1_1`** (80812/21488 B) +
+`WIFI_RAM_CODE_SOC`. pmOS (btif) cargaba **`mt6572_82_patch_e1_0/e1_1`** (40924/20516 B) = OTRA variante,
+la mitad de tamaño. El krillin es `CONSYS_6582` → usa ROMv1. WIFI_RAM_CODE_SOC = IDÉNTICO (md5 8762595d).
+**El único delta de firmware es el patch del CONSYS.**
+
+**El firmware estaba BUILT-IN en el vmlinux** (`.gen.o` en `firmware_loader/builtin/`, de un build viejo con
+CONFIG_EXTRA_FIRMWARE), por eso reemplazarlo en `/lib/firmware` (disco) NO valía — `request_firmware` carga el
+built-in antes que el disco (el primer `-2` = built-in aún no registrado, luego carga los 40KB = 41 frags).
+**Verificado**: PATCH_HDR=28, FRAG_SIZE=1000 → 40924B=41 frags, 80812B=81 frags.
+
+**FIX aplicado (#298)**: horneado el ROMv1 como built-in (poner ROMv1 renombrado en `firmware/` + reactivar
+CONFIG_EXTRA_FIRMWARE + rm los `.gen` viejos + rebuild). **Confirmado: cargó 81 frags = ROMv1** ✓.
+
+**PERO el resultado rompió el CONSYS**: `openat(/dev/stpgps)=EIO`, y el chip se COLGÓ (`wmt_cmd[GEN_HCR]:
+TIMEOUT`, -110, en todos los re-bring-ups; WiFi también `func_on -5`, abandonado tras 40 intentos). La causa
+inmediata es el **doble bring-up NO serializado** (WiFi+GPS a la vez cuelgan el chip — problema conocido
+[[project-boot-flakiness-consys-race]]), y **el ROMv1 es MUCHO más frágil a él** que el mt6572_82 (que lo
+toleraba). → No se pudo probar el GPS con ROMv1 limpiamente; el chip se colgó antes.
+
+### ⏭️ Siguiente (para un test LIMPIO del ROMv1)
+1. **Serializar el bring-up** (mutex entre el btif-GPS y el mtwifi, o deshabilitar el WiFi temporalmente) para
+   que el ROMv1 no se cuelgue por el doble bring-up → luego probar `/dev/stpgps` + GSV con cielo.
+2. Si el ROMv1 sigue dando EIO aun serializado → nuestro **bring-up simplificado no es compatible con el
+   ROMv1**; el stock usa el bring-up completo del `wmt_lib` (init_table_1_2/4/5 + patch + calibration + coex +
+   crystal_trim) — habría que portarlo entero (proyecto grande).
+3. **Reversión disponible**: el mt6572_82 (40KB) en `~/gps-groundtruth/fw-pmos/` (md5 6ea6be78) para volver al
+   estado funcional (WiFi/BT OK, GPS ruidoso) recompilando el built-in.
+
+*Mac (Fable), 0715 noche. El delta de firmware CONFIRMADO (ROMv1 vs mt6572_82) y aplicado, pero el ROMv1
+cuelga el chip por el doble bring-up no serializado. Falta serializar + re-test, o portar el wmt_lib completo.*
