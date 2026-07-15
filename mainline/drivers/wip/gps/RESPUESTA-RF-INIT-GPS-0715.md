@@ -103,3 +103,21 @@ y **tras** `func_on(b, STP_TYPE_GPS, "GPS")` (~L388): `gpiod_set_value_cansleep(
 (alt legacy, gpiochip0 base=0: `gpio_request(47,"gps-lna"); gpio_direction_output(47,1);`)
 En `func_off(GPS)` bajarlo. El stock también hace `PIN_STA_INIT` del LNA en el power-on del CONSYS
 (`mtk_wcn_consys_hw_gpio_ctrl`), pero drive-high en GPS-on es lo que enciende el amplificador.
+
+---
+## 0715 mañana: estado tras power-cycle + candidato nº2 preparado (GSYNC chip-side)
+Tras el power-cycle: **cadena entera auto-arranca** ✓ (mnld→gpsd, NMEA a 1Hz `mode:1`) y **el LNA auto-enciende**
+✓ (`zzy-gps-lna.start` → `gpio-47 out hi`). El Oops del kernel quedó atrás. **Sigue `$GPGSV,1,1,0`** — pendiente
+de validar con VISTA AL CIELO real (2-3 min).
+
+### Candidato nº2 (si el LNA con cielo no basta): GSYNC del lado del CHIP
+El stock, en `wmt_func_gps_pre_ctrl` (ANTES del func_on GPS), además del LNA hace el **GSYNC a modo MUX en el
+chip** vía WMT REG_RW (`mtk_wcn_soc_gps_sync_ctrl`, wmt_ic_soc.c:1113): registro **`0x80050078`, bits[30:28]=0x1**
+(mask `0x70000000`). Comando WMT listo para `mt6582-btif.c` (mismo canal que el RF-CAL):
+```
+TX: 01 08 10 00 01 01 00 00 78 00 05 80 00 00 00 10 00 00 00 70
+     (hdr SET_REG len=0x10 | op=1 write, type=1 reg | addr 0x80050078 LE | val 0x1<<28 LE | mask 0x7<<28 LE)
+RX: 02 08 04 00 ...   (WMT_SET_REG_WR_EVT)
+```
+Orden stock completo del GPS-on: **GSYNC MUX (chip) → LNA GPIO high (host) → func_on(GPS)**.
+(pmOS hoy: solo func_on + LNA por userspace. Si hace falta el GSYNC, va ANTES del func_on → recompilar btif.)
