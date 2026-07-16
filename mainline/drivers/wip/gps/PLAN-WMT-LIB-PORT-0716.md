@@ -152,4 +152,25 @@ chip) + un `1_1` que el stock ni descarga. **FIX: UN solo patch `ROMv1_patch_1_0
 Desde Lineage: `adb reboot bootloader` → `fastboot flash boot <img#301>`. En pmOS: dmesg (81 frags,
 bring-up OK, WiFi/BT siguen vivos) → `/dev/stpgps` → ¿frames con datos reales (no 0xCA)? → gpspipe sats.
 
-*Mac (Fable), 2026-07-16. Fase 1 (captura canónica) COMPLETA. El delta del ROMv1 = un-solo-patch@0ef0.*
+## FASE 3 — iteraciones (0716 tarde)
+
+**#301 (build completo, árbol restaurado): BOOTLOOP.** Causa: el árbol restaurado esta mañana tiene el
+**DTS VIEJO** — le faltan el mt6323 interrupt-controller+RTC (fix #230), el carveout del módem, y tiene
+**consys/btif/wifi en `status=disabled`**. El empaquetado era idéntico (mismo cmdline/initrd que el
+bueno). **Fix #301c: zImage nuevo + dtb BUENO extraído del boot-gsync-lna.img** (el dtb va pegado al
+final del zImage del boot.img; localizarlo por el magic `d00dfeed` con rfind). → **ARRANCA.**
+⚠️ El DTS del árbol de la Pi sigue viejo — pendiente restaurarlo del dtb bueno (decompilar) o del árbol
+de casa.
+
+**#301c: la descarga del ROMv1 muere a mitad (FRAG timeout) → chip mudo.** ADDR y PADDR pasan bien;
+un FRAG deja de recibir ACK a ~750ms del inicio y el chip queda mudo (GEN_HCR timeout en reintentos).
+**CAUSA (medida en la captura canónica): el ROM del chip PAUSA los ACKs ~430-500ms periódicamente**
+durante la descarga de 80KB (flow-control interno: ráfagas de ~8 frags + pausa — visible en los
+timestamps de los RX dumps: 609.6→610.07→610.57→611.05→611.56→612.0). Nuestro `wmt_cmd` esperaba
+**400ms** → timeout dentro de una pausa → abandono a mitad → chip desincronizado. El mt6572_82 nunca
+lo sufrió (tandas de 21+41 frags con RESET entre medias, pausas cortas). El stock tarda 3.5s en los
+81 frags (~43ms/frag de media CON las pausas). **Fix #301d: timeout de wmt_cmd 400→2000ms** + log del
+seq del frag que falla.
+
+*Mac (Fable), 2026-07-16. Fase 1 (captura canónica) COMPLETA. El delta del ROMv1 = un-solo-patch@0ef0
++ timeout>500ms. #301d en build.*

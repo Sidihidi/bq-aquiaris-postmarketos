@@ -280,7 +280,10 @@ static int wmt_cmd(struct mt6582_btif *b, const u8 *cmd, u32 clen,
 
 	b->rxlen = 0;
 	stp_send(b, STP_TYPE_WMT, cmd, clen);
-	plen = wmt_wait_frame(b, rx, sizeof(rx), 400);
+	/* El ROM del chip PAUSA los ACKs ~430-500ms periodicamente durante la descarga del
+	 * patch de 80KB (flow-control interno, medido en la captura canonica de LineageOS
+	 * 0716) -> 400ms cortaba la descarga a mitad y dejaba el chip mudo. */
+	plen = wmt_wait_frame(b, rx, sizeof(rx), 2000);
 	if (plen < 0) { dev_err(b->dev, "wmt_cmd[%s]: TIMEOUT\n", name); return plen; }
 	if ((u32)plen < elen || memcmp(rx, evt, elen) != 0) {
 		dev_err(b->dev, "wmt_cmd[%s]: EVT no coincide (plen=%d): %*ph\n",
@@ -320,7 +323,11 @@ static int patch_dwn(struct mt6582_btif *b, const char *fwname, const u8 addr[4]
 		b->wmtbuf[4] = (seq == fragnum - 1) ? FRAG_LAST : (seq == 0 ? FRAG_1ST : FRAG_MID);
 		memcpy(b->wmtbuf + 5, body + off, fsz);
 		ret = wmt_cmd(b, b->wmtbuf, 5 + fsz, PATCH_EVT, 5, "FRAG");
-		if (ret) goto out;
+		if (ret) {
+			dev_err(b->dev, "patch %s: fallo en frag %u/%u\n",
+				fwname, seq + 1, fragnum);
+			goto out;
+		}
 	}
 	dev_info(b->dev, "*** patch %s DESCARGADO OK (%u frags) ***\n", fwname, fragnum);
 out:
