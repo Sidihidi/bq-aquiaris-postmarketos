@@ -105,10 +105,51 @@ Con el stream capturado, añadir a nuestro btif lo que falte, en el orden exacto
 
 ### Fase 3 (test): ROMv1 + stream correcto → leer `/dev/stpgps` → ¿frames reales (no 0xCA)? → sats.
 
-## Estado del móvil
-Degradado tras el test func_off (WMT no responde) → **necesita power-cycle**. Para la Fase 1 hay que
-volver a LineageOS (`fastboot flash boot ~/images/lineage13-boot.img` desde fastboot).
+## ★★ FASE 1 EJECUTADA (0716): CAPTURADO el command stream canónico en LineageOS
 
-*Mac (Opus), 2026-07-16. Bring-up del CONSYS mapeado byte a byte vs stock. Nuestro GPS bring-up ya
-coincide salvo 3 huecos; ROMv1 es el patch correcto y sus addresses ya las tenemos. Siguiente =
-capturar el command stream canónico en LineageOS (vía empírica, como el WiFi).*
+Método: `adb root` → `/proc/driver/wmt_dbg`: `echo "9 4"` (WMT log LOUD) + `echo "a 4"` (STP log 4)
++ `echo "6 0"` (**whole chip reset** → re-corre el sw_init COMPLETO) + drenaje `dmesg -c` en bucle.
+98MB de captura (`wmt-reset.log`). ⚠️ El log del kernel MTK entrelaza líneas de 2 CPUs (usar `grep -a`,
+y filtro POSITIVO — el spam de bluedroid contamina las mismas líneas físicas).
+
+### La secuencia REAL del stock (observada, no del código):
+1. Rails ON (hwPowerOn powerId 8, 24) + CONSYS **HW RST** + BTIF open + STP reset
+2. **PATCH_ADDRESS_CMD** → EVT(8B) — `01 08 10 00 01 01 00 01 3c 02 09 02 00 00 00 00 ff ff ff ff`
+3. **PATCH_P_ADDRESS_CMD con addr[12..15] = `00 00 0e f0`** → EVT(8B)
+4. **UN SOLO PATCH: 81 frags** (= `ROMv1_patch_1_0_hdr.bin`, 80812B exactos) — ¡NO hay segundo patch!
+5. **WMT_RESET** (`01 07 01 00 04`) → EVT
+6. **PALDO ON**: BT (VCN33_BT@3300 + HW-mode + VCN28_bt) y WIFI (t=612.547/612.550)
+7. **RF_CALIBRATION** (`01 14 01 00 01`) → EVT — tarda **372ms**
+8. **PALDO OFF**: BT y WIFI (612.925/612.935)
+9. **coex_wmt** (ant_mode=1, como el nuestro)
+10. **configure FM comm**: `01 05 02 00 02 02` → EVT `02 05 02 00 00 02` (init_table_5_1)
+
+**Lo que el stock NO hace** (refutado del análisis estático del GPL): NO manda init_table_1_2/4/5
+(NADA de SET_STP/QUERY_STP/FULL-mode: 0 ocurrencias en 98MB), NO lee hw_ver por WMT (lo lee por MMIO),
+NO GEN_HCR, NO osc_type (co_clock=0), NO merge_pcm.
+
+`WMT_SOC.cfg` del stock confirma nuestra config: `coex_wmt_ant_mode=1, wmt_gps_lna_pin=0,
+wmt_gps_lna_enable=0, co_clock_flag=0`.
+
+GPS-on (captura 1): GPS_SYNC vía ic_pin_ctrl (cmd WMT familia 0x08, EVT 8B) + LNA host GPIO + func_on
+`01 06 02 00 02 01` → ok. **★DE-SENSE REFUTADO DEFINITIVO**: hasta en el stock muere en
+`send_command_to_daemon: invalid native process pid` (no hay daemon) — y el GPS del stock VE 13 sats.
+
+### ★ EXPLICACIÓN DEL CUELGUE ROMv1 (#298):
+Cargamos DOS patches con el de 80KB en `06 00` = **dirección equivocada** (machaca otra región del
+chip) + un `1_1` que el stock ni descarga. **FIX: UN solo patch `ROMv1_patch_1_0_hdr.bin` → `00 00 0e f0`.**
+(La pareja "e1_1→0ef0 + e1_0→0600" era del flujo antiguo del mt6572_82; para ROMv1 NO aplica.)
+
+### FASE 2 (build #301): cambios en `bring_up_chip` (mt6582-btif.c)
+- `patch_dwn(b, "ROMv1_patch_1_0_hdr.bin", {0x00,0x00,0x0e,0xf0})` — ÚNICO patch + WMT_RESET.
+- Mantener GEN_HCR (check de vida, inocuo), rfcal (VCN33 ya always-on en pmOS ≈ PALDO on), coex.
+- Añadir FM comm (`01 05 02 00 02 02`/EVT `02 05 02 00 00 02`) tras coex (fidelidad).
+- Mantener GSYNC + LNA + func_on como están (ya coinciden con el stock).
+- HW-mode de VCN33 (0x416[5]/0x418[14]): NO en iter-1 (es power-mgmt post-cal; VCN33 ya on).
+- Firmware built-in: ROMv1 ya horneado en #298 (verificar que sigue en firmware/ + EXTRA_FIRMWARE).
+
+### FASE 3: flash + test
+Desde Lineage: `adb reboot bootloader` → `fastboot flash boot <img#301>`. En pmOS: dmesg (81 frags,
+bring-up OK, WiFi/BT siguen vivos) → `/dev/stpgps` → ¿frames con datos reales (no 0xCA)? → gpspipe sats.
+
+*Mac (Fable), 2026-07-16. Fase 1 (captura canónica) COMPLETA. El delta del ROMv1 = un-solo-patch@0ef0.*
