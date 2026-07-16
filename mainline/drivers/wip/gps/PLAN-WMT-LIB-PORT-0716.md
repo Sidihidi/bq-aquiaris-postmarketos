@@ -172,5 +172,23 @@ lo sufrió (tandas de 21+41 frags con RESET entre medias, pausas cortas). El sto
 81 frags (~43ms/frag de media CON las pausas). **Fix #301d: timeout de wmt_cmd 400→2000ms** + log del
 seq del frag que falla.
 
-*Mac (Fable), 2026-07-16. Fase 1 (captura canónica) COMPLETA. El delta del ROMv1 = un-solo-patch@0ef0
-+ timeout>500ms. #301d en build.*
+**#301d (timeout 2000ms): la descarga llega al FINAL — "fallo en frag 81/81".** 80 frags ACKeados;
+el ÚLTIMO frag (el que dispara la validación del patch completo en el ROM) nunca recibe ACK y el chip
+queda catatónico (GEN_HCR mudo, `resync_drops=0` = ni basura). **#301e (12s en el último frag +
+pacing 4ms/frag): IGUAL — frag 81/81.** No es timing.
+
+**Descartado también**: contenido (md5 `9adccfae` idéntico repo=Pi=árbol=**blob dentro del vmlinux**),
+formato del frag (header `01 01 len flag` byte-idéntico al stock, verificado en la fuente:
+`WMT_PATCH_CMD` wmt_ic_soc.c:103), addresses (plantillas ADDR/PADDR byte-idénticas), ring DMA
+(8KB, wrapea siempre — no es boundary).
+
+**Hipótesis #301f (en test): el estado PRE-descarga del chip.** El stock hace **HW-RST del CONSYS
+(MTCMOS+rails off→on) JUSTO antes de descargar** — el patch es el PRIMER tráfico WMT que ve el ROM
+tras el reset (0.4s después). Nosotros descargábamos ~10s tras el power-on y tras VARIOS GEN_HCR
+(probe t=2.3 + bring-up). El ROM acepta los frags (protocolo OK) pero la validación final del patch
+falla → estado interno sucio. Fix: `mt6582_consys_hw_rst()` en mt6582-consys.c (apagado ordenado:
+TOPAXI prot → SRAM_PDN → ISO → ~RST_B → CLK_DIS → ~PWR_ON → rails off; reencendido = orden del
+probe) + el bring-up del btif lo llama y descarga DIRECTO (sin GEN_HCR previo).
+
+*Mac (Fable), 2026-07-16. Iteraciones: #301 bootloop (DTS viejo) → #301c arranca pero frag-timeout →
+#301d/e frag 81/81 (validación) → #301f = HW-RST pre-descarga (réplica fiel del stock).*
