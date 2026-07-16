@@ -192,3 +192,26 @@ probe) + el bring-up del btif lo llama y descarga DIRECTO (sin GEN_HCR previo).
 
 *Mac (Fable), 2026-07-16. Iteraciones: #301 bootloop (DTS viejo) → #301c arranca pero frag-timeout →
 #301d/e frag 81/81 (validación) → #301f = HW-RST pre-descarga (réplica fiel del stock).*
+
+---
+## RESULTADO #301f (0716, sesión casa Fable) — FALLÓ: el HW-RST NO arregla el frag 81/81
+`#301f` construido, flasheado y arrancado. **El HW-RST funciona** (`HW-RST OK: chip-id=0x6582, ROM
+corriendo`), pero **la descarga del ROMv1 SIGUE muriendo en `frag 81/81`** (`wmt_cmd[FRAG]: TIMEOUT` →
+`patch ROMv1_patch_1_0_hdr.bin: fallo en frag 81/81`), el chip queda catatónico, `func_on(WIFI) fallo (-5)`,
+bring-up abandonada tras 40 intentos. **La hipótesis del estado pre-descarga (HW-RST) queda REFUTADA.**
+
+⇒ El chip acepta los 81 frags (con HW-RST limpio y timeout 12s en el último) pero la **validación final del
+patch en el ROM falla igual**. Descartado ya: contenido (md5 idéntico), formato/addr (byte-idénticos),
+timing (12s+pacing), estado pre-descarga (HW-RST). **Único candidato que queda del análisis §2: el modo STP
+(`init_table_4` SET_STP `DF 0E 68 01` + host **BTIF_FULL_MODE**)** — el stock negocia STP FULL antes del
+patch; nuestro btif descarga en modo simple. Hipótesis: el ROM valida/recibe el patch de 80KB de forma
+distinta en FULL (con CRC+seq por paquete) vs simple → en simple un byte se corrompe en 80KB → checksum del
+patch falla en el frag 81. **PERO implementar FULL_MODE = reescribir la capa STP entera (proyecto grande) y
+resultado incierto** (aunque cargue el ROMv1, no está probado que arregle el 0xCA del GPS).
+
+**Estado del móvil**: ROTO con `#301f` (CONSYS caído, WiFi/BT/GPS abajo; SSH sigue por USB). Imagen funcional
+para restaurar: `~/mainline/pkg/boot-gsync-lna.img` (#300-era, mt6572_82+GSYNC+COEX+LNA, WiFi/BT/GPS-radio OK,
+GPS 0xCA) o `~/boot-GOOD-backup.img` (Jul14).
+
+*Casa (Fable), 2026-07-16. #301f REFUTADO (HW-RST no arregla frag 81/81). Queda solo FULL_MODE STP (grande e
+incierto). Móvil roto → restaurar #300 recomendado antes de decidir.*
