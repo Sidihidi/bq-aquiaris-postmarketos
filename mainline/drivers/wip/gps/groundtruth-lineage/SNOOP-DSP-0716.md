@@ -39,3 +39,27 @@ Casa probó "bajar wlan0" (insuficiente: no apaga el RF del CONSYS, solo la inte
 
 *Mac (Fable), 2026-07-16. Snoop del stock: mnld idéntico (delta no es mnld). Crystal-trim y GPS-NVRAM
 REFUTADOS. Candidato fuerte: DE-SENSE (interferencia WiFi/BT↔GPS). Test = func_off WiFi en pmOS.*
+
+---
+## Test del de-sense en pmOS #300 (0716 tarde) — NO concluyente + hipótesis debilitada
+Módulo `funcoff.ko` (`mt6582_consys_func_off(type)`, exportado): `off=3`(WiFi)=**0 OK** la 1ª vez, pero
+`off=0`(BT)=**-5 (EIO)** justo después → **apagar el WiFi por func_off DESESTABILIZA el chip** (el WMT deja de
+responder; el motor abre `/dev/stpgps` pero el DSP no emite). No viable como test. `func_off` es más brusco que
+el de-sense del stock (que NO apaga el WiFi, solo ajusta la coexistencia).
+
+**Pega de fondo que debilita la hipótesis de interferencia**: en pmOS `wlan0` está **DOWN** (idle, no
+transmitiendo) y el GPS igual da `0xCA`. Si fuera interferencia por transmisión del WiFi, con el WiFi idle el
+GPS debería ir mejor. (El de-sense se manda si BT_ON||WIFI_ON; el BT sí está on en pmOS.)
+
+### Estado: candidatos baratos AGOTADOS
+Descartados: GPIOs/rails/LNA (idénticos), crystal-trim (0x00 en ambos), GPS-NVRAM (idéntico), mnld (mismo
+binario/mismos comandos), patch mt6572_82 (WiFi/BT OK), interferencia-por-transmisión (WiFi idle). Lo que
+queda son las vías CARAS: (a) portar el **`wmt_lib` completo** del stock para poder cargar el ROMv1 (el patch
+correcto del CONSYS_6582) — proyecto grande; (b) **de-sense real** (kernel→daemon→payload) — complejo y dudoso
+(WiFi idle). El **TEST LIMPIO de interferencia** que falta: recompilar SIN el mtwifi (WiFi nunca hace func_on)
+→ GPS con el RF del WiFi OFF desde el boot, sin desestabilizar → si mejora, interferencia confirmada.
+
+⚠️ El chip quedó DEGRADADO tras el `func_off` (WMT no responde) → necesita power-cycle para recuperar WiFi/BT/GPS.
+
+*Mac (Fable), 2026-07-16 tarde. Test func_off no viable (desestabiliza). Interferencia-por-transmisión
+debilitada (WiFi idle). Candidatos baratos agotados; quedan las vías caras (wmt_lib completo / de-sense).*
