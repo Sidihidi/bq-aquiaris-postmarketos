@@ -215,3 +215,36 @@ GPS 0xCA) o `~/boot-GOOD-backup.img` (Jul14).
 
 *Casa (Fable), 2026-07-16. #301f REFUTADO (HW-RST no arregla frag 81/81). Queda solo FULL_MODE STP (grande e
 incierto). Móvil roto → restaurar #300 recomendado antes de decidir.*
+
+---
+## Análisis FULL_MODE STP (0716, casa Fable) — probablemente NO es la causa del frag 81/81
+Estudiado el `sw_init` del stock byte a byte (`wmt_ic_soc.c:660-770`, source BQ en la Pi
+`~/mainline/downstream/bq-src/`). Orden: init_table_1_2(query) → **init_table_4 (SET_STP `01 04 05 00 03
+DF 0E 68 01`)** → **host FULL mode** (`WMT_CTRL_STP_CONF: MODE=MTKSTP_BTIF_FULL_MODE, EN=1` + sleep 10ms)
+→ init_table_5(query) → **patch download** → RESET → RF-cal(PALDO ON→cal→OFF) → coex.
+
+**FULL_MODE STP = reescritura GRANDE** (stp_core.c: delimitador + header con seq + **CRC-16** (`crc16()`,
+tabla) + cola de retransmisión con ACKs por seq — TX y RX). NO es "añadir un comando".
+
+**★ Pero es casi seguro un CALLEJÓN**: el `mt6572_82` (41 frags) se descarga **en modo SIMPLE** (nuestro
+btif, sin SET_STP ni FULL) y **WiFi/BT funcionan** → el modo simple SÍ descarga patches. Si el simple baja
+el mt6572_82, el fallo del ROMv1 en frag 81/81 **no puede ser el modo STP** (afectaría a ambos igual). Y el
+código del último frag está correcto (fsz=812, `wlen=1+fsz`, flag FRAG_LAST, formato byte-idéntico al stock
+`WMT_PATCH_CMD`). → **No merece la pena reescribir la STP a FULL.**
+
+**Otros dos gaps (§2) también flojos**:
+- PALDO-gating de la rfcal: el PALDO = `VCN33_BT/VCN33_WIFI` (PMIC MT6323) + bit HW-mode. En pmOS esos
+  reguladores YA están on (VCN33/VCN28) → gap murky. (Detalle: el bit `upmu_set_vcn33_on_ctrl_bt` HW-mode
+  quizá no se pone en pmOS, pero WiFi/BT calibran igual sin él.)
+
+**Reinterpretación del frag 81/81**: descartados contenido, formato, addr, timing, HW-RST, y ahora STP-mode.
+Candidatos REALES que quedan: (a) **single-patch (81 frags) vs el split del mt6572_82 (41+21 con RESET entre
+medias)** — quizá el ROM no valida bien UN patch de 80KB de una tirada pero sí trozos con RESET; (b) **ROMv1
+simplemente incompatible con nuestro bring-up simplificado** (necesita init_tables/estado que mt6572_82 no) →
+el stock lo carga con el wmt_lib COMPLETO; (c) **el ADDRESS de descarga** (0e f0 de la captura — reverificar
+si patch_1_0 va a 06 00 según su header). **Y ojo: aunque el ROMv1 cargue, sigue sin estar probado que
+arregle el 0xCA del GPS.**
+
+*Casa (Fable), 2026-07-16. FULL_MODE STP = grande y casi seguro no es la causa (simple baja mt6572_82). El
+frag 81/81 apunta a single-vs-split patch o incompatibilidad ROMv1↔bring-up simplificado. GPS-fix incierto
+aún con ROMv1. Móvil restaurado a #300 (funcional).*
