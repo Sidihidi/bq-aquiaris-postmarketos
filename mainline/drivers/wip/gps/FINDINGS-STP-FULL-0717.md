@@ -1,10 +1,32 @@
-# STP FULL mode + salto del fw ROMv1 — hallazgos 0716/0717 (sesión Windows)
+# STP FULL mode + bring-up COMPLETO del CONSYS — hallazgos 0716/0717 (sesión Windows)
 
-## Estado en una línea
+## Estado en una línea (ACTUALIZADO tras el fix)
 
-**El STP FULL mode funciona y la descarga multi-patch es byte-idéntica al stock, pero el fw
-ROMv1 crashea nada más saltar tras el RESET-2: el PC del MCU acaba barriendo linealmente
-desde ~0x80000 (región vacía). Falta descubrir qué pone el stock en esa región.**
+**✅ RESUELTO: el CONSYS completa el bring-up entero (RF-CAL OK, fw ROMv1 corriendo, BT+GPS
+radios ON). La pieza final: 3 comandos "power on DLM" (encender la RAM del MCU, reg chip
+0x80100060) que el kernel 3.10 de LineageOS envía antes del patch y el 3.4 de bq-src no
+tenía. Sin ellos la RAM estaba apagada, el patch_1_0 se perdía y el fw saltaba a memoria
+vacía (el PC-sweep). Bytes (CMD SET_REG, EVT `02 08 04 00 00 00 00 01`):**
+
+```
+DLM1: 01 08 10 00 01 01 00 01 60 00 10 80 00 00 00 00 00 0f 00 00   (mask 0x00000F00)
+DLM2: 01 08 10 00 01 01 00 01 60 00 10 80 00 00 00 00 f0 00 00 00   (mask 0x000000F0)
+DLM3: 01 08 10 00 01 01 00 01 60 00 10 80 00 00 00 00 08 00 00 00   (mask 0x00000008)
+```
+
+(extraídos del vmlinux de lineage13-boot.img resolviendo los structs init_script; se envían
+tras el QUERY-STP post-SET_STP y ANTES de los patches). Con ellos, al boot del kernel #14:
+patches OK → RESET-2 OK → **RF-CAL OK** → COEX OK → FM-COMM OK → BT RADIO ENCENDIDO (hci0)
+→ GSYNC OK → GPS RADIO ENCENDIDO. PC del MCU estable en ~0x66312 (dentro del patch_1_0).
+
+**GPS aún sin satélites — PERO el test quedó invalidado**: al comparar en vivo, LineageOS
+en la MISMA ventana/momento TAMPOCO ve ningún satélite (GPSTest: lista vacía, PDOP 100,
++6 min). Además los frames 0xAAF0 del DSP en Lineage son estructuralmente IDÉNTICOS a los
+nuestros (patrón 0xCA dominante) → **la hipótesis "0xCA = ruido sin antena" era FALSA**
+(es el formato normal). Conclusión: falta un test con vista REAL del cielo (exterior,
+varios minutos) — el pipeline pmOS puede estar ya funcionando. Delta menor pendiente de
+valorar: Lineage envía un `BGW_DESENSE` (nativo, payload del daemon userspace) al encender
+el GPS; probablemente no bloquea la adquisición.
 
 ## Lo que se implementó y FUNCIONA (mt6582-btif.c, kernels #9–#13, boot-stpfull.img)
 

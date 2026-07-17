@@ -503,6 +503,32 @@ static int bring_up_chip(struct mt6582_btif *b)
 	else
 		dev_info(b->dev, "*** QUERY-STP2 OK en FULL MODE (chip habla full) ***\n");
 
+	/* ⚡ POWER-ON de las DLM (la RAM del MCU) — LA PIEZA QUE FALTABA (0717).
+	 * 3 SET_REG al reg chip-side 0x80100060, valor 0, mascaras [11:8],[7:4],[3]:
+	 * limpian los bits de power-down por bancos. El kernel 3.10 de LineageOS los
+	 * manda tras el query STP y ANTES del patch ("power on dlm cmd1/2/3", bytes
+	 * extraidos de su vmlinux); el 3.4 de bq-src del que portamos NO los tenia.
+	 * Sin esto la RAM 0x60000+ esta APAGADA: el ROM ACKea los frags pero las
+	 * escrituras se pierden, y el fw salta a memoria vacia (PC sweep lineal desde
+	 * ~0x60000+, visto con CPUPCR). Verificado en Lineage vivo via wmt_dbg:
+	 * 0x80100060=0x00000000 y patch_1_0 presente en 0x60000 sin hueco. */
+	{
+		static const u8 dlm1[20] = { 0x01,0x08,0x10,0x00,0x01,0x01,0x00,0x01,
+			0x60,0x00,0x10,0x80,0x00,0x00,0x00,0x00,0x00,0x0f,0x00,0x00 };
+		static const u8 dlm2[20] = { 0x01,0x08,0x10,0x00,0x01,0x01,0x00,0x01,
+			0x60,0x00,0x10,0x80,0x00,0x00,0x00,0x00,0xf0,0x00,0x00,0x00 };
+		static const u8 dlm3[20] = { 0x01,0x08,0x10,0x00,0x01,0x01,0x00,0x01,
+			0x60,0x00,0x10,0x80,0x00,0x00,0x00,0x00,0x08,0x00,0x00,0x00 };
+		static const u8 dlm_evt[8] = { 0x02,0x08,0x04,0x00,0x00,0x00,0x00,0x01 };
+
+		if (wmt_cmd(b, dlm1, 20, dlm_evt, 8, "DLM-ON-1") ||
+		    wmt_cmd(b, dlm2, 20, dlm_evt, 8, "DLM-ON-2") ||
+		    wmt_cmd(b, dlm3, 20, dlm_evt, 8, "DLM-ON-3"))
+			dev_warn(b->dev, "power-on DLM fallo (sigo)\n");
+		else
+			dev_info(b->dev, "*** DLM (RAM del MCU) ENCENDIDA (3x SET_REG 0x80100060) ***\n");
+	}
+
 	/* Multi-patch (source wmt_ic_soc.c sw_init loop 6.3): patch_dwn + init_table_3
 	 * (WMT_RESET) TRAS CADA patch.
 	 *
