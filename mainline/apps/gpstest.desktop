@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=GPS Test
+Comment=Visor de satélites y fix GPS del krillin (cliente de gpsd)
+Exec=/usr/local/bin/gpstest-app
+Icon=find-location
+Categories=Utility;
+Keywords=gps;satelites;fix;gpsd;
+X-Purism-FormFactor=Workstation;Mobile;

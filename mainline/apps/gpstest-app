@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+# GPS Test del krillin — visor de satélites/fix estilo GPSTest (barbeau), nativo Phosh.
+# Lee el JSON de gpsd (127.0.0.1:2947): TPV (fix) + SKY (satélites con SNR).
+# Sin root: gpsd ya corre de sistema (cadena zzz-gps.start).
+import gi, json, socket, threading, time
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Gtk, Adw, GLib
+
+GPSD = ("127.0.0.1", 2947)
+
+class GpsClient(threading.Thread):
+    """Hilo lector de gpsd; reconecta solo. Publica dicts via callback en el main loop."""
+    def __init__(self, on_msg, on_state):
+        super().__init__(daemon=True)
+        self.on_msg = on_msg
+        self.on_state = on_state
+        self.stop_flag = False
+
+    def run(self):
+        while not self.stop_flag:
+            try:
+                s = socket.create_connection(GPSD, timeout=5)
+                s.sendall(b'?WATCH={"enable":true,"json":true}\n')
+                GLib.idle_add(self.on_state, True)
+                f = s.makefile("r", encoding="utf-8", errors="replace")
+                s.settimeout(15)
+                for line in f:
+                    if self.stop_flag:
+                        break
+                    try:
+                        msg = json.loads(line)
+                    except ValueError:
+                        continue
+                    GLib.idle_add(self.on_msg, msg)
+            except OSError:
+                pass
+            GLib.idle_add(self.on_state, False)
+            if not self.stop_flag:
+                time.sleep(3)
+
+def gnss_name(prn):
+    # PRN NMEA clásico: 1-32 GPS, 33-64 SBAS, 65-96 GLONASS
+    if 1 <= prn <= 32: return f"G{prn:02d}"
+    if 33 <= prn <= 64: return f"S{prn}"
+    if 65 <= prn <= 96: return f"R{prn-64:02d}"
+    return f"?{prn}"
+
+class Win(Adw.ApplicationWindow):
+    def __init__(self, app):
+        super().__init__(application=app, title="GPS Test")
+        self.set_default_size(360, 720)
+        self.t0 = time.monotonic()
+        self.ttff = None
+
+        tv = Adw.ToolbarView()
+        hdr = Adw.HeaderBar()
+        self.conn_dot = Gtk.Label(label="●")
+        self.conn_dot.add_css_class("error")
+        self.conn_dot.set_tooltip_text("gpsd")
+        hdr.pack_end(self.conn_dot)
+        tv.add_top_bar(hdr)
+
+        outer = Gtk.ScrolledWindow(vexpand=True)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10,
+                      margin_top=10, margin_bottom=16, margin_start=12, margin_end=12)
+        outer.set_child(box)
+        tv.set_content(outer)
+        self.set_content(tv)
+
+        # --- tarjeta de estado del fix ---
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        card.add_css_class("card")
+        for m in ("top", "bottom", "start", "end"):
+            getattr(card, f"set_margin_{m}")(0)
+        inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4,
+                        margin_top=12, margin_bottom=12, margin_start=12, margin_end=12)
+        card.append(inner)
+
+        self.fix_lbl = Gtk.Label(label="SIN FIX")
+        self.fix_lbl.add_css_class("title-1")
+        inner.append(self.fix_lbl)
+
+        self.sub_lbl = Gtk.Label(label="esperando datos de gpsd…")
+        self.sub_lbl.add_css_class("dim-label")
+        inner.append(self.sub_lbl)
+
+        grid = Gtk.Grid(column_spacing=18, row_spacing=2, halign=Gtk.Align.CENTER,
+                        margin_top=6)
+        self.vals = {}
+        for i, (key, name) in enumerate((("lat", "Lat"), ("lon", "Lon"),
+                                         ("alt", "Alt"), ("spd", "Vel"),
+                                         ("sats", "Sats"), ("ttff", "TTFF"))):
+            k = Gtk.Label(label=name, xalign=1); k.add_css_class("dim-label")
+            v = Gtk.Label(label="—", xalign=0, selectable=True)
+            grid.attach(k, (i % 2) * 2, i // 2, 1, 1)
+            grid.attach(v, (i % 2) * 2 + 1, i // 2, 1, 1)
+            self.vals[key] = v
+        inner.append(grid)
+        box.append(card)
+
+        # --- lista de satélites ---
+        self.sat_title = Gtk.Label(label="Satélites", xalign=0)
+        self.sat_title.add_css_class("heading")
+        box.append(self.sat_title)
+        self.sat_list = Gtk.ListBox()
+        self.sat_list.add_css_class("boxed-list")
+        self.sat_list.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.sat_placeholder = Gtk.Label(label="Ningún satélite a la vista",
+                                         margin_top=12, margin_bottom=12)
+        self.sat_placeholder.add_css_class("dim-label")
+        self.sat_list.set_placeholder(self.sat_placeholder)
+        box.append(self.sat_list)
+
+        self.client = GpsClient(self.on_msg, self.on_state)
+        self.client.start()
+        GLib.timeout_add_seconds(1, self.tick)
+
+    def tick(self):
+        if self.ttff is None:
+            self.vals["ttff"].set_label(f"{int(time.monotonic() - self.t0)}s…")
+        return True
+
+    def on_state(self, up):
+        self.conn_dot.remove_css_class("error" if up else "success")
+        self.conn_dot.add_css_class("success" if up else "error")
+        if not up:
+            self.sub_lbl.set_label("gpsd no disponible — reintentando…")
+        return False
+
+    def on_msg(self, m):
+        cls = m.get("class")
+        if cls == "TPV":
+            mode = m.get("mode", 0)
+            if mode >= 2 and self.ttff is None:
+                self.ttff = time.monotonic() - self.t0
+                self.vals["ttff"].set_label(f"{self.ttff:.0f}s")
+            self.fix_lbl.set_label({2: "FIX 2D", 3: "FIX 3D"}.get(mode, "SIN FIX"))
+            self.sub_lbl.set_label("buscando satélites…" if mode < 2 else
+                                   m.get("time", ""))
+            self.vals["lat"].set_label(f'{m["lat"]:.6f}' if "lat" in m else "—")
+            self.vals["lon"].set_label(f'{m["lon"]:.6f}' if "lon" in m else "—")
+            alt = m.get("altMSL", m.get("alt"))
+            self.vals["alt"].set_label(f"{alt:.0f} m" if alt is not None else "—")
+            self.vals["spd"].set_label(f'{m["speed"]*3.6:.1f} km/h' if "speed" in m else "—")
+        elif cls == "SKY":
+            sats = m.get("satellites", [])
+            used = sum(1 for s in sats if s.get("used"))
+            self.vals["sats"].set_label(f"{used}/{len(sats)}")
+            self.sat_title.set_label(f"Satélites — {len(sats)} a la vista, {used} en uso")
+            while (row := self.sat_list.get_row_at_index(0)) is not None:
+                self.sat_list.remove(row)
+            for s in sorted(sats, key=lambda x: -(x.get("ss") or 0)):
+                self.sat_list.append(self.sat_row(s))
+        return False
+
+    def sat_row(self, s):
+        prn = s.get("PRN", 0)
+        snr = s.get("ss") or 0
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10,
+                      margin_top=6, margin_bottom=6, margin_start=10, margin_end=10)
+        name = Gtk.Label(label=gnss_name(prn), width_chars=4, xalign=0)
+        if s.get("used"):
+            name.add_css_class("success")
+            name.set_label("✓" + gnss_name(prn))
+        row.append(name)
+        elaz = Gtk.Label(label=f'{s.get("el", 0):>2.0f}° {s.get("az", 0):>3.0f}°')
+        elaz.add_css_class("dim-label")
+        elaz.add_css_class("numeric")
+        row.append(elaz)
+        bar = Gtk.LevelBar(min_value=0, max_value=50, value=min(snr, 50),
+                           hexpand=True, valign=Gtk.Align.CENTER)
+        bar.set_size_request(-1, 10)
+        row.append(bar)
+        db = Gtk.Label(label=f"{snr:.0f}", width_chars=3, xalign=1)
+        db.add_css_class("numeric")
+        row.append(db)
+        return row
+
+class App(Adw.Application):
+    def __init__(self):
+        super().__init__(application_id="org.krillin.GpsTest")
+    def do_activate(self):
+        win = self.props.active_window or Win(self)
+        win.present()
+
+if __name__ == "__main__":
+    App().run(None)
