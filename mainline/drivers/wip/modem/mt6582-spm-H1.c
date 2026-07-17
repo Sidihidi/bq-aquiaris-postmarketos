@@ -675,9 +675,12 @@ static const struct kernel_param_ops spm_md_dump_ops = { .set = spm_md_dump_set 
 module_param_cb(spm_md_dump, &spm_md_dump_ops, NULL, 0200);
 
 /* ===== Hito M1 H3: arrancar el MD (modem processor) ===== */
-/* Carveout del MD (DT modem-region@b8000000) y su vista DRAM. */
-#define MD_SMEM_PHYS	0xb8000000
-#define MD_SMEM_SIZE	0x1800000
+/* Carveout del MD (DT modem-region@b8000000, 24MB) y su vista DRAM.
+ * Layout stock (mtk_ccci_helper.c:475-476): firmware @ base, SMEM @ base+22MB. */
+#define MD_MEM_PHYS	0xb8000000	/* firmware (md_region_phy): BANK0 = MD 0x0 -> aqui */
+#define MD_MEM_SIZE	0x1600000	/* 22MB (MD1_MEM_SIZE) */
+#define MD_SMEM_PHYS	0xb9600000	/* SMEM (base+22MB): BANK4 = MD 0x40000000 -> aqui */
+#define MD_SMEM_SIZE	0x1800000	/* mapa de carga: 24MB (todo el carveout) */
 #define KERN_EMI_BASE	0x80000000
 #define MD_INVALID_ADDR	0x3E000000
 #define MD_INVALID_OFF	0x02000000
@@ -695,7 +698,7 @@ static int spm_md_load(struct mt6582_spm *s)
 		dev_err(s->dev, "H3 load: request_firmware(modem.img) fallo %d\n", ret);
 		return ret;
 	}
-	dst = ioremap(MD_SMEM_PHYS, MD_SMEM_SIZE);
+	dst = ioremap(MD_MEM_PHYS, MD_SMEM_SIZE);
 	if (!dst) {
 		release_firmware(fw);
 		dev_err(s->dev, "H3 load: ioremap carveout fallo\n");
@@ -709,8 +712,8 @@ static int spm_md_load(struct mt6582_spm *s)
 	memcpy_toio(dst, fw->data, fw->size);
 	w0 = readl(dst);
 	wlast = readl(dst + ((fw->size & ~0x3u) - 4));
-	dev_info(s->dev, "H3 load: modem.img %zu B -> 0xb8000000; w0=0x%08x (esperado 0xe59ff018) wlast=0x%08x\n",
-		 fw->size, w0, wlast);
+	dev_info(s->dev, "H3 load: modem.img %zu B -> 0x%08x; w0=0x%08x (esperado 0xe59ff018) wlast=0x%08x\n",
+		 fw->size, MD_MEM_PHYS, w0, wlast);
 	iounmap(dst);
 	release_firmware(fw);
 	return 0;
@@ -721,10 +724,13 @@ static int spm_md_remap(struct mt6582_spm *s)
 {
 	void __iomem *mcu, *infra;
 	const u32 IA = MD_INVALID_ADDR, O = MD_INVALID_OFF;
-	u32 apd = MD_SMEM_PHYS;
+	u32 apd = MD_SMEM_PHYS;			/* AP/MD BANK4 -> SMEM (0xb9600000) */
 	u32 mdd = MD_SMEM_PHYS - KERN_EMI_BASE;
-	u32 ap0, ap1, md0, md1;
+	u32 b0d = MD_MEM_PHYS - KERN_EMI_BASE;	/* MD BANK0 -> FIRMWARE (0xb8000000) */
+	u32 ap0, ap1, md0, md1, b0m0, b0m1;
 
+	/* BANK4 (set_ap_smem_remap / set_md_smem_remap): vista 0x40000000 del MD = SMEM.
+	 * AP usa slots invalidos 14-20, MD usa 0-6. */
 	ap0 = (((apd>>24)|0x1)&0xFF) + ((((IA+O*14)>>16)|(1<<8))&0xFF00)
 	    + ((((IA+O*15)>>8)|(1<<16))&0xFF0000) + ((((IA+O*16))|(1<<24))&0xFF000000);
 	ap1 = ((((IA+O*17)>>24)|0x1)&0xFF) + ((((IA+O*18)>>16)|(1<<8))&0xFF00)
@@ -734,6 +740,16 @@ static int spm_md_remap(struct mt6582_spm *s)
 	md1 = ((((IA+O*3)>>24)|0x1)&0xFF) + ((((IA+O*4)>>16)|(1<<8))&0xFF00)
 	    + ((((IA+O*5)>>8)|(1<<16))&0xFF0000) + ((((IA+O*6))|(1<<24))&0xFF000000);
 
+	/* ⚡ H3 v3 (0717): BANK0 (set_md_rom_rw_mem_remap, src=0x0) — LA PIEZA QUE FALTABA.
+	 * Mapea la dir 0x0 del MD (donde arranca su boot ROM: boot-slave Vector=0x0) al
+	 * FIRMWARE en DRAM. Sin esto el MD, al soltarlo, ejecuta memoria vacia -> nunca
+	 * llega a hablar por CCIF (RCHNUM=0). Slots invalidos 7-13. Reg MD1_BANK0_MAP0/1
+	 * = INFRACFG+0x300/0x304 (BANK4 iba a +0x308/0x30C). */
+	b0m0 = (((b0d>>24)|0x1)&0xFF) + ((((IA+O*7)>>16)|(1<<8))&0xFF00)
+	     + ((((IA+O*8)>>8)|(1<<16))&0xFF0000) + ((((IA+O*9))|(1<<24))&0xFF000000);
+	b0m1 = ((((IA+O*10)>>24)|0x1)&0xFF) + ((((IA+O*11)>>16)|(1<<8))&0xFF00)
+	     + ((((IA+O*12)>>8)|(1<<16))&0xFF0000) + ((((IA+O*13))|(1<<24))&0xFF000000);
+
 	mcu = ioremap(0x10200000, 0x400);
 	infra = ioremap(0x10001000, 0x400);
 	if (!mcu || !infra) {
@@ -741,12 +757,14 @@ static int spm_md_remap(struct mt6582_spm *s)
 		if (infra) iounmap(infra);
 		return -ENOMEM;
 	}
+	writel(b0m0, infra + 0x300);		/* MD1_BANK0_MAP0 -> firmware */
+	writel(b0m1, infra + 0x304);		/* MD1_BANK0_MAP1 */
 	writel(ap0, mcu + 0x200);
 	writel(ap1, mcu + 0x204);
-	writel(md0, infra + 0x308);
+	writel(md0, infra + 0x308);		/* MD1_BANK4_MAP0 -> SMEM */
 	writel(md1, infra + 0x30c);
-	dev_info(s->dev, "H3 remap: AP0=0x%08x AP1=0x%08x MD0=0x%08x MD1=0x%08x (des=0x%08x)\n",
-		 ap0, ap1, md0, md1, apd);
+	dev_info(s->dev, "H3 v3 remap: BANK0(fw 0x%08x)=%08x/%08x  BANK4(smem 0x%08x) AP=%08x/%08x MD=%08x/%08x\n",
+		 MD_MEM_PHYS, b0m0, b0m1, apd, ap0, ap1, md0, md1);
 	iounmap(mcu);
 	iounmap(infra);
 	return 0;
