@@ -769,6 +769,19 @@ static int spm_md_release(struct mt6582_spm *s)
 		if (en) iounmap(en); if (ccif) iounmap(ccif);
 		return -ENOMEM;
 	}
+	/* H3 v2 (0717): INIT del CCIF ANTES de soltar el MD — el paso que faltaba.
+	 * El stock (__ccif_v1_init, ccci_hw.c:263) pone el mailbox AP en modo
+	 * ARBITRACIÓN (CCIF_CON=CCIF_CON_ARB=0x1) y ACKea todos los canales
+	 * (CCIF_ACK=0xFF) en el probe, MUCHO antes del let_md_go. Sin esto el CCIF
+	 * del AP no está en el modo que el MD espera al arrancar → su handshake no
+	 * registra (CON/RCHNUM se quedaban a 0 en el 1er intento H3). Offsets:
+	 * CON=+0x0, ACK=+0x14 (ccci_platform_cfg.h). */
+	writel(0x1, ccif + 0x00);		/* CCIF_CON = CCIF_CON_ARB (arbitración) */
+	writel(0xFF, ccif + 0x14);		/* CCIF_ACK = ACK todos los canales */
+	(void)readl(ccif + 0x00);		/* flush posted write antes de soltar */
+	dev_info(s->dev, "H3 v2: CCIF init -> CON=0x%08x (esperado 0x1), ACK escrito 0xFF\n",
+		 readl(ccif + 0x00));
+
 	writel(0x2200, rgu + 0x00);		/* WDT_MD_MODE = KEY = disable */
 	writel(0x3567C766, key);
 	writel(0x0, vec);
