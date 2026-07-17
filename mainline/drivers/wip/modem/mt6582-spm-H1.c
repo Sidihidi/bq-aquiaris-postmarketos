@@ -857,7 +857,7 @@ static int spm_md_hs2(struct mt6582_spm *s)
 		writel(0, smem + i * 4);
 	writel(0x46494343, smem + 0 * 4);	/* Prefix "CCIF" */
 	writel(0x3536544d, smem + 1 * 4);	/* Platform_L "MT65" */
-	writel(0x535f3238, smem + 2 * 4);	/* Platform_H "82_S" */
+	writel(0x31453238, smem + 2 * 4);	/* Platform_H "82E1" (ground-truth Lineage 0717) */
 	writel(0x20121001, smem + 3 * 4);	/* DriverVersion (CCCI1_DRIVER_VER) */
 	writel(0, smem + 4 * 4);		/* BootChannel = CCCI_CONTROL_RX */
 	writel(0, smem + 5 * 4);		/* BootingStartID = NORMAL_BOOT_ID */
@@ -875,7 +875,7 @@ static int spm_md_hs2(struct mt6582_spm *s)
 	/* 3) TAG (modem_runtime_info_tag_t, 7 ints) en la SRAM del CCIF @ 0x140 */
 	writel(0x46494343, ccif + 0x140 + 0);		/* prefix */
 	writel(0x3536544d, ccif + 0x140 + 4);		/* platform_L */
-	writel(0x535f3238, ccif + 0x140 + 8);		/* platform_H */
+	writel(0x31453238, ccif + 0x140 + 8);		/* platform_H "82E1" */
 	writel(0x20121001, ccif + 0x140 + 12);		/* driver_version */
 	writel(MD_SMEM_PHYS - MD_AP_OFF, ccif + 0x140 + 16);	/* runtime_data_base (MD-view) */
 	writel(RT_NINTS * 4, ccif + 0x140 + 20);	/* runtime_data_size */
