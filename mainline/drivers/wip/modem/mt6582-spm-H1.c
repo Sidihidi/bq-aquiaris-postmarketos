@@ -868,10 +868,22 @@ static int spm_md_hs2(struct mt6582_spm *s)
 	writel(0, smem + 5 * 4);		/* BootingStartID = NORMAL_BOOT_ID */
 	/* Regiones que set_md_runtime SIEMPRE rellena (size constante no-cero) — el MD
 	 * las exige. Las colocamos en el SMEM tras el runtime(280)+misc(0x400). */
-	writel((MD_SMEM_PHYS + 0x600) - MD_AP_OFF, smem + 35 * 4);	/* ExceShareMemBase (MD-view) */
+	writel((MD_SMEM_PHYS + 0x800) - MD_AP_OFF, smem + 35 * 4);	/* ExceShareMemBase (MD-view, tras misc) */
 	writel(0x800, smem + 36 * 4);					/* ExceShareMemSize = MD_EX_LOG_SIZE */
-	writel((MD_SMEM_PHYS + 0xE00) - MD_AP_OFF, smem + 62 * 4);	/* MDExExpInfoBase (MD-view) */
+	writel((MD_SMEM_PHYS + 0x1000) - MD_AP_OFF, smem + 62 * 4);	/* MDExExpInfoBase (MD-view) */
 	writel(12, smem + 63 * 4);					/* MDExExpInfoSize = sizeof(exp_t) */
+	/* Regiones que el stock SIEMPRE asigna no-cero (ccci_settings.c): el MD monta
+	 * estos canales al boot y desreferencia su base — si es 0 -> DATA ABORT. Les
+	 * damos bases validas en el SMEM (2MB, el MD accede fisico; no escribimos, el
+	 * MD las inicializa). Zonas distintas: IPC@+0x2000 PCM@+0x4000 RPC@+0xC000 FS@+0xE000. */
+	writel((MD_SMEM_PHYS + 0x4000) - MD_AP_OFF, smem + 10 * 4);	/* PcmShareMemBase */
+	writel(0x8000, smem + 11 * 4);					/* PcmShareMemSize (16*2K) */
+	writel((MD_SMEM_PHYS + 0xE000) - MD_AP_OFF, smem + 29 * 4);	/* FileShareMemBase (FS) */
+	writel(0x2000, smem + 30 * 4);					/* FileShareMemSize */
+	writel((MD_SMEM_PHYS + 0xC000) - MD_AP_OFF, smem + 31 * 4);	/* RpcShareMemBase */
+	writel(0x2000, smem + 32 * 4);					/* RpcShareMemSize */
+	writel((MD_SMEM_PHYS + 0x2000) - MD_AP_OFF, smem + 39 * 4);	/* IPCShareMemBase */
+	writel(0x2000, smem + 40 * 4);					/* IPCShareMemSize */
 	writel(misc_phys - MD_AP_OFF, smem + 66 * 4);	/* MiscInfoBase (MD-view) */
 	writel(1024, smem + 67 * 4);		/* MiscInfoSize */
 	writel(0x46494343, smem + 69 * 4);	/* Postfix "CCIF" */
@@ -883,7 +895,11 @@ static int spm_md_hs2(struct mt6582_spm *s)
 
 	/* 2) misc_info (config_misc_info) en SMEM@0x400. Layout misc_info_t:
 	 * prefix@0, support_mask@4, index@8, next@12, feature_0..15_val[4]@16,
-	 * reserved_2[3]@272, postfix@284. */
+	 * reserved_2[3]@272, postfix@284. El stock hace memset(0) primero — sin él,
+	 * feature_1..15/reserved quedan con basura del carveout y el MD puede leer un
+	 * puntero basura -> DATA ABORT. Zeramos los 0x400 bytes de la region misc. */
+	for (i = 0; i < 256; i++)
+		writel(0, smem + 0x400 + i * 4);
 	writel(0x46494343, smem + 0x400 + 0);		/* prefix "CCIF" */
 	writel(0x1, smem + 0x400 + 4);			/* support_mask = FEATURE_SUPPORT<<MISC_DMA_ADDR */
 	writel(0, smem + 0x400 + 8);			/* index */
