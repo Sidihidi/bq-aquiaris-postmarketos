@@ -45,7 +45,47 @@ writel(0xFF, ccif + 0x14);   /* CCIF_ACK = todos los canales */
 (void)readl(ccif + 0x00);    /* flush */
 ```
 
-## Estado y siguiente paso (test real, cuando se pueda hacer un ciclo cuidado)
+## ✅ PROBADO EN HW (0717, kernel #15 boot-md-test) — CCIF-init verificado, MD aún no arranca
+
+Resultó que el módulo H3 **YA estaba en el árbol de diario #14** (`mt6582-spm.c` = SPM
+suspend + H1/H2/H3 + triggers sysfs `spm_md_{load,remap,release,dump,poweron}`), y el
+carveout (`0xb8000000..0xb97fffff nomap`) y `modem.img` (5.1MB) ya en el móvil. No hizo
+falta integrar nada — solo aplicar el fix al árbol y recompilar (#15).
+
+**Baseline (#14, sin fix)**: load ✓ (w0=0xe59ff018) → remap ✓ (MD0=0x43413f39) →
+release ✓ (AP sobrevive) → CCIF `CON=0 BUSY=0 RCHNUM=0 RX0=0xffffffff` (el RX0 es
+lectura FLOTANTE del CCIF sin init = falso positivo del sondeo v1).
+
+**Con CCIF-init (#15)**: `H3 v2: CCIF init -> CON=0x00000001` ✓ **el modo ARB SÍ queda
+puesto** (antes leía basura). PERO tras el release, 5s: `CON=0x1 BUSY=0 RCHNUM=0` = el
+MD **sigue sin levantar el handshake**. También probado con `spm_md_poweron` explícito
+antes (MTCMOS): `PWR_STATUS bit0 antes=1` (ya ON del LK, H1 correcto) → sin cambio.
+
+**⇒ CCIF-init era necesario (y ahora está bien) pero NO suficiente.** Descartados como
+bloqueante: **CCIF-init** (hecho), **MTCMOS** (ya ON), **EMI-MPU** (`clear_md_region_protection`
+va entero bajo `#ifdef ENABLE_EMI_PROTECTION`, compilado OFF = memoria abierta = correcto),
+**bus TOPAXI** (`PROT_STA1=0xe000` = estado esperado post-H1). `ungate_md1` del stock =
+1:1 con lo nuestro (MTCMOS→WDT off→Key/Vector/En, mismos valores).
+
+**El bloqueante real es el ARRANQUE del MD**: con power+remap+CCIF+keys todos correctos,
+el MD no ejecuta MOLY hasta hablar. Sospechas vivas (para la iteración profunda):
+1. **Cómo el boot ROM del MD (arranca en su addr 0x0) alcanza el firmware en DRAM 0xb8000000.**
+   El BANK4 remap da la vista del MD a la DRAM del AP, pero puede faltar decirle al MD
+   DÓNDE está el img (un registro de config / base del firmware), o el GFH debe ir en
+   otro sitio para que el boot ROM lo encuentre.
+2. **`config_misc_info` / un runtime-data mínimo** puede ser necesario incluso para HS1
+   (el H3 spec lo pone en HS1→HS2, pero conviene verificar).
+3. **`check_md_header`/GFH**: nuestro `md_load` hace memcpy raw; `load_std_firmware` del
+   stock puede parsear el GFH del tail y relocar/preparar el entry.
+
+**⇒ SIGUIENTE (decisivo): captura Lineage-vivo del arranque del MD stock** (mismo método
+que destapó la DLM del CONSYS). Bootear Android, y con el MD funcionando volcar por
+`/dev/mem` (o el debug del ccci) el estado de TODOS los registros del camino de boot
+(BANK4, CCIF CON/BUSY/RCHNUM, boot-slave, y cualquier reg de config MD que no conozcamos)
++ ver si hay un `set_ccci_runtime`/`config_misc_info` previo al let_md_go. El diff contra
+lo nuestro revela la pieza. Es territorio "primer MT65xx con el MD en mainline".
+
+## (contexto) Estado y siguiente paso — plan original
 
 ⚠️ El código H3 (mt6582-spm-H1.c) es del árbol del hilo Mac (menupick23) y **NO está
 en el árbol de diario actual** (#14 = boot-menupick24-consys, la línea CONSYS). Para

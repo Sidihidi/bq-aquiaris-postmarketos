@@ -769,18 +769,17 @@ static int spm_md_release(struct mt6582_spm *s)
 		if (en) iounmap(en); if (ccif) iounmap(ccif);
 		return -ENOMEM;
 	}
-	/* H3 v2 (0717): INIT del CCIF ANTES de soltar el MD — el paso que faltaba.
+	/* H3 v2 (0717): INIT del CCIF ANTES de soltar el MD — la pieza que faltaba.
 	 * El stock (__ccif_v1_init, ccci_hw.c:263) pone el mailbox AP en modo
-	 * ARBITRACIÓN (CCIF_CON=CCIF_CON_ARB=0x1) y ACKea todos los canales
-	 * (CCIF_ACK=0xFF) en el probe, MUCHO antes del let_md_go. Sin esto el CCIF
-	 * del AP no está en el modo que el MD espera al arrancar → su handshake no
-	 * registra (CON/RCHNUM se quedaban a 0 en el 1er intento H3). Offsets:
-	 * CON=+0x0, ACK=+0x14 (ccci_platform_cfg.h). */
+	 * ARBITRACIÓN (CCIF_CON=+0x0=CCIF_CON_ARB=0x1) + ACKea todos los canales
+	 * (CCIF_ACK=+0x14=0xFF) en el probe, ANTES del let_md_go. Sin ARB el AP no
+	 * refleja las escrituras del MD → el handshake no registra (H3 v1: CON/RCHNUM=0,
+	 * RX0=0xffffffff = lectura flotante del CCIF sin init). */
 	writel(0x1, ccif + 0x00);		/* CCIF_CON = CCIF_CON_ARB (arbitración) */
 	writel(0xFF, ccif + 0x14);		/* CCIF_ACK = ACK todos los canales */
-	(void)readl(ccif + 0x00);		/* flush posted write antes de soltar */
-	dev_info(s->dev, "H3 v2: CCIF init -> CON=0x%08x (esperado 0x1), ACK escrito 0xFF\n",
-		 readl(ccif + 0x00));
+	(void)readl(ccif + 0x00);		/* flush posted write */
+	dev_info(s->dev, "H3 v2: CCIF init -> CON=0x%08x (esperado 0x1) BUSY=0x%08x RCHNUM=0x%08x RX0=0x%08x\n",
+		 readl(ccif+0), readl(ccif+4), readl(ccif+0x10), readl(ccif+0x180));
 
 	writel(0x2200, rgu + 0x00);		/* WDT_MD_MODE = KEY = disable */
 	writel(0x3567C766, key);
@@ -792,8 +791,10 @@ static int spm_md_release(struct mt6582_spm *s)
 		busy = readl(ccif + 0x04);
 		rch = readl(ccif + 0x10);
 		rx = readl(ccif + 0x180);
-		if (con || busy || rch || rx) {
-	dev_info(s->dev, "H3 release: ACTIVIDAD del MD @t=%dms! CON=0x%08x BUSY=0x%08x RCHNUM=0x%08x RX0=0x%08x\n",
+		/* handshake REAL = cambia CON (deja de ser 0x1=ARB nuestro), BUSY o RCHNUM.
+		 * NO mirar RX0: lee 0xffffffff flotante y da falso positivo. */
+		if ((con && con != 0x1) || busy || rch) {
+	dev_info(s->dev, "H3 v2: *** HANDSHAKE! @t=%dms CON=0x%08x BUSY=0x%08x RCHNUM=0x%08x RX0=0x%08x ***\n",
 		 i*100, con, busy, rch, rx);
 			seen = 1;
 			break;
