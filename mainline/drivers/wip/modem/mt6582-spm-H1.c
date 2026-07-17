@@ -837,7 +837,7 @@ static int spm_md_hs2(struct mt6582_spm *s)
 {
 	void __iomem *smem, *ccif;
 	u32 misc_phys = MD_SMEM_PHYS + 0x400;	/* misc_info tras el runtime struct */
-	u32 rch;
+	u32 rch, start;
 	int i;
 
 	smem = ioremap(MD_SMEM_PHYS, 0x2000);
@@ -849,6 +849,11 @@ static int spm_md_hs2(struct mt6582_spm *s)
 	}
 	rch = readl(ccif + 0x10);
 	dev_info(s->dev, "H4 HS2: pre RCHNUM=0x%08x (HS1 esperado bit0)\n", rch);
+	/* DIAG: el mensaje HS1 que envio el MD (RXCHDATA ch0 @0x180, 4 ints) — confirma
+	 * el protocolo y revela el formato exacto que el MD espera de vuelta. */
+	dev_info(s->dev, "H4 DIAG HS1-msg (RX ch0): %08x %08x %08x %08x | START=%08x CON=%08x BUSY=%08x\n",
+		 readl(ccif + 0x180), readl(ccif + 0x184), readl(ccif + 0x188), readl(ccif + 0x18c),
+		 readl(ccif + 0x08), readl(ccif + 0x00), readl(ccif + 0x04));
 	if (rch & 0x1)
 		writel(0x1, ccif + 0x14);	/* ACK canal 0 (el HS1 del MD) */
 
@@ -861,16 +866,30 @@ static int spm_md_hs2(struct mt6582_spm *s)
 	writel(0x20121001, smem + 3 * 4);	/* DriverVersion (CCCI1_DRIVER_VER) */
 	writel(0, smem + 4 * 4);		/* BootChannel = CCCI_CONTROL_RX */
 	writel(0, smem + 5 * 4);		/* BootingStartID = NORMAL_BOOT_ID */
+	/* Regiones que set_md_runtime SIEMPRE rellena (size constante no-cero) — el MD
+	 * las exige. Las colocamos en el SMEM tras el runtime(280)+misc(0x400). */
+	writel((MD_SMEM_PHYS + 0x600) - MD_AP_OFF, smem + 35 * 4);	/* ExceShareMemBase (MD-view) */
+	writel(0x800, smem + 36 * 4);					/* ExceShareMemSize = MD_EX_LOG_SIZE */
+	writel((MD_SMEM_PHYS + 0xE00) - MD_AP_OFF, smem + 62 * 4);	/* MDExExpInfoBase (MD-view) */
+	writel(12, smem + 63 * 4);					/* MDExExpInfoSize = sizeof(exp_t) */
 	writel(misc_phys - MD_AP_OFF, smem + 66 * 4);	/* MiscInfoBase (MD-view) */
 	writel(1024, smem + 67 * 4);		/* MiscInfoSize */
 	writel(0x46494343, smem + 69 * 4);	/* Postfix "CCIF" */
+	wmb();
+	/* DIAG: read-back del SMEM — confirma que la escritura fisica cuajo (descarta
+	 * problema de ioremap/mapeo del SMEM que el MD tambien veria). */
+	dev_info(s->dev, "H4 DIAG SMEM rb: [0]=%08x [2]=%08x [66]=%08x [69]=%08x (esp CCIF/82E1/miscMDbase/CCIF)\n",
+		 readl(smem + 0), readl(smem + 2 * 4), readl(smem + 66 * 4), readl(smem + 69 * 4));
 
-	/* 2) misc_info (config_misc_info) en SMEM@0x400 */
+	/* 2) misc_info (config_misc_info) en SMEM@0x400. Layout misc_info_t:
+	 * prefix@0, support_mask@4, index@8, next@12, feature_0..15_val[4]@16,
+	 * reserved_2[3]@272, postfix@284. */
 	writel(0x46494343, smem + 0x400 + 0);		/* prefix "CCIF" */
-	writel(0, smem + 0x400 + 4);			/* support_mask (minimo) */
+	writel(0x1, smem + 0x400 + 4);			/* support_mask = FEATURE_SUPPORT<<MISC_DMA_ADDR */
 	writel(0, smem + 0x400 + 8);			/* index */
 	writel(0, smem + 0x400 + 12);			/* next */
 	writel(MD_MEM_PHYS, smem + 0x400 + 16);		/* feature_0_val[0] = md_mem_start */
+	writel(0x46494343, smem + 0x400 + 284);		/* postfix "CCIF" (config_misc_info lo pone) */
 
 	/* 3) TAG (modem_runtime_info_tag_t, 7 ints) en la SRAM del CCIF @ 0x140 */
 	writel(0x46494343, ccif + 0x140 + 0);		/* prefix */
@@ -891,21 +910,29 @@ static int spm_md_hs2(struct mt6582_spm *s)
 	writel(0x5555FFFF, ccif + 0x100 + 12);		/* reserved = MD_INIT_CHK_ID */
 	wmb();
 	writel(0, ccif + 0x0c);				/* CCIF_TCHNUM = 0 -> dispara */
+	udelay(100);
+	/* DIAG: tras disparar el TX — si el MD consume el mensaje, BUSY bit0 se limpia
+	 * (el MD leyo TXCHDATA). START refleja canales disparados. */
+	dev_info(s->dev, "H4 DIAG post-TX: START=%08x BUSY=%08x RCHNUM=%08x (BUSY b0=0 => MD leyo el msg)\n",
+		 readl(ccif + 0x08), readl(ccif + 0x04), readl(ccif + 0x10));
 	dev_info(s->dev, "H4 HS2: runtime+tag+msg enviados. Sondeando respuesta del MD 5s...\n");
 
-	/* 5) poll por la respuesta del MD (BootReadyID) -> HS2 */
+	/* 5) poll por la respuesta del MD (BootReadyID) -> HS2. Vigilar RCHNUM Y START
+	 * (el MD puede responder en otro canal fisico). */
 	for (i = 0; i < 50; i++) {
 		rch = readl(ccif + 0x10);
-		if (rch & ~0x1) {	/* algo distinto del HS1 previo */
-			dev_info(s->dev, "H4 HS2: *** MD RESPONDE! RCHNUM=0x%08x RX0=0x%08x RX(ch1)=0x%08x ***\n",
-				 rch, readl(ccif + 0x180), readl(ccif + 0x180 + 16));
+		start = readl(ccif + 0x08);
+		if ((rch & ~0x1) || (start & ~0x1)) {
+			dev_info(s->dev, "H4 HS2: *** MD RESPONDE! @%dms RCHNUM=%08x START=%08x RX=[%08x %08x %08x %08x] ***\n",
+				 i * 100, rch, start, readl(ccif + 0x180), readl(ccif + 0x184),
+				 readl(ccif + 0x188), readl(ccif + 0x18c));
 			break;
 		}
 		msleep(100);
 	}
 	if (i == 50)
-		dev_info(s->dev, "H4 HS2: sin respuesta nueva tras 5s. RCHNUM=0x%08x BUSY=0x%08x\n",
-			 readl(ccif + 0x10), readl(ccif + 0x04));
+		dev_info(s->dev, "H4 HS2: sin respuesta nueva tras 5s. RCHNUM=0x%08x START=0x%08x BUSY=0x%08x\n",
+			 readl(ccif + 0x10), readl(ccif + 0x08), readl(ccif + 0x04));
 	iounmap(smem);
 	iounmap(ccif);
 	return 0;
