@@ -2,7 +2,7 @@
 
 **Estado: ✅ FUNCIONANDO.** Bring-up completo del combo CONSYS (BT/GPS/FM/WiFi) del MT6582
 con el firmware ROMv1 stock, RF-CAL incluida. Es la culminación del trabajo 0714–0717.
-Imagen de diario: **boot-menupick14-consys.img** (md5 `8ded10b3...`, = kernel #14 + fix DSI
+Imagen de diario: **boot-menupick24-consys.img** (md5 `8ded10b3...`, = kernel #14 + fix DSI
 + SPM + batería + todos los drivers previos; backups boot-GOOD actualizados en Pi y móvil,
 los anteriores renombrados `-pre0717`).
 
