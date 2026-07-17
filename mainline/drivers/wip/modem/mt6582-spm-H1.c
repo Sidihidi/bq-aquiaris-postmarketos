@@ -826,18 +826,107 @@ static int spm_md_release(struct mt6582_spm *s)
 	return 0;
 }
 
+/* H4: HS2 — responder al handshake HS1 del MD con la runtime data + el mensaje de
+ * arranque, para que el MD avance a stage 2 = M1 completo. Todo RE'd del stock
+ * (ccci_send_run_time_data / set_md_runtime / __ccif_v1_write_phy_ch_data).
+ * Ver H4-HS2-SPEC-0717.md. Primer intento: runtime minimo (share-mems a 0 salvo
+ * MiscInfo). El MD lee el TAG en la SRAM del CCIF@0x140 -> apunta al runtime en SMEM. */
+#define MD_AP_OFF	0x78000000	/* md_2_ap_phy_addr_offset_fixed = (smem&0xFE000000)-0x40000000 */
+#define RT_NINTS	70		/* sizeof(modem_runtime_t)/4 */
+static int spm_md_hs2(struct mt6582_spm *s)
+{
+	void __iomem *smem, *ccif;
+	u32 misc_phys = MD_SMEM_PHYS + 0x400;	/* misc_info tras el runtime struct */
+	u32 rch;
+	int i;
+
+	smem = ioremap(MD_SMEM_PHYS, 0x2000);
+	ccif = ioremap(0x1020A000, 0x200);
+	if (!smem || !ccif) {
+		if (smem) iounmap(smem);
+		if (ccif) iounmap(ccif);
+		return -ENOMEM;
+	}
+	rch = readl(ccif + 0x10);
+	dev_info(s->dev, "H4 HS2: pre RCHNUM=0x%08x (HS1 esperado bit0)\n", rch);
+	if (rch & 0x1)
+		writel(0x1, ccif + 0x14);	/* ACK canal 0 (el HS1 del MD) */
+
+	/* 1) runtime struct (RT_NINTS ints, memset 0 + esenciales) en SMEM@0 */
+	for (i = 0; i < RT_NINTS; i++)
+		writel(0, smem + i * 4);
+	writel(0x46494343, smem + 0 * 4);	/* Prefix "CCIF" */
+	writel(0x3536544d, smem + 1 * 4);	/* Platform_L "MT65" */
+	writel(0x535f3238, smem + 2 * 4);	/* Platform_H "82_S" */
+	writel(0x20121001, smem + 3 * 4);	/* DriverVersion (CCCI1_DRIVER_VER) */
+	writel(0, smem + 4 * 4);		/* BootChannel = CCCI_CONTROL_RX */
+	writel(0, smem + 5 * 4);		/* BootingStartID = NORMAL_BOOT_ID */
+	writel(misc_phys - MD_AP_OFF, smem + 66 * 4);	/* MiscInfoBase (MD-view) */
+	writel(1024, smem + 67 * 4);		/* MiscInfoSize */
+	writel(0x46494343, smem + 69 * 4);	/* Postfix "CCIF" */
+
+	/* 2) misc_info (config_misc_info) en SMEM@0x400 */
+	writel(0x46494343, smem + 0x400 + 0);		/* prefix "CCIF" */
+	writel(0, smem + 0x400 + 4);			/* support_mask (minimo) */
+	writel(0, smem + 0x400 + 8);			/* index */
+	writel(0, smem + 0x400 + 12);			/* next */
+	writel(MD_MEM_PHYS, smem + 0x400 + 16);		/* feature_0_val[0] = md_mem_start */
+
+	/* 3) TAG (modem_runtime_info_tag_t, 7 ints) en la SRAM del CCIF @ 0x140 */
+	writel(0x46494343, ccif + 0x140 + 0);		/* prefix */
+	writel(0x3536544d, ccif + 0x140 + 4);		/* platform_L */
+	writel(0x535f3238, ccif + 0x140 + 8);		/* platform_H */
+	writel(0x20121001, ccif + 0x140 + 12);		/* driver_version */
+	writel(MD_SMEM_PHYS - MD_AP_OFF, ccif + 0x140 + 16);	/* runtime_data_base (MD-view) */
+	writel(RT_NINTS * 4, ccif + 0x140 + 20);	/* runtime_data_size */
+	writel(0x46494343, ccif + 0x140 + 24);		/* postfix */
+
+	/* 4) mensaje de arranque por CCIF TX canal fisico 0 (TXCHDATA@0x100) */
+	if (readl(ccif + 0x04) & 0x1)
+		dev_warn(s->dev, "H4 HS2: CCIF ch0 BUSY antes de TX (0x%08x)\n", readl(ccif + 0x04));
+	writel(0x1, ccif + 0x04);			/* CCIF_BUSY = 1<<0 */
+	writel(0xFFFFFFFF, ccif + 0x100 + 0);		/* data0 = magic */
+	writel(0x00000000, ccif + 0x100 + 4);		/* data1 = MD_INIT_START_BOOT */
+	writel(0x00000001, ccif + 0x100 + 8);		/* channel = CCCI_CONTROL_TX */
+	writel(0x5555FFFF, ccif + 0x100 + 12);		/* reserved = MD_INIT_CHK_ID */
+	wmb();
+	writel(0, ccif + 0x0c);				/* CCIF_TCHNUM = 0 -> dispara */
+	dev_info(s->dev, "H4 HS2: runtime+tag+msg enviados. Sondeando respuesta del MD 5s...\n");
+
+	/* 5) poll por la respuesta del MD (BootReadyID) -> HS2 */
+	for (i = 0; i < 50; i++) {
+		rch = readl(ccif + 0x10);
+		if (rch & ~0x1) {	/* algo distinto del HS1 previo */
+			dev_info(s->dev, "H4 HS2: *** MD RESPONDE! RCHNUM=0x%08x RX0=0x%08x RX(ch1)=0x%08x ***\n",
+				 rch, readl(ccif + 0x180), readl(ccif + 0x180 + 16));
+			break;
+		}
+		msleep(100);
+	}
+	if (i == 50)
+		dev_info(s->dev, "H4 HS2: sin respuesta nueva tras 5s. RCHNUM=0x%08x BUSY=0x%08x\n",
+			 readl(ccif + 0x10), readl(ccif + 0x04));
+	iounmap(smem);
+	iounmap(ccif);
+	return 0;
+}
+
 static int spm_md_load_set(const char *v, const struct kernel_param *k)
 { return gspm ? spm_md_load(gspm) : -ENODEV; }
 static int spm_md_remap_set(const char *v, const struct kernel_param *k)
 { return gspm ? spm_md_remap(gspm) : -ENODEV; }
 static int spm_md_release_set(const char *v, const struct kernel_param *k)
 { return gspm ? spm_md_release(gspm) : -ENODEV; }
+static int spm_md_hs2_set(const char *v, const struct kernel_param *k)
+{ return gspm ? spm_md_hs2(gspm) : -ENODEV; }
 static const struct kernel_param_ops spm_md_load_ops = { .set = spm_md_load_set };
 static const struct kernel_param_ops spm_md_remap_ops = { .set = spm_md_remap_set };
 static const struct kernel_param_ops spm_md_release_ops = { .set = spm_md_release_set };
+static const struct kernel_param_ops spm_md_hs2_ops = { .set = spm_md_hs2_set };
 module_param_cb(spm_md_load, &spm_md_load_ops, NULL, 0200);
 module_param_cb(spm_md_remap, &spm_md_remap_ops, NULL, 0200);
 module_param_cb(spm_md_release, &spm_md_release_ops, NULL, 0200);
+module_param_cb(spm_md_hs2, &spm_md_hs2_ops, NULL, 0200);
 
 static int mt6582_spm_probe(struct platform_device *pdev)
 {
