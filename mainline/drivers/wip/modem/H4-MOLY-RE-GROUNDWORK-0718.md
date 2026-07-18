@@ -60,6 +60,22 @@ del runtime = lista de todo lo que valida en el boot temprano.
    algún sitio del SMEM que podamos leer por devmem — daría la dirección exacta del fallo sin RE del
    parser. (El Exce estaba a 0, pero el handler puede escribir el contexto en OTRA región.)
 
+## Data-abort handler (0x2e6950) analizado — NO da la fault-addr barata
+```
+0x2e6950: push {r0-r3}
+0x2e6954: mov  r0, #4          ; ex_type = 4 = DATA_ABT (coincide con lo que vemos)
+0x2e6958: push {r0}
+0x2e695c: mrs  r0, SPSR; push  ; CPSR al fallar
+0x2e6964: sub  r0, lr, #8; push ; <-- FAULT PC (lr-8 en data abort) capturado
+0x2e6970: mov  r2, sp          ; r2 = ptr al contexto -> handler comun
+```
+El handler SÍ captura el fault PC. **PERO** la región Exce que el MD escribe está casi a 0 (leídos
+offsets 0-0x120: solo type=4, versión MOLY, 0xff, y 0x7003425c) → **el contexto completo (fault PC,
+DFAR, register dump) NO llega al SMEM**: el abort es tan temprano que la infraestructura de excepción
+solo vuelca el header mínimo. **La fault-addr NO está disponible por esta vía.** Confirma que hay que
+o (a) RE del parser del runtime (~0x6148, Thumb-2), o (b) deriva exhaustiva del runtime vs source.
+(El 0x7003425c está en el header del assert, no es un register save fiable.)
+
 ## Recomendación
 Antes de meter días en Ghidra, agotar (2) el barrido exhaustivo de los 70 ints del runtime vs source
 y (3) el análisis del data-abort handler (podría dar la fault-addr barata). El RE completo del parser
