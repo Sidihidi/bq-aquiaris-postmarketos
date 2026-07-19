@@ -1,0 +1,259 @@
+diff --git a/Kconfig b/Kconfig
+index 01edda9..d55bd1e 100644
+--- a/Kconfig
++++ b/Kconfig
+@@ -57,6 +57,10 @@ config BOARD_IMX53_USBARMORY
+ 	bool "Inverse Path USB armory MkI"
+ 	depends on PROC_CORTEX_A8
+ 
++config BOARD_MT6582
++	bool "MediaTek MT6582 (BQ Aquaris E4.5 krillin)"
++	depends on PROC_CORTEX_A7
++
+ endchoice
+ 
+ choice
+diff --git a/arch/arm/Makefile b/arch/arm/Makefile
+index dec7efb..d469b10 100644
+--- a/arch/arm/Makefile
++++ b/arch/arm/Makefile
+@@ -23,6 +23,7 @@ platname-$(CONFIG_BOARD_HPTOUCHPAD)		+= "HP-TouchPad"
+ platname-$(CONFIG_BOARD_HTC_HD2)		+= "HTC-HD2"
+ platname-$(CONFIG_BOARD_BCM2836)		+= "BCM2836"
+ platname-$(CONFIG_BOARD_IMX53_USBARMORY)	+= "IMX53-USBarmory"
++platname-$(CONFIG_BOARD_MT6582)		+= "MT6582"
+ 
+ export platname-y := $(platname-y)
+ 
+@@ -51,6 +52,7 @@ textofs-$(CONFIG_BOARD_OMAP54XX) 	:= 0x84000040
+ textofs-$(CONFIG_BOARD_AM335X) 		:= 0x84000040
+ textofs-$(CONFIG_BOARD_ARM_REALVIEW)	:= 0x84000040
+ textofs-$(CONFIG_BOARD_HPTOUCHPAD)	:= 0x44000040
++textofs-$(CONFIG_BOARD_MT6582)	:= 0x80008040
+ textofs-$(CONFIG_BOARD_HTC_HD2)		:= 0x11808000
+ textofs-$(CONFIG_BOARD_BCM2836)		:= 0x00008000
+ textofs-$(CONFIG_BOARD_IMX53_USBARMORY)	:= 0x74000040
+@@ -86,5 +88,6 @@ core-$(CONFIG_BOARD_HPTOUCHPAD)		+= arch/arm/plat-hptouchpad/
+ core-$(CONFIG_BOARD_HTC_HD2)		+= arch/arm/plat-htchd2/
+ core-$(CONFIG_BOARD_BCM2836)		+= arch/arm/plat-bcm2836/
+ core-$(CONFIG_BOARD_IMX53_USBARMORY)	+= arch/arm/plat-imx53usbarmory/
++core-$(CONFIG_BOARD_MT6582)		+= arch/arm/plat-mt6582/
+ 
+ core-y				+= arch/arm/common/
+diff --git a/arch/arm/common/version.S b/arch/arm/common/version.S
+index 6fa2cad..f46672f 100644
+--- a/arch/arm/common/version.S
++++ b/arch/arm/common/version.S
+@@ -33,7 +33,7 @@
+ .section .bl_title,"aS"
+ .globl _bl_title
+ _bl_title:
+-    .asciz "GenericBooter for IMX53-USBarmory, Copyright 2013, winocm."
++    .asciz "GenericBooter for MT6582, Copyright 2013, winocm."
+     .align 4
+ 
+ .section .bl_build,"aS"
+@@ -45,6 +45,6 @@ _bl_build:
+ .section .bl_revision,"aS"
+ .globl _bl_revision
+ _bl_revision:
+-    .asciz "GenericBooter-200.1-7-gad4c097-dirty"
++    .asciz ""
+     .align 4
+ 
+diff --git a/arch/arm/plat-mt6582/Makefile b/arch/arm/plat-mt6582/Makefile
+new file mode 100644
+index 0000000..3786008
+--- /dev/null
++++ b/arch/arm/plat-mt6582/Makefile
+@@ -0,0 +1 @@
++obj-y	= debug.o
+\ No newline at end of file
+diff --git a/arch/arm/plat-mt6582/debug.c b/arch/arm/plat-mt6582/debug.c
+new file mode 100644
+index 0000000..9f86406
+--- /dev/null
++++ b/arch/arm/plat-mt6582/debug.c
+@@ -0,0 +1,169 @@
++/*
++ * Copyright 2013, winocm. <winocm@icloud.com>
++ * All rights reserved.
++ * 
++ * Redistribution and use in source and binary forms, with or without modification,
++ * are permitted provided that the following conditions are met:
++ * 
++ *   Redistributions of source code must retain the above copyright notice, this
++ *   list of conditions and the following disclaimer.
++ * 
++ *   Redistributions in binary form must reproduce the above copyright notice, this
++ *   list of conditions and the following disclaimer in the documentation and/or
++ *   other materials provided with the distribution.
++ * 
++ *   If you are going to use this software in any form that does not involve
++ *   releasing the source to this project or improving it, let me know beforehand.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
++ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
++ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
++ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
++ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
++ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
++ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
++ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "genboot.h"
++#include <stdarg.h>
++#include <stdio.h>
++
++/* Uart stuff */
++#define AMBA_UART_DR(base)      (*(volatile unsigned char *)((base) + 0x00))
++#define AMBA_UART_LCRH(base)    (*(volatile unsigned char *)((base) + 0x2c))
++#define AMBA_UART_CR(base)      (*(volatile unsigned char *)((base) + 0x30))
++#define AMBA_UART_FR(base)      (*(volatile unsigned char *)((base) + 0x18))
++#define REALVIEW_PBA8_SDRAM6_BASE               0x70000000  /* SDRAM bank 6 256MB */
++#define REALVIEW_PBA8_SDRAM7_BASE               0x80000000  /* SDRAM bank 7 256MB */
++#define REALVIEW_PBA8_UART0_BASE                0x10009000  /* UART 0 */
++
++#define UART_FR_TXFE (1 << 7)
++#define UART_FR_TXFF (1 << 5)
++
++#define UART_FR_RXFE (1 << 4)
++#define UART_FR_RXFF (1 << 6)
++
++#define barrier()               __asm__ __volatile__("": : :"memory");
++
++#define HwReg(x) *((volatile unsigned long*)(x))
++
++/**
++ * uart_putc
++ *
++ * Put a character to the system console.
++ */
++#define OMAP3_L4_PERIPH_BASE    0x11002000
++#define OMAP3_UART_BASE         (OMAP3_L4_PERIPH_BASE)   /* MT6582 uart0 @0x11002000 */
++uint32_t gOmapSerialUartBase = OMAP3_UART_BASE;
++
++#define LSR_DR          0x01                /* Data ready */
++#define LSR_THRE        0x20                /* Xmit holding register empty */
++
++#define THR     RBR
++#define DLL     RBR
++#define DLM     IER
++
++/*
++ * Note, on older OMAP platforms, the size of the NS16550 UARTS
++ * is different, for this one it's 32-bit.
++ */
++
++#define RBR     0x0
++#define IER     0x4
++#define FCR     0x8
++#define LCR     0xC
++#define MCR     0x10
++#define LSR     0x14
++#define MSR     0x18
++#define SCR     0x1C
++
++static int inited_printf = 1;
++void uart_putchar(int c)
++{
++    if (!inited_printf)
++        return;
++
++    if (c == '\n')
++        uart_putchar('\r');
++    
++    while(!(HwReg(gOmapSerialUartBase + LSR) & LSR_THRE))
++        barrier();
++    
++    HwReg(gOmapSerialUartBase + THR) = c;
++}
++
++/**
++ * uart_getc
++ *
++ * Get a character from system input.
++ */
++int uart_getchar(void)
++{
++    return 'X';
++}
++
++static void putc_wrapper(void *p, char c)
++{
++    uart_putchar(c);
++}
++
++/**
++ * init_debug
++ *
++ * Start debugging subsystems.
++ */
++void init_debug(void)
++{
++    init_printf(NULL, putc_wrapper);
++    printf("debug_init()\n");
++}
++
++void __assert_func(const char *file, int line, const char *method,
++                   const char *expression)
++{
++    panic("Assertion failed in file %s, line %d. (%s)\n",
++          file, line, expression);
++    while (1) ;
++}
++
++/**
++ * puts
++ */
++int puts(const char* fmt)
++{
++    while(*fmt != '\0') {
++        uart_putchar(*fmt);
++        fmt++;
++    }
++    uart_putchar('\n');
++    return 0;
++}
++
++/**
++ * panic
++ *
++ * Halt the system and explain why.
++ */
++#undef panic
++void panic(const char *panicStr, ...)
++{
++    void *caller = __builtin_return_address(0);
++
++    /* Prologue */
++    printf("panic(caller 0x%08x): ", caller);
++
++    /* Epilogue */
++    va_list valist;
++    va_start(valist, panicStr);
++    vprintf((char *)panicStr, valist);
++    va_end(valist);
++
++    /* We are hanging here. */
++    printf("\npanic: we are hanging here...\n");
++
++    /* Halt */
++    _locore_halt_system();
++}
+diff --git a/core/malloc.c b/core/malloc.c
+index e92cf98..1dd5429 100644
+--- a/core/malloc.c
++++ b/core/malloc.c
+@@ -51,3 +51,8 @@ void *realloc(void *start, size_t newsize)
+ {
+     return tlsf_realloc(start, newsize);
+ }
++
++void *calloc(size_t nelem, size_t elem_size)
++{
++    return tlsf_calloc(nelem, elem_size);
++}
