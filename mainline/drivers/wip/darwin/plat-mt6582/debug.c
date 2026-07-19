@@ -30,6 +30,8 @@
 #include "genboot.h"
 #include <stdarg.h>
 #include <stdio.h>
+extern void mt6582_console_init(void);
+extern void mt6582_console_putchar(char);
 
 /* Uart stuff */
 #define AMBA_UART_DR(base)      (*(volatile unsigned char *)((base) + 0x00))
@@ -108,6 +110,7 @@ int uart_getchar(void)
 static void putc_wrapper(void *p, char c)
 {
     uart_putchar(c);
+    mt6582_console_putchar(c);
 }
 
 /**

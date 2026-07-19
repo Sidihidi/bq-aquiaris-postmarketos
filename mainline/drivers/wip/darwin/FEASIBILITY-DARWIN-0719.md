@@ -24,6 +24,30 @@ de boot ARM estándar (r2 = dtb/atags).
 Patch reproducible: `genericbooter-mt6582.patch` (sobre GenericBooter @ b2f0298). Port en
 `plat-mt6582/`.
 
+## ✅ M1 LISTO PARA FLASHEAR: GenericBooter con salida a PANTALLA (framebuffer)
+
+Sin acceso al UART del krillin, la salida de M1 va por **framebuffer**. El LK del MTK deja el
+panel hx8389 (qHD 540x960, DSI modo vídeo, **se auto-refresca**) con su FB en **`0xBF400000`**,
+**stride 2176 = 544*4** (32bpp) — confirmado en el DTS mainline (`fb_region@bf400000` +
+comentario del simple-framebuffer). GenericBooter corre bare-metal → escritura física directa
+a 0xBF400000 = píxeles en pantalla, **sin tocar el DSI** (ni riesgo del negro-tras-modeset).
+
+Port `plat-mt6582/fb.c` (consola de framebuffer, fuente 8x8, `setPixel` que SÍ escribe —el de
+hptouchpad era un stub—) + `consolefont.c` (copiada) + `debug.c` engancha `putc_wrapper` →
+UART **y** framebuffer. **Compila.** `mt6582_console_init()` limpia la pantalla y cada `printf`
+del booter se dibuja.
+
+**Dirección de carga CLAVE:** `zreladdr-y := 0x80008000` (downstream `Makefile.boot`) = donde
+salta el LK del MT6582. GenericBooter es de posición fija → `_start` re-linkado a **exactamente
+`0x80008000`** (textofs, sin el +0x40 de otras plats, que lo desalinearía 64B → crash).
+Empaquetado `boot-genericbooter.img` (mtk_hdr KERNEL + ganador dtb + initrd menupick, como el
+zImage). **Pendiente: el flash-test** (requiere mirar la pantalla física + recuperación fastboot).
+
+Riesgos del 1er intento (recuperable por fastboot): (a) que el LK del MTK exija magic de zImage
+y no arranque un binario raw; (b) MMU/caches (GenericBooter debería correr con MMU off/flat);
+(c) que el FB del LK no persista exactamente hasta el salto. Si no aparece nada: reflashear
+`boot-menupick24-consys.img` por fastboot.
+
 ## Estado de las 3 piezas de un boot de Darwin
 
 | pieza | qué es | estado |
