@@ -835,16 +835,18 @@ static int spm_md_release(struct mt6582_spm *s)
 #define RT_NINTS	70		/* sizeof(modem_runtime_t)/4 */
 static int spm_md_hs2(struct mt6582_spm *s)
 {
-	void __iomem *smem, *ccif;
+	void __iomem *smem, *ccif, *fs;
 	u32 misc_phys = MD_SMEM_PHYS + 0x400;	/* misc_info tras el runtime struct */
-	u32 rch, start;
+	u32 rch;
 	int i;
 
 	smem = ioremap(MD_SMEM_PHYS, 0x2000);
 	ccif = ioremap(0x1020A000, 0x200);
-	if (!smem || !ccif) {
+	fs   = ioremap(MD_SMEM_PHYS + 0xE000, 0x15000);	/* region FS: 5 buffers de 16388B (H6) */
+	if (!smem || !ccif || !fs) {
 		if (smem) iounmap(smem);
 		if (ccif) iounmap(ccif);
+		if (fs) iounmap(fs);
 		return -ENOMEM;
 	}
 	rch = readl(ccif + 0x10);
@@ -992,6 +994,44 @@ static int spm_md_hs2(struct mt6582_spm *s)
 					dev_info(s->dev, "*** HS2 LOGRADO: NORMAL_BOOT_ID (stage 2 = M1 COMPLETO) ***\n");
 					done = 1;
 				}
+				/* H6 PROXY FS: el MD manda su peticion de EFS/NVRAM por CCCI_FS_RX(14).
+				 * fs_stream_buffer_t = {u32 fs_ops; u8 buf[16384]} (16388B), buffer idx
+				 * = rsv. Volcamos la peticion (op + path) y respondemos por CCCI_FS_TX(15)
+				 * con {data0=MD-view del buffer, data1=len+4, rsv=idx} (ccci_fs_send).
+				 * NOTA: el CONTENIDO de la respuesta (resultado del fs_op) lo define
+				 * ccci_fsd userspace -> HIPOTESIS aqui (result=0); ground-truth pendiente
+				 * de la snoop de LineageOS (fs_rx/tx_debug_enable). */
+				if (lch == 14) {
+					u32 idx = rsv & 0xff;
+					u32 boff = idx * 0x14014;	/* 16388B por buffer */
+					int tch;
+					u32 busy;
+
+					dev_info(s->dev, "H6 FS REQ idx=%u op=%08x [%08x %08x] path=[%08x %08x %08x]\n",
+						 idx, readl(fs + boff + 0), readl(fs + boff + 4),
+						 readl(fs + boff + 8), readl(fs + boff + 12),
+						 readl(fs + boff + 16), readl(fs + boff + 20));
+					writel(0, fs + boff + 0);	/* result = 0 (exito) — HIPOTESIS */
+					wmb();
+					busy = readl(ccif + 0x04) & 0xff;
+					for (tch = 0; tch < 8; tch++)
+						if (!(busy & (1 << tch)))
+							break;
+					if (tch < 8) {
+						writel(1 << tch, ccif + 0x04);	/* ocupar canal fisico TX */
+						writel((MD_SMEM_PHYS + 0xE000) - MD_AP_OFF + boff,
+						       ccif + 0x100 + tch * 16 + 0);	/* data0 = MD-view buffer */
+						writel(4, ccif + 0x100 + tch * 16 + 4);	/* data1 = length(0)+4 */
+						writel(15, ccif + 0x100 + tch * 16 + 8);	/* channel = CCCI_FS_TX */
+						writel(idx, ccif + 0x100 + tch * 16 + 12);	/* reserved = idx */
+						wmb();
+						writel(tch, ccif + 0x0c);	/* TCHNUM -> dispara */
+						dev_info(s->dev, "H6 FS RESP idx=%u -> FS_TX ch%d data0=%08x\n",
+							 idx, tch, (MD_SMEM_PHYS + 0xE000) - MD_AP_OFF + boff);
+					} else {
+						dev_warn(s->dev, "H6 FS: sin canal TX libre (BUSY=%02x)\n", busy);
+					}
+				}
 				writel(1 << k, ccif + 0x14);	/* ACK canal k -> libera el TX del MD */
 			}
 			msleep(25);
@@ -1002,6 +1042,7 @@ static int spm_md_hs2(struct mt6582_spm *s)
 	}
 	iounmap(smem);
 	iounmap(ccif);
+	iounmap(fs);
 	return 0;
 }
 
