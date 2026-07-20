@@ -852,7 +852,7 @@ static struct file *g_fs_h[FS_NR_HANDLES];
 static void spm_fs_path(void __iomem *src, int plen, char *out, int outsz)
 {
 	int i, o;
-	strlcpy(out, "/data/nvram/md", outsz);
+	strscpy(out, "/data/nvram/md", outsz);
 	o = strlen(out);
 	/* saltar "Z:" (2 chars UTF-16 = 4 bytes) */
 	for (i = 4; i + 1 < plen && o < outsz - 1; i += 2) {
