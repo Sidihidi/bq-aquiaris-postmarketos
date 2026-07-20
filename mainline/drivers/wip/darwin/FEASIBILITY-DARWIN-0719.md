@@ -24,7 +24,31 @@ de boot ARM estándar (r2 = dtb/atags).
 Patch reproducible: `genericbooter-mt6582.patch` (sobre GenericBooter @ b2f0298). Port en
 `plat-mt6582/`.
 
-## ✅ M1 LISTO PARA FLASHEAR: GenericBooter con salida a PANTALLA (framebuffer)
+## 🎉 M1 CONSEGUIDO EN HW (0720): GenericBooter EJECUTA en el krillin y PINTA EN PANTALLA
+
+**Probado en hardware.** El LK del MTK carga y salta a nuestro binario bare-metal y el banner
+("GenericBooter for MT6582" + build style + fecha) **aparece en la pantalla del móvil**, dibujado
+por nuestro `plat-mt6582/fb.c` sobre el framebuffer del LK. Primer código no-Linux propio
+corriendo en el krillin. Confirma de golpe: (a) la dirección de carga `0x80008000` deducida del
+`zreladdr` era correcta; (b) el LK **no exige magic de zImage** (arranca un binario raw); (c) el
+framebuffer del LK persiste hasta el salto y las escrituras físicas se ven.
+
+**GOTCHA resuelto — el WATCHDOG TOPRGU reiniciaba el móvil:** primer intento = banner en pantalla
+y **reset a los pocos segundos**. Causa: el LK deja el watchdog ARMADO y Linux lo va pateando;
+GenericBooter no lo patea → reset. (Mismo watchdog que la saga del suspend.) Fix en `init_debug()`:
+```c
+#define MTK_WDT_MODE      0x10007000   /* AP_RGU/TOPRGU fisico (= AP_RGU_PHYS de mt6582-consys.c) */
+#define MTK_WDT_MODE_KEY  0x22000000
+*(volatile unsigned int *)MTK_WDT_MODE = MTK_WDT_MODE_KEY;  /* key + ENABLE(0x1)=0 -> desarmado */
+```
+**Cualquier código bare-metal que pongamos en el krillin necesita esto** (o patear
+`MTK_WDT_RESTART` @+0x08 con key `0x1971`).
+
+Otro detalle: en el 1er intento `mt6582_console_init()` no llegó a insertarse, así que el texto
+salió dibujado ENCIMA del logo de BQ — lo que probó que las escrituras al FB funcionan aunque no
+se limpie la pantalla. Ya corregido (limpia a negro primero).
+
+## Detalle del port del framebuffer (M1)
 
 Sin acceso al UART del krillin, la salida de M1 va por **framebuffer**. El LK del MTK deja el
 panel hx8389 (qHD 540x960, DSI modo vídeo, **se auto-refresca**) con su FB en **`0xBF400000`**,

@@ -118,8 +118,22 @@ static void putc_wrapper(void *p, char c)
  *
  * Start debugging subsystems.
  */
+
+/* Watchdog TOPRGU del MT6582 (fisico 0x10007000 = AP_RGU): el LK lo deja ARMADO y
+ * Linux lo va pateando. GenericBooter no lo patea -> reset a los pocos segundos
+ * (justo lo que veiamos: banner en pantalla y reinicio). Lo desarmamos: escribir
+ * MTK_WDT_MODE con la key 0x22000000 y el bit ENABLE(0x1) a 0. */
+#define MTK_WDT_MODE      0x10007000
+#define MTK_WDT_MODE_KEY  0x22000000
+static void mt6582_wdt_disable(void)
+{
+    *(volatile unsigned int *)MTK_WDT_MODE = MTK_WDT_MODE_KEY;  /* enable=0 */
+}
+
 void init_debug(void)
 {
+    mt6582_wdt_disable();      /* el LK deja el WDT armado -> sin patearlo, reset */
+    mt6582_console_init();     /* limpia la pantalla (borra el logo del LK) */
     init_printf(NULL, putc_wrapper);
     printf("debug_init()\n");
 }
