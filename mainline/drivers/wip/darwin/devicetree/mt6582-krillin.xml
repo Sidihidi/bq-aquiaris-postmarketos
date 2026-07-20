@@ -1,0 +1,37 @@
+<dict>
+	<key>name</key>
+	<string>device-tree</string>
+	<key>model</key>
+	<string>BQ Aquaris E4.5 (MediaTek MT6582)</string>
+	<key>compatible</key>
+	<string>mediatek,mt6582</string>
+	<key>@children</key>
+	<array>
+		<dict>
+			<key>name</key>
+			<string>chosen</string>
+			<key>@children</key>
+			<array>
+				<dict>
+					<key>name</key>
+					<string>memory-map</string>
+				</dict>
+			</array>
+		</dict>
+		<dict>
+			<key>name</key>
+			<string>cpus</string>
+			<key>@children</key>
+			<array>
+				<dict>
+					<key>name</key>
+					<string>cpu0</string>
+					<key>device_type</key>
+					<string>cpu</string>
+					<key>compatible</key>
+					<string>ARM,cortex-a7</string>
+				</dict>
+			</array>
+		</dict>
+	</array>
+</dict>

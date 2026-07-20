@@ -1,0 +1,78 @@
+/*
+ * Apple-style DeviceTree para el BQ Aquaris E4.5 "krillin" (MediaTek MT6582).
+ * Formato darwin-on-arm (FDT con compatible "AppleARM"), compilado con dtc a
+ * .devicetree y empaquetado como DeviceTree.img3 para GenericBooter.
+ * Direcciones tomadas del port de Linux mainline + validadas en HW (M1).
+ */
+#include "Skeleton.dtsi"
+
+/ {
+    compatible = "mediatek,mt6582", "AppleARM";
+    model = "BQ Aquaris E4.5 (MediaTek MT6582)";
+    #address-cells = <1>;
+    #size-cells = <1>;
+    interrupt-parent = <&intc>;
+
+    cpus {
+        #address-cells = <1>;
+        #size-cells = <0>;
+        cpu0 {
+            device_type = "cpu";
+            compatible = "ARM,v7", "ARM,cortex-a7";
+            reg = <0>;
+        };
+    };
+
+    arm-io {
+        device_type = "arm-io";
+        compatible = "arm-io,mt6582";
+        #address-cells = <1>;
+        #size-cells = <1>;
+
+        /* GIC-400 (distributor 0x10211000, cpu iface 0x10212000) */
+        intc: interrupt-controller {
+            compatible = "arm,cortex-a7-gic", "arm,gic";
+            device_type = "interrupt-controller";
+            interrupt-controller;
+            reg = <0x10211000 0x1000  0x10212000 0x2000>;
+            #interrupt-cells = <1>;
+        };
+
+        /* UART0 8250 (sin salida fisica accesible en el krillin) */
+        uart0 {
+            compatible = "mediatek,mt6577-uart", "ns16550";
+            device_type = "uart";
+            reg = <0x11002000 0x400>;
+            baud-rate = <115200>;
+            AAPL,interrupts = <51>;
+        };
+
+        /* Timer GPT de MediaTek */
+        timer0 {
+            compatible = "mediatek,mt6577-timer";
+            device_type = "timer";
+            reg = <0x10008000 0x80>;
+            clock-frequency = <13000000>;
+            AAPL,interrupts = <112>;
+        };
+
+        /* Framebuffer del LK (validado en HW por GenericBooter M1) */
+        lcd-controller {
+            device_type = "lcd-controller";
+            compatible = "mediatek,mt6582-disp", "lcd,generic";
+            reg = <0xBF400000 0xB00000>;
+        };
+
+        lcd-panel {
+            device_type = "lcd-panel";
+            compatible = "himax,hx8389", "lcd,generic";
+        };
+
+        /* Watchdog TOPRGU (halt/restart, validado en HW) */
+        wdt {
+            device_type = "watchdog";
+            compatible = "mediatek,mt6582-wdt";
+            reg = <0x10007000 0x100>;
+        };
+    };
+};

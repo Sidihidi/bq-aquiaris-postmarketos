@@ -1,0 +1,41 @@
+diff --git a/osfmk/arm/locore.s b/osfmk/arm/locore.s
+index 9f6a2ea..d8df20d 100644
+--- a/osfmk/arm/locore.s
++++ b/osfmk/arm/locore.s
+@@ -50,6 +50,18 @@
+  */
+ 
+ EnterARM(_start)
++    /* PRUEBA DE VIDA (M3 debug): pintar el framebuffer del LK de BLANCO al entrar.
++     * Fisico 0xBF400000, MMU aun off. Si la pantalla se pone blanca -> XNU EJECUTA. */
++    movw    r4, #0x0000
++    movt    r4, #0xBF40          /* r4 = 0xBF400000 */
++    movw    r6, #0x0000
++    movt    r6, #0x0020          /* r6 = 0x200000 palabras (~2M px) */
++    mvn     r5, #0                /* r5 = 0xFFFFFFFF (blanco) */
++Lprobe_fill:
++    str     r5, [r4], #4
++    subs    r6, r6, #1
++    bne     Lprobe_fill
++    /* fin prueba de vida */
+     /* First, disable interrupts so that the BL doesn't get any. */
+     LOAD_ADDR(lr, arm_init)
+     cpsid   if
+@@ -154,7 +166,7 @@ map:
+       * xxx KASLR: we need to jump to a trampoline.
+       * The address in r3 is relative, we convert it to a KVA and jump.
+       */
+-    adr     r3, start_trampoline
++    ldr     r3, =start_trampoline
+     sub     r3, r3, r11
+     add     r3, r3, r10
+     bx      r3
+@@ -278,7 +290,7 @@ EnterARM(sleep_test)
+ #endif
+ 
+     /* Jump to physical trampoline. */
+-    adr     r4, sleep_tramp
++    ldr     r4, =sleep_tramp
+     sub     r4, r4, r9
+     add     r4, r4, r8
+     bx      r4

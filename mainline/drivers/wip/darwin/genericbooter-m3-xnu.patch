@@ -1,0 +1,142 @@
+diff --git a/arch/arm/plat-mt6582/debug.c b/arch/arm/plat-mt6582/debug.c
+index 91b641b..07a2376 100644
+--- a/arch/arm/plat-mt6582/debug.c
++++ b/arch/arm/plat-mt6582/debug.c
+@@ -141,8 +141,12 @@ void init_debug(void)
+ void __assert_func(const char *file, int line, const char *method,
+                    const char *expression)
+ {
+-    panic("Assertion failed in file %s, line %d. (%s)\n",
+-          file, line, expression);
++    /* pantalla limpia + mensaje aislado arriba, imposible de solapar */
++    mt6582_console_init();
++    printf("\n\n>>>> ASSERT FALLO <<<<\n\n");
++    printf("fichero: %s\n", file);
++    printf("linea  : %d\n\n", line);
++    printf("expr   : %s\n", expression);
+     while (1) ;
+ }
+ 
+diff --git a/arch/arm/plat-mt6582/fb.c b/arch/arm/plat-mt6582/fb.c
+index 669e13f..72b7437 100644
+--- a/arch/arm/plat-mt6582/fb.c
++++ b/arch/arm/plat-mt6582/fb.c
+@@ -54,11 +54,30 @@ void mt6582_console_init(void)
+     fb_drawRect(0, 0, WIDTH, HEIGHT, BG_COLOR);
+ }
+ 
++
++static void fb_scroll(void)
++{
++    volatile unsigned int *fb = (volatile unsigned int *)FB_BASE;
++    int line = (FONT_WIDTH + 1) * STRIDE_PX;         /* pixeles por linea de texto */
++    int total = HEIGHT * STRIDE_PX;
++    int y;
++    /* subir todo una linea */
++    for (y = 0; y < total - line; y++)
++        fb[y] = fb[y + line];
++    /* limpiar la ultima linea */
++    for (y = total - line; y < total; y++)
++        fb[y] = BG_COLOR;
++}
++
+ void mt6582_console_putchar(char c)
+ {
+     if (c == 0x0A) {
+         mt6582_console_row += (FONT_WIDTH + 1);
+         mt6582_console_col = 0;
++        if (mt6582_console_row + FONT_WIDTH > HEIGHT) {
++            fb_scroll();
++            mt6582_console_row -= (FONT_WIDTH + 1);
++        }
+         return;
+     }
+     mt6582_console_col += fb_drawChar(c, mt6582_console_row, mt6582_console_col);
+@@ -66,6 +85,8 @@ void mt6582_console_putchar(char c)
+         mt6582_console_row += (FONT_WIDTH + 1);
+         mt6582_console_col = 0;
+     }
+-    if (mt6582_console_row + FONT_WIDTH > HEIGHT)   /* wrap arriba (simple) */
+-        mt6582_console_row = 0;
++    if (mt6582_console_row + FONT_WIDTH > HEIGHT) {
++        fb_scroll();
++        mt6582_console_row -= (FONT_WIDTH + 1);
++    }
+ }
+diff --git a/init/bootx.c b/init/bootx.c
+index 0ea25ec..f94dbab 100644
+--- a/init/bootx.c
++++ b/init/bootx.c
+@@ -258,11 +258,15 @@ int prepare_kernel(void)
+ 
+     printf("Slidden address at 0x%08x\n", KERNEL_VMADDR_SLIDE);
+ 
++    printf("[K1]rebase\n");
+     assert(!macho_rebase(&ctx, KERNEL_VMADDR_SLIDE));
+ 
+     assert(!macho_set_vm_bias(&ctx, KERNEL_VMADDR));
++    printf("[K2]filemap\n");
+     assert(!macho_file_map(&ctx, kernelBase, KERNEL_VMADDR_SLIDE));
++    printf("[K3]entry\n");
+     assert(!macho_get_entrypoint(&ctx, &kernel_entrypoint));
++    printf("[K4]ok entry=0x%08x\n", kernel_entrypoint);
+ 
+     kernel_entrypoint =
+         vtophys(kernel_entrypoint, KERNEL_VMADDR, kernel_region.base);
+@@ -572,19 +576,25 @@ void start_darwin(void)
+ #endif
+ 
+     /* Initialize boot-args. */
++    printf("[1]bootargs\n");
+     assert(prepare_boot_args());
+ 
+     /* Map kernel. */
++    printf("[2]kernel\n");
+     assert(prepare_kernel());
+ 
+     /* Map device tree. */
++    printf("[3]devtree\n");
+     assert(prepare_devicetree());
+ 
+     /* Enter ramdisk into /chosen/memory-map and flatten. */
++    printf("[4]devtree2\n");
+     assert(prepare_devicetree_stage2());
+ 
+     /* Copy boot-args over to kernel region. */
++    printf("[5]finalargs\n");
+     assert((args = prepare_finalized_boot_args()) != NULL);
++    printf("[6]JUMP entry=0x%08x\n", kernel_entrypoint);
+ 
+     /* Jump to the kernel. */
+     start_routine = (kernel_start *) kernel_entrypoint;
+diff --git a/init/main.c b/init/main.c
+index 080f923..88d308e 100644
+--- a/init/main.c
++++ b/init/main.c
+@@ -132,7 +132,7 @@ corestart_main(uint32_t __unused, uint32_t machine_type, struct atag *atags)
+      * Set up boot_args based on atag data, the rest will be filled out during
+      * initialization.
+      */
+-#if !defined(CONFIG_BOARD_HPTOUCHPAD) || !defined(CONFIG_BOARD_HTC_HD2)
++#if !defined(CONFIG_BOARD_MT6582) && (!defined(CONFIG_BOARD_HPTOUCHPAD) || !defined(CONFIG_BOARD_HTC_HD2))
+     struct atag_header *atag_base = (struct atag_header *)atags;
+     uint32_t tag = atag_base->tag;
+ 
+@@ -192,6 +192,17 @@ corestart_main(uint32_t __unused, uint32_t machine_type, struct atag *atags)
+     /* Bringup boot-args. */
+     strncpy(gBootArgs.commandLine, "rd=md0 -v -s serial=2", BOOT_LINE_LENGTH);
+ #endif
++#ifdef CONFIG_BOARD_MT6582
++    /* DRAM del krillin en 0x80000000 (1GB). GenericBooter+XNU embebido viven en
++     * 0x80008000..~0x80700000; start_darwin hace bzero(physBase,64MB) y copia el
++     * kernel a physBase+0x1000, asi que physBase DEBE estar por encima del booter. */
++    gBootArgs.physBase = 0x81000000;
++    gBootArgs.memSize  = 0x20000000;   /* 512MB de trabajo para el arranque */
++    malloc_init((char *)gBootArgs.physBase + gBootArgs.memSize - MALLOC_SIZE,
++                MALLOC_SIZE);
++    is_malloc_inited = 1;
++    strncpy(gBootArgs.commandLine, "-v -s debug=0x8", BOOT_LINE_LENGTH);
++#endif
+ 
+     if (!is_malloc_inited)
+         panic("malloc not inited");
