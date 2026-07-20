@@ -1,0 +1,89 @@
+diff --git a/bsd/arm/param.h b/bsd/arm/param.h
+index a7f7204..293c2ef 100644
+--- a/bsd/arm/param.h
++++ b/bsd/arm/param.h
+@@ -87,6 +87,11 @@
+ #define	M16KCLBYTES	(1 << M16KCLSHIFT)	/* size of a jumbo cluster */
+ 
+ #define	MCLOFSET	(MCLBYTES - 1)
++/* fallback CONFIG_NMBCLUSTERS: la seleccion por etiquetas del MASTER no lo emite
++ * para maquinas nuevas; usamos el valor <bsmall> del MASTER */
++#undef CONFIG_NMBCLUSTERS
++#define CONFIG_NMBCLUSTERS      ((1024 * 256) / MCLBYTES)
++
+ #ifndef NMBCLUSTERS
+ #define	NMBCLUSTERS	CONFIG_NMBCLUSTERS	/* cl map size */
+ #endif
+diff --git a/libkern/kxld/kxld_object.h b/libkern/kxld/kxld_object.h
+index ab78f20..a6d8c88 100644
+--- a/libkern/kxld/kxld_object.h
++++ b/libkern/kxld/kxld_object.h
+@@ -56,7 +56,7 @@ kern_return_t kxld_object_init_from_macho(KXLDObject *object,
+     u_char *file, u_long size, const char *name,
+     struct kxld_array *section_order,
+     cpu_type_t cputype, cpu_subtype_t cpusubtype, KXLDFlags flags)
+-    __attribute__((nonnull(1,2,4) visibility("hidden")));
++    __attribute__((nonnull(1,2,4), visibility("hidden")));
+ 
+ void kxld_object_clear(KXLDObject *object)
+     __attribute__((nonnull, visibility("hidden")));
+diff --git a/makedefs/MakeInc.def b/makedefs/MakeInc.def
+index ee67e78..68f390e 100644
+--- a/makedefs/MakeInc.def
++++ b/makedefs/MakeInc.def
+@@ -121,7 +121,7 @@ endif
+ export SUPPORTED_I386_MACHINE_CONFIGS := DEFAULT
+ export SUPPORTED_X86_64_MACHINE_CONFIGS := DEFAULT
+ export SUPPORTED_ARM_MACHINE_CONFIGS := S5L8920X S5L8922X S5L8930X ARMPBA8 SUN4I OMAP3530 OMAP335X RASPBERRYPI \
+-					OMAP3430_RX51 ARM_RVEB_V6 S5L8720X S5L8900XRB MSM8960_TOUCHPAD IMX53
++					OMAP3430_RX51 ARM_RVEB_V6 S5L8720X S5L8900XRB MSM8960_TOUCHPAD IMX53 MT6582
+ export SUPPORTED_ARM64_MACHINE_CONFIGS := DEFAULT VEXPRESS 
+ 
+ #
+@@ -321,6 +321,7 @@ ARCH_FLAGS_ARM_OMAP3430_RX51 = -arch armv7
+ ARCH_FLAGS_ARM_OMAP335X	= -arch armv7
+ ARCH_FLAGS_ARM_ARMPBA8	= -arch armv7
+ ARCH_FLAGS_ARM_MSM8960_TOUCHPAD	= -arch armv7
++ARCH_FLAGS_ARM_MT6582	= -arch armv7
+ ARCH_FLAGS_ARM_RASPBERRYPI	= -arch armv6
+ ARCH_FLAGS_ARM_ARM_RVEB_V6	= -arch armv6
+ ARCH_FLAGS_ARM_IMX53		= -arch armv7
+diff --git a/osfmk/arm/param.h b/osfmk/arm/param.h
+index 2d4c0ee..a93e457 100644
+--- a/osfmk/arm/param.h
++++ b/osfmk/arm/param.h
+@@ -87,6 +87,11 @@
+ #define	M16KCLBYTES	(1 << M16KCLSHIFT)  /* size of a jumbo cluster */
+ 
+ #define	MCLOFSET	(MCLBYTES - 1)
++/* fallback CONFIG_NMBCLUSTERS: la seleccion por etiquetas del MASTER no lo emite
++ * para maquinas nuevas; usamos el valor <bsmall> del MASTER */
++#undef CONFIG_NMBCLUSTERS
++#define CONFIG_NMBCLUSTERS      ((1024 * 256) / MCLBYTES)
++
+ #ifndef NMBCLUSTERS
+ #define	NMBCLUSTERS	CONFIG_NMBCLUSTERS  /* cl map size */
+ #endif
+diff --git a/osfmk/vm/vm_pageout.c b/osfmk/vm/vm_pageout.c
+index 2bfd6e7..1a910bc 100644
+--- a/osfmk/vm/vm_pageout.c
++++ b/osfmk/vm/vm_pageout.c
+@@ -3022,7 +3022,7 @@ uint32_t vm_pageout_considered_page_last = 0;
+  * called once per-second via "compute_averages"
+  */
+ void
+-compute_pageout_gc_throttle()
++compute_pageout_gc_throttle(__unused void *arg)
+ {
+ 	if (vm_pageout_considered_page != vm_pageout_considered_page_last) {
+ 
+diff --git a/pexpert/conf/files.arm b/pexpert/conf/files.arm
+index 6918d22..9ebd116 100644
+--- a/pexpert/conf/files.arm
++++ b/pexpert/conf/files.arm
+@@ -18,4 +18,5 @@ pexpert/arm/pe_s5l8720x.c		standard
+ pexpert/arm/pe_s5l8900x.c		standard
+ pexpert/arm/pe_s5l8930x.c		standard
+ pexpert/arm/pe_apq8060.c		standard
++pexpert/arm/pe_mt6582.c		standard
+ pexpert/arm/pe_imx53.c			standard

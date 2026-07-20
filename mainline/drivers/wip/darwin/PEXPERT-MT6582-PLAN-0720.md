@@ -1,4 +1,46 @@
-# Qué hace falta para el pexpert MT6582 (XNU) — plan concreto, 0720
+# Pexpert MT6582 (XNU) — plan + ESTADO REAL, 0720
+
+## 🎉 HECHO: `pe_mt6582.o` COMPILA DENTRO DE XNU
+
+`BUILD/obj/DEBUG_ARM_MT6582/pexpert/DEBUG/pe_mt6582.o` — el pexpert está escrito
+(`pe_mt6582.c` 309 líneas + `pe_mt6582.h` 82), registrado, y **compilando**. El build de XNU
+va por **384 objetos** y la máquina objetivo es `DEBUG_ARM_MT6582` (la nuestra). Quedan ~56
+errores en OTRAS partes del kernel (no en nuestro pexpert), casi todos del mismo tipo:
+código ARM de 2014 (`invalid instruction`) y `-Werror` de clang-19.
+
+### Lo que hizo falta para que XNU compilase en Linux/aarch64 (nada de esto estaba documentado)
+Guardado en `toolchain/` + `xnu-mt6582.patch` (89 líneas):
+1. **stub de `xcrun`** (`toolchain/xcrun-stub.sh` → `/usr/bin/xcrun`): el build de XNU en Linux
+   lo usa para `--show-sdk-path` y `-find clang`. El del darwin-sdk pide una caché que no existe.
+2. **wrapper de `clang`** (`toolchain/clang-wrapper.sh`) — **la pieza clave**:
+   - traduce `-arch armv7` (sintaxis Apple) → `-target armv7-apple-darwin11`. **Con esto
+     clang-19 emite Mach-O armv7** (`file` lo confirma) → *no hace falta el clang-4.0 del README*.
+   - sin `-arch` = build de HOST → fuerza `-fuse-ld=/usr/bin/ld.bfd` (si no, nuestro `ld64` de
+     Mach-O intenta enlazar binarios Linux: `ld: unknown option: -EL`) + `-include sys/sysmacros.h`
+     (glibc 2.28 movió `major`/`minor`/`makedev`).
+   - relaja el C/C++ de 2014: `-Wno-implicit-int -Wno-implicit-function-declaration
+     -Wno-int-conversion -Wno-deprecated-non-prototype -Wno-register -Wno-error`.
+3. **`mig`**: el build llama a `/usr/bin/mig` (driver), no a `migcom`. Está en el SDK como
+   `migcom/mig.sh`; instalarlo en `<toolchain>/usr/bin/mig` (así su `../libexec/migcom` resuelve).
+4. **wrapper de `as`** (`toolchain/as-wrapper.sh`): el `as` de cctools es un driver que busca
+   backends en `libexec/as/arm/` que no se construyen → usar el **ensamblador integrado de clang**.
+5. **Invocación correcta** (el `TARGET_CONFIGS` de la wiki NO basta — se queda en ARMPBA8):
+   ```sh
+   make ARCH_CONFIGS=ARM KERNEL_CONFIGS=DEBUG MACHINE_CONFIG=MT6582 NO_DTRACE_SYMS=YES
+   ```
+6. **3 bugs del source de XNU** (en `xnu-mt6582.patch`): coma que falta entre atributos en
+   `kxld_object.h`; `compute_pageout_gc_throttle()` definido sin params pero declarado
+   `(void *arg)`; y `CONFIG_NMBCLUSTERS` que la selección por etiquetas del MASTER no emite para
+   máquinas nuevas (fallback al valor `<bsmall>` en `bsd/arm/param.h` y `osfmk/arm/param.h`).
+
+### Lo que queda
+Los ~56 errores restantes (`invalid instruction` en ensamblador ARM, `-Wcast-align` en el
+firewall pf, etc.) son de OTRAS partes de XNU, no del pexpert. Son la "cosecha esperada" de
+compilar 1M de líneas de 2014 con clang-19: laboriosos pero mecánicos.
+
+---
+
+## Plan original (referencia)
 
 > El **pexpert** ("Platform Expert") es la capa de XNU que abstrae el SoC. Es **sorprendentemente
 > pequeño**: los ports existentes van de **165 a 595 líneas** (`pe_sun4i.c` 165, `pe_apq8060.c` 376,
