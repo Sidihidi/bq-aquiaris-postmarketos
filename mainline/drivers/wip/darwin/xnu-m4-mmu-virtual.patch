@@ -1,0 +1,132 @@
+diff --git a/osfmk/arm/locore.s b/osfmk/arm/locore.s
+index 9f6a2ea..95d2c99 100644
+--- a/osfmk/arm/locore.s
++++ b/osfmk/arm/locore.s
+@@ -50,6 +50,18 @@
+  */
+ 
+ EnterARM(_start)
++    /* PRUEBA DE VIDA (M3 debug): pintar el framebuffer del LK de BLANCO al entrar.
++     * Fisico 0xBF400000, MMU aun off. Si la pantalla se pone blanca -> XNU EJECUTA. */
++    movw    r4, #0x0000
++    movt    r4, #0xBF40          /* r4 = 0xBF400000 */
++    movw    r6, #0x0000
++    movt    r6, #0x0020          /* r6 = 0x200000 palabras (~2M px) */
++    mvn     r5, #0                /* r5 = 0xFFFFFFFF (blanco) */
++Lprobe_fill:
++    str     r5, [r4], #4
++    subs    r6, r6, #1
++    bne     Lprobe_fill
++    /* fin prueba de vida */
+     /* First, disable interrupts so that the BL doesn't get any. */
+     LOAD_ADDR(lr, arm_init)
+     cpsid   if
+@@ -140,11 +152,65 @@ map:
+     subs    r12, r12, #_1MB
+     bne     map
+ 
++    /* M4 FIX: RE-escribir el mapeo IDENTITY del PC actual DESPUES del bucle del
++     * mapa principal. En el MT6582 la DRAM fisica esta en 0x80000000 = virtBase,
++     * asi que el bucle sobreescribe la seccion del PC (0x810). Sin esto, al activar
++     * la MMU el fetch de la siguiente instruccion cae en una direccion mal mapeada
++     * y cuelga. r4=TTE base, r6=flags de seccion. */
++    mov     r7, pc, lsr#20
++    add     r5, r4, r7, lsl#2
++    mov     r7, r7, lsl#20
++    orr     r8, r7, r6
++    str     r8, [r5]
++
++    /* M4: mapear IDENTITY el framebuffer del LK (0xBF400000, 16 secciones=16MB)
++     * para que la consola de XNU pueda escribir tras la MMU. r4=TTE base, r6=flags. */
++    LoadConstantToReg((0xBF400000), r1)
++    mov     r7, r1, lsr#20
++    add     r5, r4, r7, lsl#2
++    mov     r9, #16
++Lmap_fb:
++    orr     r8, r1, r6
++    str     r8, [r5], #4
++    add     r1, r1, #_1MB
++    subs    r9, r9, #1
++    bne     Lmap_fb
++
++    /* M4 PRUEBA PRE-MMU (fisico): ROJO justo antes de activar la MMU.
++     * Si se ve rojo -> la tabla de paginas se monto sin fallar. */
++    push    {r4, r5, r6}
++    movw    r4, #0x0000
++    movt    r4, #0xBF40
++    movw    r6, #0x0000
++    movt    r6, #0x0020
++    movw    r5, #0x0000
++    movt    r5, #0x00FF          /* rojo 0x00FF0000 */
++Lprobe_red:
++    str     r5, [r4], #4
++    subs    r6, r6, #1
++    bne     Lprobe_red
++    pop     {r4, r5, r6}
++
+     /* Start MMU. */
+     mrc     p15, 0, r3, c1, c0, 0
+     orr     r3, r3, #1
+     mcr     p15, 0, r3, c1, c0, 0
+ 
++    /* M4 PRUEBA POST-ENABLE (MMU ya ON, ANTES del salto a virtual): VERDE-AZUL.
++     * fb mapeado identity. Si se ve -> la MMU activo bien; el fallo es el bx a virtual. */
++    push    {r4, r5, r6}
++    movw    r4, #0x0000
++    movt    r4, #0xBF40
++    movw    r6, #0x0000
++    movt    r6, #0x0020
++    movw    r5, #0xFFFF
++    movt    r5, #0x0000          /* 0x0000FFFF (cian en BGR) */
++Lprobe_cyan:
++    str     r5, [r4], #4
++    subs    r6, r6, #1
++    bne     Lprobe_cyan
++    pop     {r4, r5, r6}
++
+     /*
+      * Hopefully, if we got here, things are looking good and we
+      * are running in VM mode.
+@@ -154,12 +220,29 @@ map:
+       * xxx KASLR: we need to jump to a trampoline.
+       * The address in r3 is relative, we convert it to a KVA and jump.
+       */
+-    adr     r3, start_trampoline
+-    sub     r3, r3, r11
+-    add     r3, r3, r10
++    ldr     r3, =start_trampoline
++    /* M4 FIX: el kernel esta LINKADO en virtual (0x80000000-based) y el mapa
++     * principal mapea virtBase->physBase, asi que "ldr =start_trampoline" ya da
++     * la direccion VIRTUAL correcta. La conversion phys->virt original
++     * (sub physBase / add virtBase) la corrompe -> bx directo. */
+     bx      r3
+ start_trampoline:
+-    nop     
++    nop
++
++    /* M4 PRUEBA POST-MMU: pintar el fb de VERDE ya en modo virtual (MMU on).
++     * Si se ve verde -> MMU funciona, fb mapeado y XNU corre en virtual. */
++    push    {r0, r4, r5, r6}
++    movw    r4, #0x0000
++    movt    r4, #0xBF40
++    movw    r6, #0x0000
++    movt    r6, #0x0020
++    movw    r5, #0xFF00
++    movt    r5, #0x0000          /* verde 0x0000FF00 */
++Lprobe_green:
++    str     r5, [r4], #4
++    subs    r6, r6, #1
++    bne     Lprobe_green
++    pop     {r0, r4, r5, r6}
+ 
+ fix_boot_args_hack_for_bootkit:
+     /* Fix up boot-args */
+@@ -278,7 +361,7 @@ EnterARM(sleep_test)
+ #endif
+ 
+     /* Jump to physical trampoline. */
+-    adr     r4, sleep_tramp
++    ldr     r4, =sleep_tramp
+     sub     r4, r4, r9
+     add     r4, r4, r8
+     bx      r4

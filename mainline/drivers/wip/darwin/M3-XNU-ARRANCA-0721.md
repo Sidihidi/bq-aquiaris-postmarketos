@@ -64,3 +64,41 @@ Siguiente frontera (territorio profundo de bring-up de XNU, muchas iteraciones e
 
 *0721, sesión Windows. Culminación del hilo Darwin: M0(compila)→M1(corre en HW)→M2(toolchain+XNU
 enlazado)→M3(XNU EJECUTA). Ver FEASIBILITY-DARWIN-0719.md y PEXPERT-MT6582-PLAN-0720.md.*
+
+---
+
+# 🎉 M4 (0721): XNU CORRE EN MODO VIRTUAL (MMU activada)
+
+**Probado en HW.** Tras M3 (XNU ejecuta `__start`), se depuró el arranque temprano inyectando
+escrituras de color al framebuffer en 4 puntos. **Los 4 dispararon en orden** → XNU pasa `__start`,
+monta la tabla de páginas, **activa la MMU**, y **salta a modo virtual** (`start_trampoline`).
+(Los colores salen "raros" —blanco/azul/blanco/amarillo— porque el formato de píxel del framebuffer
+no es el ARGB de 32bpp asumido; las escrituras funcionan igual, cada etapa cambia la pantalla.)
+
+## Dos bugs REALES del `_start` de XNU con la memoria del MT6582 (fix en `xnu-m4-mmu-virtual.patch`)
+
+1. **La sección del PC se sobreescribía → cuelgue al ACTIVAR la MMU.** `_start` mapea el PC físico
+   identity (para seguir ejecutando tras encender la MMU), PERO en el MT6582 la DRAM física está en
+   **0x80000000 = virtBase**, así que el bucle del mapa principal (virtBase→physBase, 512MB)
+   sobreescribe la sección del PC (0x810). Al activar la MMU, el fetch de la siguiente instrucción
+   cae en una dirección mal mapeada → prefetch abort. (En realview NO pasa porque su DRAM física
+   está en direcciones BAJAS, lejos de virtBase=0x80000000.) **Fix: RE-escribir el mapeo identity
+   del PC DESPUÉS del bucle del mapa principal** (para que gane).
+2. **La conversión del trampolín corrompía el salto a virtual.** `ldr r3, =start_trampoline` da ya
+   la dirección VIRTUAL (el kernel está linkado en 0x80000000-based), pero el código original hacía
+   `sub r3,physBase; add r3,virtBase` (conversión phys→virt) que la corrompe → `bx` a una dirección
+   basura. **Fix: `bx r3` DIRECTO** sin la conversión.
+
+## Estado y lo que queda
+
+**XNU ejecuta en modo virtual con la MMU activada.** Tras `start_trampoline` sigue hacia
+`fix_boot_args`, vectores de excepción y la llamada a `arm_init` (C). Se cuelga en algún punto
+posterior (la 4ª prueba, en start_trampoline, es la última que se ve). Siguiente:
+- Averiguar el **formato de píxel real del framebuffer** (los colores salen mal → la consola de XNU
+  también saldría mal). Probable RGB565 (16bpp) o ABGR; testear con un patrón conocido.
+- Inyectar una prueba **dentro de `arm_init` (C)** para ver si llega al código C del kernel.
+- Wire-up de la consola de XNU real (initialize_screen ya tiene el fb mapeado identity por el M4).
+
+Imagen: `~/darwin-krillin/boot-xnu-M4-virtual.img`.
+
+*M4 0721. XNU corre virtual en el MT6582 — extraordinario para un SoC sin precedente en darwin-on-arm.*
