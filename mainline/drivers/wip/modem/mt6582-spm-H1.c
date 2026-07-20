@@ -892,9 +892,80 @@ static u32 spm_fs_serve(struct mt6582_spm *s, void __iomem *fs, u32 idx)
 			return 0;
 		}
 		g_fs_h[h] = f;
-		writel(h, fs + boff + 4);	/* respuesta = handle */
-		length = 4;
+		/* ground-truth: resp = [count=1][len=4][handle] en +4/+8/+0xc (NO handle en +4) */
+		writel(1, fs + boff + 4);
+		writel(4, fs + boff + 8);
+		writel(h, fs + boff + 0xc);
+		length = 12;
 		dev_info(s->dev, "H6 FS OPEN %s -> h=%d\n", path, h);
+		break;
+	}
+	case 0x1009: {				/* STAT/GetSize: handle@+0xc -> tamaño 64b en +0x14/+0x18 */
+		u32 hnd = readl(fs + boff + 0xc);
+		u64 sz = 0;
+		if (hnd < FS_NR_HANDLES && g_fs_h[hnd]) {
+			struct kstat st;
+			if (vfs_getattr(&g_fs_h[hnd]->f_path, &st, STATX_SIZE, 0) == 0)
+				sz = st.size;
+		}
+		writel(1, fs + boff + 4);
+		writel(4, fs + boff + 8);
+		writel(hnd, fs + boff + 0xc);
+		writel(4, fs + boff + 0x10);
+		writel((u32)sz, fs + boff + 0x14);
+		writel((u32)(sz >> 32), fs + boff + 0x18);
+		length = 0x18;
+		dev_info(s->dev, "H6 FS STAT h=%u -> size=%llu\n", hnd, sz);
+		break;
+	}
+	case 0x1002: {				/* SEEK: handle@+0xc, offset@+0x14 -> newpos en +0xc */
+		u32 hnd = readl(fs + boff + 0xc);
+		u32 off = readl(fs + boff + 0x14);
+		loff_t np = off;
+		if (hnd < FS_NR_HANDLES && g_fs_h[hnd])
+			np = vfs_llseek(g_fs_h[hnd], off, SEEK_SET);
+		writel(1, fs + boff + 4);
+		writel(4, fs + boff + 8);
+		writel((u32)np, fs + boff + 0xc);	/* nueva posicion */
+		length = 0x1c;
+		break;
+	}
+	case 0x1003: {				/* READ: handle@+0xc, len@+0x14 -> nread + datos @+0x20 */
+		u32 hnd = readl(fs + boff + 0xc);
+		u32 rlen = readl(fs + boff + 0x14);
+		int nread = 0;
+		if (rlen > 0x3f00) rlen = 0x3f00;	/* cabe en el buffer (16388) */
+		if (hnd < FS_NR_HANDLES && g_fs_h[hnd]) {
+			u8 *tmp = kmalloc(rlen, GFP_KERNEL);	/* NO en el stack (8KB) */
+			if (tmp) {
+				nread = kernel_read(g_fs_h[hnd], tmp, rlen, &g_fs_h[hnd]->f_pos);
+				if (nread > 0)
+					memcpy_toio(fs + boff + 0x20, tmp, nread);
+				kfree(tmp);
+			}
+		}
+		if (nread < 0) nread = 0;
+		writel(3, fs + boff + 4);
+		writel(4, fs + boff + 8);
+		writel(0, fs + boff + 0xc);		/* result OK */
+		writel(4, fs + boff + 0x10);
+		writel(nread, fs + boff + 0x14);
+		writel(nread, fs + boff + 0x18);
+		writel(0, fs + boff + 0x1c);
+		length = 0x1c + nread;			/* cabecera 0x1c + datos */
+		dev_info(s->dev, "H6 FS READ h=%u len=%u -> %d\n", hnd, rlen, nread);
+		break;
+	}
+	case 0x1005: {				/* CLOSE: handle@+0xc */
+		u32 hnd = readl(fs + boff + 0xc);
+		if (hnd < FS_NR_HANDLES && g_fs_h[hnd]) {
+			filp_close(g_fs_h[hnd], NULL);
+			g_fs_h[hnd] = NULL;
+		}
+		writel(1, fs + boff + 4);
+		writel(4, fs + boff + 8);
+		writel(0, fs + boff + 0xc);
+		length = 0xc;
 		break;
 	}
 	case 0x1004: {				/* WRITE: p0/p1 = handle, un word = len */
@@ -911,6 +982,29 @@ static u32 spm_fs_serve(struct mt6582_spm *s, void __iomem *fs, u32 idx)
 		writel(0x00000054, fs + boff + 0x10);	/* p3 (0x54) */
 		length = 16;				/* 4 words de payload (+4..+0x10) */
 		dev_info(s->dev, "H6 FS GetDrive Z:\\ -> ground-truth [02 04 00 54] len=16\n");
+		break;
+	}
+	case 0x1010:
+	case 0x1011: {
+		/* GetFullPath/FileExists: chequeo REAL. Si el path existe -> found (2) + eco;
+		 * si NO (p.ej. "Z:\FAT..log" de recovery, ausente en NVRAM limpia) -> NOT-FOUND
+		 * (error bit31) para que el MD siga el mount limpio. */
+		char path[160];
+		struct file *f;
+		u32 plen = readl(fs + boff + 8);
+		spm_fs_path(fs + boff + 0xc, plen, path, sizeof(path));
+		f = filp_open(path, O_RDONLY, 0);
+		if (IS_ERR(f)) {
+			/* not found: done-marker (0xffff, lo pone el switch-end) + result=0 + len=0 */
+			writel(0, fs + boff + 4);
+			length = 0;
+			dev_info(s->dev, "H6 FS DIR op=%x %s -> NOT FOUND (done,r=0)\n", op, path);
+			break;
+		}
+		filp_close(f, NULL);
+		writel(2, fs + boff + 4);		/* found */
+		length = 8 + plen;
+		dev_info(s->dev, "H6 FS DIR op=%x %s -> FOUND\n", op, path);
 		break;
 	}
 	default:				/* READ / CLOSE / GETSIZE / metadata-mount:
