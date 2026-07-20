@@ -1003,15 +1003,24 @@ static int spm_md_hs2(struct mt6582_spm *s)
 				 * de la snoop de LineageOS (fs_rx/tx_debug_enable). */
 				if (lch == 14) {
 					u32 idx = rsv & 0xff;
-					u32 boff = idx * 0x14014;	/* 16388B por buffer */
+					/* stride = sizeof(fs_stream_buffer_t) = {u32 fs_ops; u8 buf[16384]}
+					 * = 16388 = 0x4004 (ccci_fs.h). El 0x14014 era el TOTAL de los 5
+					 * buffers (bug: fuera de region para idx>0). */
+					u32 boff = idx * 0x4004;
+					u32 fs_ops;
 					int tch;
 					u32 busy;
 
+					fs_ops = readl(fs + boff + 0);
 					dev_info(s->dev, "H6 FS REQ idx=%u op=%08x [%08x %08x] path=[%08x %08x %08x]\n",
-						 idx, readl(fs + boff + 0), readl(fs + boff + 4),
+						 idx, fs_ops, readl(fs + boff + 4),
 						 readl(fs + boff + 8), readl(fs + boff + 12),
 						 readl(fs + boff + 16), readl(fs + boff + 20));
-					writel(0, fs + boff + 0);	/* result = 0 (exito) — HIPOTESIS */
+					/* RESULTADO (Ghidra ccci_fsd FUN_000240a8): la respuesta conserva el
+					 * op-code; BIT31 = flag (exito &0x7fffffff / error |0x80000000).
+					 * PENDIENTE el payload por op ({u32 len;data}xcount + NVRAM de
+					 * /data/nvram/md) + el length exacto -> boot-strace / mas Ghidra. */
+					writel(fs_ops & 0x7fffffff, fs + boff + 0);
 					wmb();
 					busy = readl(ccif + 0x04) & 0xff;
 					for (tch = 0; tch < 8; tch++)

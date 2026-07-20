@@ -65,5 +65,23 @@ CERRADO: el encoding request/response (Ghidra) + el mapeo de flags + los file-op
 los paths NVRAM + la region FS. → **el proxy FS está completamente especificado**. Siguiente = implementar
 (daemon userspace o kernel-proxy H6) + probar en HW. Decompilaciones en la Pi `~/modem-fsd/fsd-*.c`.
 
-*Mac (Fable 5), 2026-07-20. Protocolo FS crackeado con Ghidra: encoding de respuesta (bit31=resultado,
-{len;data}×count), mapeo de flags, path translation. El proxy FS queda especificado de punta a punta.*
+## Implementación (kernel-proxy H6, en curso) — 0720
+Aplicado al scaffold `spm_md_hs2` (mt6582-spm-H1.c) lo confirmado:
+- **★fix del stride** (bug): `boff = idx * 0x4004` (= `sizeof(fs_stream_buffer_t)` de `ccci_fs.h`), NO
+  `0x14014` (que era el TOTAL de los 5 buffers → out-of-region para idx>0).
+- **encoding del resultado** (Ghidra `FUN_000240a8`): la respuesta **conserva el op-code** y usa el
+  **bit31** como flag (`fs_ops & 0x7fffffff` = éxito). Antes escribía `0` (perdía el op).
+- `ccci_fs_send` del stock (source) confirma el msg FS_TX: `data0 = fs_phys - MD_AP_OFF + 16388*idx`,
+  `data1 = length + 4`, `channel = 15`, `reserved = idx`.
+
+**PENDIENTE para un proxy que arranque el MD**:
+1. El **`length` exacto** y el **payload por op** (`{u32 len; data}×count` en el buffer) — la parte que
+   Ghidra deja parcial. Mejor: **boot-time strace** del `ccci_fsd` (capturar el mount real fs_ops=0x100e
+   + los primeros reads, con el `{length,index}` del SEND). El snoop de hoy pilló el runtime (airplane),
+   NO el mount de boot (el MD ya estaba arriba).
+2. Los **datos NVRAM reales** (`/data/nvram/md/NVRAM/NVD_DATA/<LID>`: MT0X/UM06/MT1A) para la calibración.
+3. Build (Pi) + integrar en el `mt6582-spm.c` del árbol + test en HW (móvil en pmOS + secuencia
+   `spm_md_load/remap/release/hs2`).
+
+*Mac (Opus 4.8), 2026-07-20. Protocolo FS crackeado (Ghidra) + implementación arrancada (stride fix +
+result encoding en el kernel-proxy). Falta: length/payload por op (boot-strace) + NVRAM + test HW.*
