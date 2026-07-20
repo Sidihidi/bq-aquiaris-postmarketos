@@ -902,6 +902,17 @@ static u32 spm_fs_serve(struct mt6582_spm *s, void __iomem *fs, u32 idx)
 		length = 0;
 		break;
 	}
+	case 0x100e: {				/* GetDrive (mount de "Z:\") — GROUND-TRUTH capturado
+		 * del ccci_fsd de Lineage en boot FRIO (wrapper+poller, sesion Windows 0720):
+		 * respuesta = [result][02][04][00][54]. El default (length 0) hacia EXCP el MD. */
+		writel(0x00000002, fs + boff + 4);	/* p0 = drive type (FS_DRIVE_I_SYSTEM) */
+		writel(0x00000004, fs + boff + 8);	/* p1 */
+		writel(0x00000000, fs + boff + 0xc);	/* p2 */
+		writel(0x00000054, fs + boff + 0x10);	/* p3 (0x54) */
+		length = 16;				/* 4 words de payload (+4..+0x10) */
+		dev_info(s->dev, "H6 FS GetDrive Z:\\ -> ground-truth [02 04 00 54] len=16\n");
+		break;
+	}
 	default:				/* READ / CLOSE / GETSIZE / metadata-mount:
 		 * PENDIENTE de confirmar el op-code exacto del log del proxy en pmOS.
 		 * Por ahora: exito minimo (deja avanzar los 42 ops de mount). */
