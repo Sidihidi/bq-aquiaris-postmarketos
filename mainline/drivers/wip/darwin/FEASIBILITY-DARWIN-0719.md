@@ -33,7 +33,8 @@ corriendo en el krillin. Confirma de golpe: (a) la dirección de carga `0x800080
 `zreladdr` era correcta; (b) el LK **no exige magic de zImage** (arranca un binario raw); (c) el
 framebuffer del LK persiste hasta el salto y las escrituras físicas se ven.
 
-**GOTCHA resuelto — el WATCHDOG TOPRGU reiniciaba el móvil:** primer intento = banner en pantalla
+**GOTCHA resuelto y VERIFICADO EN HW — el WATCHDOG TOPRGU reiniciaba el móvil:** (tras el fix,
+confirmado 0720: pantalla limpiada a negro + banner blanco + **estable indefinidamente**, sin reset) primer intento = banner en pantalla
 y **reset a los pocos segundos**. Causa: el LK deja el watchdog ARMADO y Linux lo va pateando;
 GenericBooter no lo patea → reset. (Mismo watchdog que la saga del suspend.) Fix en `init_debug()`:
 ```c
