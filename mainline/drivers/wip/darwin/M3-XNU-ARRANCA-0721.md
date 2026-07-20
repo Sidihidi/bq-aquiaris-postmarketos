@@ -102,3 +102,43 @@ posterior (la 4ª prueba, en start_trampoline, es la última que se ve). Siguien
 Imagen: `~/darwin-krillin/boot-xnu-M4-virtual.img`.
 
 *M4 0721. XNU corre virtual en el MT6582 — extraordinario para un SoC sin precedente en darwin-on-arm.*
+
+---
+
+# 🎉 M5 (0721): XNU EJECUTA CÓDIGO C — `arm_init()` corriendo
+
+**Probado en HW.** Tras M4 (XNU en modo virtual), se inyectaron dos pruebas de color:
+- **ROJO puro** (RGB565 `0xF800F800`) en el `_start` de `locore.s`, justo antes del `bx lr` que
+  salta a `arm_init` (sp ya montado, `lr=arm_init`).
+- **VERDE puro** (RGB565 `0x07E007E0`) como PRIMERA acción dentro de `arm_init()` en C
+  (`osfmk/arm/arm_init.c`), escribiendo directo al fb identity-mapped por el fix de M4.
+
+**La pantalla queda VERDE** → XNU no solo completó todo el `_start` en ensamblador, sino que
+**cruzó a `arm_init()` y ejecuta código C del kernel**. La cadena completa validada en hardware:
+
+```
+__start (M3) → tabla de páginas + MMU ON + salto a modo virtual (M4) → arm_init() en C (M5)
+```
+
+## Formato de píxel confirmado: RGB565 (16bpp), NO 32bpp
+
+Los colores "raros" de M4 (blanco/azul/blanco/amarillo) se explican por completo si el framebuffer
+del LK es **RGB565 de 16 bits** (cada `str` de 32 bits pinta 2 píxeles):
+`0x00FF0000`→azul, `0x0000FF00`→amarillo, `0xFFFFFFFF`→blanco. Con valores RGB565 puros
+(`0xF800`=rojo, `0x07E0`=verde, `0x001F`=azul, duplicados en la palabra de 32 bits) los colores
+salen limpios y predecibles. **Esto es clave para la consola**: cuando se conecte
+`initialize_screen`/`vc_` de XNU habrá que declararle el fb como 16bpp RGB565 (no ARGB de 32).
+
+## Lo que queda (M6: consola de XNU con TEXTO real)
+
+`arm_init` corre, pero la prueba verde **sobreescribe** cualquier texto. Siguiente frontera:
+- Quitar el relleno verde y dejar que `PE_early_puts("arm_init: starting up\n")` (la 1ª línea real
+  de `arm_init`) escriba por el pexpert al fb → **primer texto de XNU en pantalla**.
+- El pexpert `pe_mt6582.c` ya tiene consola de fb (de M1); hay que asegurar que `PE_early_puts`
+  está cableado a ella y que el fb se declara **RGB565 16bpp** (hallazgo de arriba).
+- Bisegar cuánto de `arm_init` corre (cpu_bootstrap → arm_vm_init → …) si se cuelga antes de la
+  consola.
+
+Imagen: `~/darwin-krillin/boot-xnu-M5-arm_init.img`.
+
+*M5 0721. XNU ejecuta C en el MT6582. De M0(compila) a M5(código C corriendo) en una sesión.*

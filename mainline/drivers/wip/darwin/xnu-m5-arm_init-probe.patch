@@ -1,0 +1,47 @@
+# M5: pruebas de vida para confirmar que XNU ejecuta codigo C (arm_init).
+# La pantalla queda VERDE => arm_init() corre. Colores RGB565 puros (16bpp):
+#   0xF800F800 = rojo, 0x07E007E0 = verde (cada str de 32 bits = 2 px RGB565).
+# Aplicar sobre el arbol XNU con los patches M3/M4 ya aplicados.
+
+--- a/osfmk/arm/locore.s
++++ b/osfmk/arm/locore.s
+@@ _start: justo antes del salto final a arm_init (bx lr) @@
+     /* Set up initial sp. */
+     LOAD_ADDR(sp, intstack_top)
+
++    /* M4->M5 PRUEBA PRE-arm_init: ROJO puro (RGB565 0xF800) justo antes de
++     * saltar a arm_init (C). Si se ve rojo -> _start asm completo, sp montado,
++     * lr=arm_init. r0(boot_args) y lr NO se tocan; r4/r5/r6 son scratch. */
++    movw    r4, #0x0000
++    movt    r4, #0xBF40          /* r4 = 0xBF400000 (fb, identity-mapped) */
++    movw    r6, #0x0000
++    movt    r6, #0x0020          /* r6 = 0x200000 palabras */
++    movw    r5, #0xF800
++    movt    r5, #0xF800          /* rojo puro RGB565: 0xF800F800 */
++Lprobe_pre_arminit:
++    str     r5, [r4], #4
++    subs    r6, r6, #1
++    bne     Lprobe_pre_arminit
++
+     /* Boot to ARM init. */
+     bx      lr
+
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ void arm_init(boot_args * args): primera accion @@
+     thread_t thread;
+
++    /* M5 PRUEBA DE VIDA EN C: pintar el fb de VERDE puro (RGB565 0x07E0) como
++     * PRIMERA accion de arm_init. El fb (0xBF400000) esta identity-mapped por
++     * _start (fix M4). Si la pantalla se ve VERDE -> XNU EJECUTA CODIGO C. */
++    {
++        volatile unsigned int *fb = (volatile unsigned int *)0xBF400000;
++        unsigned int n = 0x200000;
++        while (n--)
++            *fb++ = 0x07E007E0;
++    }
++
+     /*
+      * We are in.
+      */
+     PE_early_puts("arm_init: starting up\n");
