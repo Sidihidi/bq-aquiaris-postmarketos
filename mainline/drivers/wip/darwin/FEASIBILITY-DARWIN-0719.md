@@ -24,6 +24,47 @@ de boot ARM estándar (r2 = dtb/atags).
 Patch reproducible: `genericbooter-mt6582.patch` (sobre GenericBooter @ b2f0298). Port en
 `plat-mt6582/`.
 
+## 🔧 M2 PARCIAL (0720): el TOOLCHAIN DARWIN COMPILA Y CORRE EN LA PI (aarch64)
+
+**El "hurdle grande" del darwin-sdk resultó abordable.** Construido y funcionando en la Raspberry
+Pi arm64 (Debian 13, gcc-14 / clang-19), instalado en `/opt/Developer/Toolchains/DarwinARM.toolchain`:
+
+| herramienta | estado |
+|---|---|
+| **`ld64` (enlazador Mach-O)** | ✅ **`PROJECT:ld64-274.2`, archs `armv6 armv7 armv7s arm64 ...`, LTO con LLVM 19.1.7** |
+| `as`, `lipo`, `ar`, `nm`, `strip`, `segedit`, `libtool` | ✅ |
+| **`migcom`** (MIG, genera stubs IPC de Mach — **obligatorio para XNU**) | ✅ ELF aarch64, 289KB |
+| `otool` | ❌ solo porque enlaza `libobjc2` (prescindible) |
+| `libobjc2` (runtime ObjC) | ❌ choque runtime GNU vs Apple (`SEL`) — **no hace falta para XNU** (C/C++) |
+
+**`armv7` soportado = exactamente lo que necesita el MT6582.**
+
+### Cómo se consiguió (patches en `darwin-sdk-aarch64-host.patch`, 31 ficheros)
+El SDK es **fuente compilable** (no binarios x86), pero de 2014 y sin soporte de host aarch64:
+1. **`dpkg-buildpackage` NO sirve** en arm64: pide `libc6-dev-i386`/`gcc-multilib` (x86-only) y
+   `clang-4.0`. **Solución: `make` directo por componente**, saltando el chequeo de dependencias.
+   Deps reales que sí hacen falta: `uuid-dev libssl-dev libblocksruntime-dev flex bison automake
+   libtool libdb-dev tcsh llvm-dev clang-19 gobjc`.
+2. **`sys/sysctl.h` eliminado de glibc (2020)**: el shim `include/foreign/sys/sysctl.h` hacía
+   `#include_next`. Fix: usar su rama stub (la de Cygwin) también en `__linux__` — solo se usa para
+   leer `kern.osrelease`, irrelevante en Linux.
+3. **Cabeceras Mach sin caso aarch64** (`#error architecture not supported` en ~30 headers):
+   despachan por `__ppc__`/`__i386__`/`__x86_64__`/`__arm__`. **Clave: mapear aarch64 a la rama
+   x86_64, NO a la arm** — ambas son LP64, así `__int64_t` = `long` y cuadra con glibc; con las de
+   arm-32 daba `conflicting types` (allí es `long long`).
+4. **Byte-order**: `_OSSwapInt64` tiene rama `__llvm__` con `__builtin_bswap64` → añadir
+   `|| defined(__aarch64__)` (agnóstico de arquitectura, sin tocar el asm x86).
+5. **Endianness**: Apple usa `__LITTLE_ENDIAN__`, GCC/Linux usa `__BYTE_ORDER__`. Puente al
+   principio de `libkern/OSByteOrder.h`.
+
+### Lo que queda para M2 completo (compilar XNU)
+- Resto del SDK: `image3maker` (empaquetar el kernelcache), `kext_tools`, `developer_cmds`,
+  `xcode_tools`, `AvailabilityVersions` — fallan con `rc=2`; los vistos son triviales
+  (`AvailabilityVersions` = solo faltaba `sudo` al instalar). Mismo patrón de parches esperable.
+- **XNU en sí**: `make TARGET_CONFIGS="debug arm <maquina>"`. Las máquinas existentes son
+  `armpba8`, `omap3530`, `s5l8930x`... → **habría que añadir una para MT6582 (pexpert)**, que es
+  el trabajo de verdad (mapa de memoria, GIC, timer, UART/fb del krillin).
+
 ## 🎉 M1 CONSEGUIDO EN HW (0720): GenericBooter EJECUTA en el krillin y PINTA EN PANTALLA
 
 **Probado en hardware.** El LK del MTK carga y salta a nuestro binario bare-metal y el banner

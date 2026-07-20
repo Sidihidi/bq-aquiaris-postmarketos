@@ -1,0 +1,432 @@
+diff --git a/cctools/include/foreign/sys/sysctl.h b/cctools/include/foreign/sys/sysctl.h
+index 30749d1..c44490c 100644
+--- a/cctools/include/foreign/sys/sysctl.h
++++ b/cctools/include/foreign/sys/sysctl.h
+@@ -1,4 +1,4 @@
+-#ifndef __CYGWIN__
++#if !defined(__CYGWIN__) && !defined(__linux__)
+ #include_next <sys/sysctl.h>
+ #else
+ #ifndef __SYSCTL_H__
+@@ -19,4 +19,4 @@ int sysctl(const int *name, u_int namelen, void *oldp,	size_t *oldlenp,
+     return -1;
+ }
+ #endif /* __SYSCTL_H__ */
+-#endif /* ! __CYGWIN__ */
++#endif /* ! __CYGWIN__ && ! __linux__ */
+diff --git a/migcom/include/libkern/OSByteOrder.h b/migcom/include/libkern/OSByteOrder.h
+index 915a249..6c3d3be 100644
+--- a/migcom/include/libkern/OSByteOrder.h
++++ b/migcom/include/libkern/OSByteOrder.h
+@@ -37,11 +37,20 @@
+ #define OSSwapConstInt32(x)	__DARWIN_OSSwapConstInt32(x)
+ #define OSSwapConstInt64(x)	__DARWIN_OSSwapConstInt64(x)
+ 
++/* puente endianness: GCC/Linux usa __BYTE_ORDER__, Apple usa __LITTLE_ENDIAN__ */
++#if !defined(__LITTLE_ENDIAN__) && !defined(__BIG_ENDIAN__) && defined(__BYTE_ORDER__)
++# if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
++#  define __LITTLE_ENDIAN__ 1
++# elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
++#  define __BIG_ENDIAN__ 1
++# endif
++#endif
++
+ #if defined(__GNUC__)
+ 
+ #if (defined(__ppc__) || defined(__ppc64__))
+ #include <libkern/ppc/OSByteOrder.h>
+-#elif (defined(__i386__) || defined(__x86_64__))
++#elif (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__))
+ #include <libkern/i386/OSByteOrder.h>
+ #elif defined(__arm__)
+ #include <libkern/arm/OSByteOrder.h>
+diff --git a/migcom/include/libkern/OSTypes.h b/migcom/include/libkern/OSTypes.h
+index 6a03a27..15de759 100644
+--- a/migcom/include/libkern/OSTypes.h
++++ b/migcom/include/libkern/OSTypes.h
+@@ -62,8 +62,13 @@ typedef	struct UnsignedWide {
+ 			UInt32		hi;
+ }							UnsignedWide;
+ #else
++#if defined(__aarch64__)
++#define __DARWIN_LITTLE_ENDIAN 1234
++#define __DARWIN_BYTE_ORDER __DARWIN_LITTLE_ENDIAN
++#else
+ #error Unknown endianess.
+ #endif
++#endif
+ 
+ typedef signed char 	   SInt8;
+ typedef signed short 	   SInt16;
+diff --git a/migcom/include/libkern/i386/_OSByteOrder.h b/migcom/include/libkern/i386/_OSByteOrder.h
+index 51477bb..ad6f2fb 100644
+--- a/migcom/include/libkern/i386/_OSByteOrder.h
++++ b/migcom/include/libkern/i386/_OSByteOrder.h
+@@ -56,7 +56,7 @@ _OSSwapInt32(
+     __uint32_t        _data
+ )
+ {
+-#if defined(__llvm__)
++#if defined(__llvm__) || defined(__aarch64__)
+     return __builtin_bswap32(_data);
+ #else
+     __asm__ ("bswap   %0" : "+r" (_data));
+@@ -64,7 +64,7 @@ _OSSwapInt32(
+ #endif
+ }
+ 
+-#if defined(__llvm__)
++#if defined(__llvm__) || defined(__aarch64__)
+ __DARWIN_OS_INLINE
+ __uint64_t
+ _OSSwapInt64(
+diff --git a/migcom/include/mach/machine/asm.h b/migcom/include/mach/machine/asm.h
+index 59e1da2..fac8b71 100644
+--- a/migcom/include/mach/machine/asm.h
++++ b/migcom/include/mach/machine/asm.h
+@@ -31,7 +31,7 @@
+ 
+ #if defined (__ppc__) || defined (__ppc64__)
+ #include "mach/ppc/asm.h"
+-#elif defined (__i386__) || defined(__x86_64__)
++#elif defined (__i386__) || defined(__x86_64__) || defined(__aarch64__)
+ #include "mach/i386/asm.h"
+ #elif defined (__arm__)
+ #include "mach/arm/asm.h"
+diff --git a/migcom/include/mach/machine/boolean.h b/migcom/include/mach/machine/boolean.h
+index 1bec00d..cea39b9 100644
+--- a/migcom/include/mach/machine/boolean.h
++++ b/migcom/include/mach/machine/boolean.h
+@@ -31,7 +31,7 @@
+ 
+ #if defined (__ppc__) || defined (__ppc64__)
+ #include "mach/ppc/boolean.h"
+-#elif defined (__i386__) || defined(__x86_64__)
++#elif defined (__i386__) || defined(__x86_64__) || defined(__aarch64__)
+ #include "mach/i386/boolean.h"
+ #elif defined (__arm__)
+ #include "mach/arm/boolean.h"
+diff --git a/migcom/include/mach/machine/exception.h b/migcom/include/mach/machine/exception.h
+index 5ce83f2..23a5d0f 100644
+--- a/migcom/include/mach/machine/exception.h
++++ b/migcom/include/mach/machine/exception.h
+@@ -31,7 +31,7 @@
+ 
+ #if defined (__ppc__) || defined (__ppc64__)
+ #include "mach/ppc/exception.h"
+-#elif defined (__i386__) || defined(__x86_64__)
++#elif defined (__i386__) || defined(__x86_64__) || defined(__aarch64__)
+ #include "mach/i386/exception.h"
+ #elif defined (__arm__)
+ #include "mach/arm/exception.h"
+diff --git a/migcom/include/mach/machine/kern_return.h b/migcom/include/mach/machine/kern_return.h
+index df37396..0daa422 100644
+--- a/migcom/include/mach/machine/kern_return.h
++++ b/migcom/include/mach/machine/kern_return.h
+@@ -31,7 +31,7 @@
+ 
+ #if defined (__ppc__) || defined (__ppc64__)
+ #include "mach/ppc/kern_return.h"
+-#elif defined (__i386__) || defined(__x86_64__)
++#elif defined (__i386__) || defined(__x86_64__) || defined(__aarch64__)
+ #include "mach/i386/kern_return.h"
+ #elif defined (__arm__)
+ #include "mach/arm/kern_return.h"
+diff --git a/migcom/include/mach/machine/machine_types.defs b/migcom/include/mach/machine/machine_types.defs
+index 418d16b..85d6d3f 100644
+--- a/migcom/include/mach/machine/machine_types.defs
++++ b/migcom/include/mach/machine/machine_types.defs
+@@ -31,7 +31,7 @@
+ 
+ #if defined (__ppc__) || defined (__ppc64__)
+ #include "mach/ppc/machine_types.defs"
+-#elif defined (__i386__) || defined(__x86_64__)
++#elif defined (__i386__) || defined(__x86_64__) || defined(__aarch64__)
+ #include "mach/i386/machine_types.defs"
+ #elif defined (__arm__)
+ #include "mach/arm/machine_types.defs"
+diff --git a/migcom/include/mach/machine/ndr_def.h b/migcom/include/mach/machine/ndr_def.h
+index a7b5a9b..6812a21 100644
+--- a/migcom/include/mach/machine/ndr_def.h
++++ b/migcom/include/mach/machine/ndr_def.h
+@@ -31,7 +31,7 @@
+ 
+ #if defined (__ppc__) || defined (__ppc64__)
+ #include "mach/ppc/ndr_def.h"
+-#elif defined (__i386__) || defined(__x86_64__)
++#elif defined (__i386__) || defined(__x86_64__) || defined(__aarch64__)
+ #include "mach/i386/ndr_def.h"
+ #elif defined (__arm__)
+ #include "mach/arm/ndr_def.h"
+diff --git a/migcom/include/mach/machine/processor_info.h b/migcom/include/mach/machine/processor_info.h
+index ca96367..f81f7f3 100644
+--- a/migcom/include/mach/machine/processor_info.h
++++ b/migcom/include/mach/machine/processor_info.h
+@@ -31,7 +31,7 @@
+ 
+ #if defined (__ppc__) || defined (__ppc64__)
+ #include "mach/ppc/processor_info.h"
+-#elif defined (__i386__) || defined(__x86_64__)
++#elif defined (__i386__) || defined(__x86_64__) || defined(__aarch64__)
+ #include "mach/i386/processor_info.h"
+ #elif defined (__arm__)
+ #include "mach/arm/processor_info.h"
+diff --git a/migcom/include/mach/machine/rpc.h b/migcom/include/mach/machine/rpc.h
+index b969bd4..8fbddce 100644
+--- a/migcom/include/mach/machine/rpc.h
++++ b/migcom/include/mach/machine/rpc.h
+@@ -31,7 +31,7 @@
+ 
+ #if defined (__ppc__) || defined (__ppc64__)
+ #include "mach/ppc/rpc.h"
+-#elif defined (__i386__) || defined(__x86_64__)
++#elif defined (__i386__) || defined(__x86_64__) || defined(__aarch64__)
+ #include "mach/i386/rpc.h"
+ #elif defined (__arm__)
+ #include "mach/arm/rpc.h"
+diff --git a/migcom/include/mach/machine/sdt_isa.h b/migcom/include/mach/machine/sdt_isa.h
+index a8e1379..7d19b77 100644
+--- a/migcom/include/mach/machine/sdt_isa.h
++++ b/migcom/include/mach/machine/sdt_isa.h
+@@ -30,7 +30,7 @@
+ 
+ #if defined (__ppc__) || defined (__ppc64__)
+ #include <mach/ppc/sdt_isa.h>
+-#elif defined (__i386__) || defined(__x86_64__)
++#elif defined (__i386__) || defined(__x86_64__) || defined(__aarch64__)
+ #include <mach/i386/sdt_isa.h>
+ #elif defined (__arm__)
+ #include <mach/arm/sdt_isa.h>
+diff --git a/migcom/include/mach/machine/thread_state.h b/migcom/include/mach/machine/thread_state.h
+index 18ffca4..27ea0c3 100644
+--- a/migcom/include/mach/machine/thread_state.h
++++ b/migcom/include/mach/machine/thread_state.h
+@@ -31,7 +31,7 @@
+ 
+ #if defined (__ppc__) || defined(__ppc64__)
+ #include "mach/ppc/thread_state.h"
+-#elif defined (__i386__) || defined(__x86_64__)
++#elif defined (__i386__) || defined(__x86_64__) || defined(__aarch64__)
+ #include "mach/i386/thread_state.h"
+ #elif defined (__arm__)
+ #include "mach/arm/thread_state.h"
+diff --git a/migcom/include/mach/machine/thread_status.h b/migcom/include/mach/machine/thread_status.h
+index ad5eff0..0129e71 100644
+--- a/migcom/include/mach/machine/thread_status.h
++++ b/migcom/include/mach/machine/thread_status.h
+@@ -31,7 +31,7 @@
+ 
+ #if defined (__ppc__) || defined (__ppc64__)
+ #include "mach/ppc/thread_status.h"
+-#elif defined (__i386__) || defined(__x86_64__)
++#elif defined (__i386__) || defined(__x86_64__) || defined(__aarch64__)
+ #include "mach/i386/thread_status.h"
+ #elif defined (__arm__)
+ #include "mach/arm/thread_status.h"
+diff --git a/migcom/include/mach/machine/vm_param.h b/migcom/include/mach/machine/vm_param.h
+index c71121b..ec7c253 100644
+--- a/migcom/include/mach/machine/vm_param.h
++++ b/migcom/include/mach/machine/vm_param.h
+@@ -31,7 +31,7 @@
+ 
+ #if defined (__ppc__) || defined (__ppc64__)
+ #include "mach/ppc/vm_param.h"
+-#elif defined (__i386__) || defined(__x86_64__)
++#elif defined (__i386__) || defined(__x86_64__) || defined(__aarch64__)
+ #include "mach/i386/vm_param.h"
+ #elif defined (__arm__)
+ #include "mach/arm/vm_param.h"
+diff --git a/migcom/include/mach/machine/vm_types.h b/migcom/include/mach/machine/vm_types.h
+index b366092..1f8e2f6 100644
+--- a/migcom/include/mach/machine/vm_types.h
++++ b/migcom/include/mach/machine/vm_types.h
+@@ -31,7 +31,7 @@
+ 
+ #if defined (__ppc__) || defined(__ppc64__)
+ #include "mach/ppc/vm_types.h"
+-#elif defined (__i386__) || defined(__x86_64__)
++#elif defined (__i386__) || defined(__x86_64__) || defined(__aarch64__)
+ #include "mach/i386/vm_types.h"
+ #elif defined (__arm__)
+ #include "mach/arm/vm_types.h"
+diff --git a/migcom/include/machine/_limits.h b/migcom/include/machine/_limits.h
+index 373e726..7b100b4 100644
+--- a/migcom/include/machine/_limits.h
++++ b/migcom/include/machine/_limits.h
+@@ -30,7 +30,7 @@
+ 
+ #if defined (__ppc__) || defined (__ppc64__)
+ #include "ppc/_limits.h"
+-#elif defined (__i386__) || defined(__x86_64__)
++#elif defined (__i386__) || defined(__x86_64__) || defined(__aarch64__)
+ #include "i386/_limits.h"
+ #elif defined (__arm__)
+ #include "arm/_limits.h"
+diff --git a/migcom/include/machine/_param.h b/migcom/include/machine/_param.h
+index 4171fd0..bd3cf03 100644
+--- a/migcom/include/machine/_param.h
++++ b/migcom/include/machine/_param.h
+@@ -27,7 +27,7 @@
+  */
+ #if defined (__ppc__) || defined (__ppc64__)
+ #include "ppc/_param.h"
+-#elif defined (__i386__) || defined (__x86_64__)
++#elif defined (__i386__) || defined (__x86_64__) || defined(__aarch64__)
+ #include "i386/_param.h"
+ #elif defined (__arm__)
+ #include "arm/_param.h"
+diff --git a/migcom/include/machine/_structs.h b/migcom/include/machine/_structs.h
+index 0e35938..a070115 100644
+--- a/migcom/include/machine/_structs.h
++++ b/migcom/include/machine/_structs.h
+@@ -27,7 +27,7 @@
+  */
+ #if defined (__ppc__) || defined (__ppc64__)
+ #include "ppc/_structs.h"
+-#elif defined (__i386__) || defined (__x86_64__)
++#elif defined (__i386__) || defined (__x86_64__) || defined(__aarch64__)
+ #include "i386/_structs.h"
+ #elif defined (__arm__)
+ #include "arm/_structs.h"
+diff --git a/migcom/include/machine/_types.h b/migcom/include/machine/_types.h
+index 9f2d6d2..1de6ec0 100644
+--- a/migcom/include/machine/_types.h
++++ b/migcom/include/machine/_types.h
+@@ -30,7 +30,7 @@
+ 
+ #if defined (__ppc__) || defined (__ppc64__)
+ #include "ppc/_types.h"
+-#elif defined (__i386__) || defined(__x86_64__)
++#elif defined (__i386__) || defined(__x86_64__) || defined(__aarch64__)
+ #include "i386/_types.h"
+ #elif defined (__arm__)
+ #include "arm/_types.h"
+diff --git a/migcom/include/machine/endian.h b/migcom/include/machine/endian.h
+index a49d52a..9981f1f 100644
+--- a/migcom/include/machine/endian.h
++++ b/migcom/include/machine/endian.h
+@@ -33,7 +33,7 @@
+ 
+ #if defined (__ppc__) || defined(__ppc64__)
+ #include "ppc/endian.h"
+-#elif defined (__i386__) || defined(__x86_64__)
++#elif defined (__i386__) || defined(__x86_64__) || defined(__aarch64__)
+ #include "i386/endian.h"
+ #elif defined (__arm__)
+ #include "arm/endian.h"
+diff --git a/migcom/include/machine/fasttrap_isa.h b/migcom/include/machine/fasttrap_isa.h
+index fa881d3..b4fc92c 100644
+--- a/migcom/include/machine/fasttrap_isa.h
++++ b/migcom/include/machine/fasttrap_isa.h
+@@ -30,7 +30,7 @@
+ 
+ #if defined (__ppc__) || defined (__ppc64__)
+ #include "ppc/fasttrap_isa.h"
+-#elif defined (__i386__) || defined(__x86_64__)
++#elif defined (__i386__) || defined(__x86_64__) || defined(__aarch64__)
+ #include "i386/fasttrap_isa.h"
+ #elif defined (__arm__)
+ #include "arm/fasttrap_isa.h"
+diff --git a/migcom/include/machine/limits.h b/migcom/include/machine/limits.h
+index d52080f..f23bea2 100644
+--- a/migcom/include/machine/limits.h
++++ b/migcom/include/machine/limits.h
+@@ -4,7 +4,7 @@
+    This file is public domain.  */
+ #if defined (__ppc__) || defined (__ppc64__)
+ #include <ppc/limits.h>
+-#elif defined (__i386__) || defined(__x86_64__)
++#elif defined (__i386__) || defined(__x86_64__) || defined(__aarch64__)
+ #include <i386/limits.h>
+ #elif defined (__arm__)
+ #include <arm/limits.h>
+diff --git a/migcom/include/machine/param.h b/migcom/include/machine/param.h
+index 0b2a2ad..0c5874d 100644
+--- a/migcom/include/machine/param.h
++++ b/migcom/include/machine/param.h
+@@ -33,7 +33,7 @@
+ 
+ #if defined (__ppc__) || defined (__ppc64__)
+ #include "ppc/param.h"
+-#elif defined (__i386__) || defined(__x86_64__)
++#elif defined (__i386__) || defined(__x86_64__) || defined(__aarch64__)
+ #include "i386/param.h"
+ #elif defined (__arm__)
+ #include "arm/param.h"
+diff --git a/migcom/include/machine/profile.h b/migcom/include/machine/profile.h
+index 45e4de8..f65722f 100644
+--- a/migcom/include/machine/profile.h
++++ b/migcom/include/machine/profile.h
+@@ -35,7 +35,7 @@
+ 
+ #if defined (__ppc__) || defined (__ppc64__)
+ #include "ppc/profile.h"
+-#elif defined (__i386__) || defined(__x86_64__)
++#elif defined (__i386__) || defined(__x86_64__) || defined(__aarch64__)
+ #include "i386/profile.h"
+ #elif defined (__arm__)
+ #include "arm/profile.h"
+diff --git a/migcom/include/machine/setjmp.h b/migcom/include/machine/setjmp.h
+index 9aa71b5..c09e08a 100644
+--- a/migcom/include/machine/setjmp.h
++++ b/migcom/include/machine/setjmp.h
+@@ -33,7 +33,7 @@
+ 
+ #if defined (__ppc__) || defined (__ppc64__)
+ #include "ppc/setjmp.h"
+-#elif defined (__i386__) || defined(__x86_64__)
++#elif defined (__i386__) || defined(__x86_64__) || defined(__aarch64__)
+ #include "i386/setjmp.h"
+ #elif defined (__arm__)
+ #include "arm/setjmp.h"
+diff --git a/migcom/include/machine/signal.h b/migcom/include/machine/signal.h
+index 7457d1c..8fa1401 100644
+--- a/migcom/include/machine/signal.h
++++ b/migcom/include/machine/signal.h
+@@ -30,7 +30,7 @@
+ 
+ #if defined (__ppc__) || defined (__ppc64__)
+ #include "ppc/signal.h"
+-#elif defined (__i386__) || defined(__x86_64__)
++#elif defined (__i386__) || defined(__x86_64__) || defined(__aarch64__)
+ #include "i386/signal.h"
+ #elif defined (__arm__)
+ #include "arm/signal.h"
+diff --git a/migcom/include/machine/types.h b/migcom/include/machine/types.h
+index 2bff809..64a0da0 100644
+--- a/migcom/include/machine/types.h
++++ b/migcom/include/machine/types.h
+@@ -33,7 +33,7 @@
+ 
+ #if defined (__ppc__) || defined (__ppc64__)
+ #include "ppc/types.h"
+-#elif defined (__i386__) || defined(__x86_64__)
++#elif defined (__i386__) || defined(__x86_64__) || defined(__aarch64__)
+ #include "i386/types.h"
+ #elif defined (__arm__)
+ #include "arm/types.h"
+diff --git a/migcom/include/machine/vmparam.h b/migcom/include/machine/vmparam.h
+index d9d0d74..65aa6d5 100644
+--- a/migcom/include/machine/vmparam.h
++++ b/migcom/include/machine/vmparam.h
+@@ -30,7 +30,7 @@
+ 
+ #if defined (__ppc__) || defined (__ppc64__)
+ #include "ppc/vmparam.h"
+-#elif defined (__i386__) || defined(__x86_64__)
++#elif defined (__i386__) || defined(__x86_64__) || defined(__aarch64__)
+ #include "i386/vmparam.h"
+ #elif defined (__arm__)
+ #include "arm/vmparam.h"
+diff --git a/migcom/mig_machine.h b/migcom/mig_machine.h
+index d8624ea..87fdf1d 100644
+--- a/migcom/mig_machine.h
++++ b/migcom/mig_machine.h
+@@ -1,6 +1,6 @@
+ #if !defined(_MIG_MACHINE_H)
+ #define _MIG_MACHINE_H
+-#if defined(__i386__)
++#if defined(__i386__) || defined(__aarch64__)
+ #include "i386/mig_machine.h"
+ #elif defined(__ppc__)
+ #include "ppc/mig_machine.h"
