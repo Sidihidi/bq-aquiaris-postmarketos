@@ -30,6 +30,8 @@
 
 /* offsets sobre 0x10006000 (mt_spm.h del downstream) */
 #include <linux/firmware.h>
+#include <linux/fs.h>
+#include <linux/namei.h>
 
 #define SPM_POWERON_CONFIG_SET		0x0000
 #define SPM_POWER_ON_VAL0		0x0010
@@ -833,6 +835,83 @@ static int spm_md_release(struct mt6582_spm *s)
  * MiscInfo). El MD lee el TAG en la SRAM del CCIF@0x140 -> apunta al runtime en SMEM. */
 #define MD_AP_OFF	0x78000000	/* md_2_ap_phy_addr_offset_fixed = (smem&0xFE000000)-0x40000000 */
 #define RT_NINTS	70		/* sizeof(modem_runtime_t)/4 */
+/* ===== H6 PROXY FS: servidor mínimo (kernel) que sirve la NVRAM del MD =====
+ * Protocolo (RE del ccci_fsd stock, docs H6b..H6f): el MD escribe una peticion en
+ * fs_buffer[idx] = {u32 fs_ops; u8 buf[16384]}; nosotros hacemos el file-op sobre
+ * /data/nvram/md y escribimos la respuesta en el mismo buffer. Op-codes (low16 de
+ * fs_ops; high16 request=0x0000): OPEN=0x1001, WRITE=0x1004 (confirmados por poller
+ * + strace); READ/CLOSE/GETSIZE por confirmar del propio log de este proxy en pmOS.
+ * Respuesta: word0 = 0xffff0000|op (marca "hecho", ~(~(op<<16)>>16) del ccci_fsd);
+ * payload {u32 len; data} desde buf+... ; SEND: data1 = length+4.
+ * Devuelve la 'length' para el FS_TX (o 0 = solo cabecera). */
+#define FS_NR_HANDLES	16
+static struct file *g_fs_h[FS_NR_HANDLES];
+
+/* convierte "Z:\NVRAM\NVD_DATA\MT48_001" (UTF-16LE en el buffer) a
+ * "/data/nvram/md/NVRAM/NVD_DATA/MT48_001" (ASCII). plen = bytes UTF-16. */
+static void spm_fs_path(void __iomem *src, int plen, char *out, int outsz)
+{
+	int i, o;
+	strlcpy(out, "/data/nvram/md", outsz);
+	o = strlen(out);
+	/* saltar "Z:" (2 chars UTF-16 = 4 bytes) */
+	for (i = 4; i + 1 < plen && o < outsz - 1; i += 2) {
+		u8 c = readb(src + i);		/* low byte del char UTF-16 */
+		if (c == '\\')
+			c = '/';
+		out[o++] = c;
+	}
+	out[o] = 0;
+}
+
+static u32 spm_fs_serve(struct mt6582_spm *s, void __iomem *fs, u32 idx)
+{
+	u32 boff = idx * 0x4004;
+	u32 fs_ops = readl(fs + boff + 0);
+	u32 op = fs_ops & 0xffff;
+	u32 p0 = readl(fs + boff + 4);		/* flags (OPEN) / handle */
+	u32 p1 = readl(fs + boff + 8);		/* len path (OPEN) / handle */
+	u32 length = 0;				/* bytes de payload -> data1 = length+4 */
+
+	switch (op) {
+	case 0x1001: {				/* OPEN */
+		char path[160];
+		struct file *f;
+		int h, oflag = O_RDWR;
+		/* mapeo flags FS->oflag (Ghidra H6d) */
+		if (p0 & 0x10000)  oflag = O_RDWR | O_CREAT;
+		if (p0 & 0x20000)  oflag = O_RDWR | O_CREAT | O_TRUNC;
+		spm_fs_path(fs + boff + 0xc, p1, path, sizeof(path));	/* path desde +0xc */
+		f = filp_open(path, oflag, 0660);
+		for (h = 1; h < FS_NR_HANDLES; h++)
+			if (!g_fs_h[h])
+				break;
+		if (IS_ERR(f) || h >= FS_NR_HANDLES) {
+			dev_warn(s->dev, "H6 FS OPEN %s fallo\n", path);
+			writel(fs_ops | 0x80000000, fs + boff + 0);	/* error: bit31 */
+			return 0;
+		}
+		g_fs_h[h] = f;
+		writel(h, fs + boff + 4);	/* respuesta = handle */
+		length = 4;
+		dev_info(s->dev, "H6 FS OPEN %s -> h=%d\n", path, h);
+		break;
+	}
+	case 0x1004: {				/* WRITE: p0/p1 = handle, un word = len */
+		/* placeholder: aceptar (la NVRAM del boot es READ; WRITE se afina en HW) */
+		length = 0;
+		break;
+	}
+	default:				/* READ / CLOSE / GETSIZE / metadata-mount:
+		 * PENDIENTE de confirmar el op-code exacto del log del proxy en pmOS.
+		 * Por ahora: exito minimo (deja avanzar los 42 ops de mount). */
+		break;
+	}
+	/* marca "hecho": conserva op, high16 = 0xffff (o bit31 si error, ya puesto arriba) */
+	writel(0xffff0000 | op, fs + boff + 0);
+	return length;
+}
+
 static int spm_md_hs2(struct mt6582_spm *s)
 {
 	void __iomem *smem, *ccif, *fs;
@@ -1007,7 +1086,7 @@ static int spm_md_hs2(struct mt6582_spm *s)
 					 * = 16388 = 0x4004 (ccci_fs.h). El 0x14014 era el TOTAL de los 5
 					 * buffers (bug: fuera de region para idx>0). */
 					u32 boff = idx * 0x4004;
-					u32 fs_ops;
+					u32 fs_ops, fs_len;
 					int tch;
 					u32 busy;
 
@@ -1016,11 +1095,9 @@ static int spm_md_hs2(struct mt6582_spm *s)
 						 idx, fs_ops, readl(fs + boff + 4),
 						 readl(fs + boff + 8), readl(fs + boff + 12),
 						 readl(fs + boff + 16), readl(fs + boff + 20));
-					/* RESULTADO (Ghidra ccci_fsd FUN_000240a8): la respuesta conserva el
-					 * op-code; BIT31 = flag (exito &0x7fffffff / error |0x80000000).
-					 * PENDIENTE el payload por op ({u32 len;data}xcount + NVRAM de
-					 * /data/nvram/md) + el length exacto -> boot-strace / mas Ghidra. */
-					writel(fs_ops & 0x7fffffff, fs + boff + 0);
+					/* servidor FS: file-op sobre /data/nvram/md + respuesta en el buffer;
+					 * devuelve la length del payload (spm_fs_serve, H6f). */
+					fs_len = spm_fs_serve(s, fs, idx);
 					wmb();
 					busy = readl(ccif + 0x04) & 0xff;
 					for (tch = 0; tch < 8; tch++)
@@ -1030,7 +1107,7 @@ static int spm_md_hs2(struct mt6582_spm *s)
 						writel(1 << tch, ccif + 0x04);	/* ocupar canal fisico TX */
 						writel((MD_SMEM_PHYS + 0xE000) - MD_AP_OFF + boff,
 						       ccif + 0x100 + tch * 16 + 0);	/* data0 = MD-view buffer */
-						writel(4, ccif + 0x100 + tch * 16 + 4);	/* data1 = length(0)+4 */
+						writel(fs_len + 4, ccif + 0x100 + tch * 16 + 4); /* data1 = length+4 */
 						writel(15, ccif + 0x100 + tch * 16 + 8);	/* channel = CCCI_FS_TX */
 						writel(idx, ccif + 0x100 + tch * 16 + 12);	/* reserved = idx */
 						wmb();
