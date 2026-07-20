@@ -1,6 +1,44 @@
 # Pexpert MT6582 (XNU) — plan + ESTADO REAL, 0720
 
-## 🎉 HECHO: `pe_mt6582.o` COMPILA DENTRO DE XNU
+## 🎉🎉 M2c CONSEGUIDO: `mach_kernel` armv7 ENLAZADO (XNU compila ENTERO)
+
+`BUILD/obj/DEBUG_ARM_MT6582/mach_kernel`: **Mach-O armv7 executable, flags:<NOUNDEFS|PIE>, 7.09 MB.**
+El kernel XNU de Apple, compilado para el MT6582 con nuestro pexpert dentro, en una Raspberry Pi
+arm64. `NOUNDEFS` = todos los símbolos resueltos. Verificado: `nm mach_kernel` contiene
+`_PE_init_SocSupport_mt6582` + `_gMT6582GICDistBase` etc. Copia en `~/darwin-krillin/mach_kernel-mt6582`.
+
+### Los ~56 errores de compilación + el link, resueltos (todo en `xnu-mt6582.patch` + `toolchain/`)
+1. **Ensamblador ARM "divided syntax" → "unified"** (los `.s` de osfmk/arm son de 2014, el
+   integrated-as de clang solo acepta unified): (a) `[rN, SIMBOLO]` → `[rN, #SIMBOLO]`; (b) condición
+   en medio del mnemónico → al final (`ldmgtfd`→`ldmfdgt`); ídem en las macros de `asm_help.h`.
+2. **Etiquetas locales Mach-O**: `.Lfoo` (convención ELF) → `Lfoo`.
+3. **`adr rN, label` → `ldr rN, =label`** (el `adr` a etiqueta local genera una reloc no soportada
+   en Mach-O ARM). 22 casos en 4 ficheros.
+4. **`assym.s` salía VACÍO** (bloqueante de fondo, 14 relocs): `genassym.c` compilado con clang
+   emite los offsets con marcador `@DEFINITION#` (comentario ARM `@`), pero el `sed` del Makefile
+   buscaba `#DEFINITION#`. **Solución**: script `toolchain/gen_assym.py` que reemplaza ese `sed`
+   frágil (parsea `@DEFINITION##define NAME #VAL` → `#define NAME VAL` + `NAME_NUM`).
+5. **Link — 3 cosas**: (a) `-fno-builtin` + **alias `_memcpy.2/.417 _memset.188 → _memcpy/_memset`**
+   (`pexpert/mem_aliases.s`; ld64-274.2 genera esos thunks de interworking ARM en el link); (b)
+   stub de `__cxa_atexit` en `OSRuntime.cpp`; (c) **`-fno-stack-protector`** (`___stack_chk_guard`
+   daba `no supported runtime hi16 relocation` en ld64).
+6. Flags del wrapper de clang (todos): `-fno-builtin -fno-stack-protector -Wno-{cast-align,register,
+   writable-strings,implicit-int,implicit-function-declaration,int-conversion,deprecated-non-prototype,
+   error}`, y `COMPAT` al FINAL de la línea (para ganar sobre los `-Werror` del build).
+7. **3 bugs del propio source de XNU** (kxld coma, `compute_pageout_gc_throttle` firma, fallback de
+   `CONFIG_NMBCLUSTERS`).
+
+**Estadística**: 4 → 664 objetos → kernel enlazado. Toolchain reproducible en `toolchain/`.
+
+### Lo que queda (M3): arrancar el kernel
+- **Apple DeviceTree**: XNU espera un DT en formato Apple (≠ FDT). Repos `dtc-AppleDeviceTree` +
+  `DeviceTrees` (plantillas). Convertir/escribir uno para el krillin.
+- **`image3maker`** (✅ ya construido): empaquetar `mach_kernel` como `mach.img3` (magic `krnl`) +
+  un `rdsk.img3` (ramdisk) → lo que GenericBooter carga y salta.
+- **GenericBooter (M1, ✅)**: ya sabe cargar Image3 y saltar; darle el kernel + DT + ramdisk.
+- Realista: primer objetivo = **XNU imprime por el framebuffer y hace panic/consola** (no un macOS).
+
+## 🎉 pe_mt6582.o COMPILA DENTRO DE XNU (subhito previo)
 
 `BUILD/obj/DEBUG_ARM_MT6582/pexpert/DEBUG/pe_mt6582.o` — el pexpert está escrito
 (`pe_mt6582.c` 309 líneas + `pe_mt6582.h` 82), registrado, y **compilando**. El build de XNU
