@@ -879,11 +879,42 @@ static int spm_md_hs2(struct mt6582_spm *s)
 	writel((MD_SMEM_PHYS + 0x4000) - MD_AP_OFF, smem + 10 * 4);	/* PcmShareMemBase */
 	writel(0x8000, smem + 11 * 4);					/* PcmShareMemSize (16*2K) */
 	writel((MD_SMEM_PHYS + 0xE000) - MD_AP_OFF, smem + 29 * 4);	/* FileShareMemBase (FS) */
-	writel(0x2000, smem + 30 * 4);					/* FileShareMemSize */
+	writel(0x14014, smem + 30 * 4);					/* FileShareMemSize = 16388*5 REAL (era 0x2000 -> overrun) */
 	writel((MD_SMEM_PHYS + 0xC000) - MD_AP_OFF, smem + 31 * 4);	/* RpcShareMemBase */
 	writel(0x2000, smem + 32 * 4);					/* RpcShareMemSize */
 	writel((MD_SMEM_PHYS + 0x2000) - MD_AP_OFF, smem + 39 * 4);	/* IPCShareMemBase */
 	writel(0x2000, smem + 40 * 4);					/* IPCShareMemSize */
+	/* BARRIDO EXHAUSTIVO 0718: las ULTIMAS regiones no-cero del stock que aun no
+	 * dabamos (Mdlog, Uart x3 TTY, Net CCMNI). Si el MD las desreferencia sin
+	 * respetar los PortNum, base=0 -> abort. Bases MD-view en el SMEM (2MB), no
+	 * solapan con las anteriores (hasta +0x10000). Test: si el abort PERSISTE con
+	 * TODO puesto = runtime descartado def. */
+	/* LAYOUT NO-SOLAPADO con tamaños REALES (v2): FS acaba en ~0x22014, así que lo de
+	 * aquí va de 0x30000 en adelante, cada región con hueco >= su size real.
+	 * Mdlog@0x30000, Uart@0x40/50/60000, MDULNet@0x70000(300K), MDDLNet@0xC0000(320K),
+	 * NetCtrl@0x120/130/140000. Todo < 2MB. */
+	writel((MD_SMEM_PHYS + 0x30000) - MD_AP_OFF, smem + 8 * 4);	/* MdlogShareMemBase */
+	writel(0x8000, smem + 9 * 4);					/* MdlogShareMemSize (mdlog off, chico) */
+	writel(3, smem + 12 * 4);					/* UartPortNum = 3 (TTY) */
+	writel((MD_SMEM_PHYS + 0x40000) - MD_AP_OFF, smem + 13 * 4);	/* UartShareMemBase[0] */
+	writel((MD_SMEM_PHYS + 0x50000) - MD_AP_OFF, smem + 14 * 4);	/* [1] */
+	writel((MD_SMEM_PHYS + 0x60000) - MD_AP_OFF, smem + 15 * 4);	/* [2] */
+	writel(0xA000, smem + 21 * 4);					/* UartShareMemSize[0]=~40K (real ~32K+hdr) */
+	writel(0xA000, smem + 22 * 4);					/* [1] */
+	writel(0xA000, smem + 23 * 4);					/* [2] */
+	writel((MD_SMEM_PHYS + 0x70000) - MD_AP_OFF, smem + 41 * 4);	/* MDULNetShareMemBase */
+	writel(0x4B000, smem + 42 * 4);					/* MDULNetShareMemSize = 300K REAL */
+	writel((MD_SMEM_PHYS + 0xC0000) - MD_AP_OFF, smem + 43 * 4);	/* MDDLNetShareMemBase */
+	writel(0x50000, smem + 44 * 4);					/* MDDLNetShareMemSize ~320K */
+	writel(3, smem + 45 * 4);					/* NetPortNum = 3 */
+	writel((MD_SMEM_PHYS + 0x120000) - MD_AP_OFF, smem + 46 * 4);	/* NetULCtrlBase[0] */
+	writel((MD_SMEM_PHYS + 0x130000) - MD_AP_OFF, smem + 47 * 4);	/* [1] */
+	writel((MD_SMEM_PHYS + 0x140000) - MD_AP_OFF, smem + 48 * 4);	/* [2] */
+	writel(0x8000, smem + 50 * 4); writel(0x8000, smem + 51 * 4); writel(0x8000, smem + 52 * 4); /* ULCtrlSize[0-2] */
+	writel((MD_SMEM_PHYS + 0x150000) - MD_AP_OFF, smem + 54 * 4);	/* NetDLCtrlBase[0] */
+	writel((MD_SMEM_PHYS + 0x160000) - MD_AP_OFF, smem + 55 * 4);	/* [1] */
+	writel((MD_SMEM_PHYS + 0x170000) - MD_AP_OFF, smem + 56 * 4);	/* [2] */
+	writel(0x8000, smem + 58 * 4); writel(0x8000, smem + 59 * 4); writel(0x8000, smem + 60 * 4); /* DLCtrlSize[0-2] */
 	writel(misc_phys - MD_AP_OFF, smem + 66 * 4);	/* MiscInfoBase (MD-view) */
 	writel(1024, smem + 67 * 4);		/* MiscInfoSize */
 	writel(0x46494343, smem + 69 * 4);	/* Postfix "CCIF" */
@@ -931,24 +962,44 @@ static int spm_md_hs2(struct mt6582_spm *s)
 	 * (el MD leyo TXCHDATA). START refleja canales disparados. */
 	dev_info(s->dev, "H4 DIAG post-TX: START=%08x BUSY=%08x RCHNUM=%08x (BUSY b0=0 => MD leyo el msg)\n",
 		 readl(ccif + 0x08), readl(ccif + 0x04), readl(ccif + 0x10));
-	dev_info(s->dev, "H4 HS2: runtime+tag+msg enviados. Sondeando respuesta del MD 5s...\n");
+	dev_info(s->dev, "H4 HS2: runtime+tag+msg enviados. Bucle de servicio CCCI 8s...\n");
 
-	/* 5) poll por la respuesta del MD (BootReadyID) -> HS2. Vigilar RCHNUM Y START
-	 * (el MD puede responder en otro canal fisico). */
-	for (i = 0; i < 50; i++) {
-		rch = readl(ccif + 0x10);
-		start = readl(ccif + 0x08);
-		if ((rch & ~0x1) || (start & ~0x1)) {
-			dev_info(s->dev, "H4 HS2: *** MD RESPONDE! @%dms RCHNUM=%08x START=%08x RX=[%08x %08x %08x %08x] ***\n",
-				 i * 100, rch, start, readl(ccif + 0x180), readl(ccif + 0x184),
-				 readl(ccif + 0x188), readl(ccif + 0x18c));
-			break;
+	/* 5) BUCLE DE SERVICIO CCCI (v2): el MD manda mensajes por canales fisicos y su
+	 * canal TX queda OCUPADO hasta que el AP lo ACKea (CCIF_ACK=1<<ch, ccci_hw.c
+	 * __ccif_v1_ack). Sin ACK el MD no puede mandar el siguiente -> se bloquea antes
+	 * del boot-ready. Aqui: leer cada canal con dato (RCHNUM), loguearlo, ACKear, y
+	 * buscar el boot-ready = mensaje de control (lch=0) con id=NORMAL_BOOT_ID(0) que
+	 * NO sea el HS1 (rsv!=MD_INIT_CHK_ID). */
+	{
+		int done = 0, k;
+
+		for (i = 0; i < 320 && !done; i++) {	/* 320*25ms = 8s */
+			rch = readl(ccif + 0x10);
+			for (k = 0; k < 8 && rch; k++) {
+				u32 d0, d1, lch, rsv;
+
+				if (!(rch & (1 << k)))
+					continue;
+				d0  = readl(ccif + 0x180 + k * 16);
+				d1  = readl(ccif + 0x184 + k * 16);
+				lch = readl(ccif + 0x188 + k * 16);
+				rsv = readl(ccif + 0x18c + k * 16);
+				dev_info(s->dev, "CCCI RX ch%d: d0=%08x id=%08x lch=%08x rsv=%08x\n",
+					 k, d0, d1, lch, rsv);
+				/* boot-ready HS2: canal de control (lch=0) + id=NORMAL_BOOT_ID(0),
+				 * distinto del HS1 (que trae rsv=MD_INIT_CHK_ID=0x5555FFFF). */
+				if (lch == 0 && d1 == 0 && rsv != 0x5555FFFF) {
+					dev_info(s->dev, "*** HS2 LOGRADO: NORMAL_BOOT_ID (stage 2 = M1 COMPLETO) ***\n");
+					done = 1;
+				}
+				writel(1 << k, ccif + 0x14);	/* ACK canal k -> libera el TX del MD */
+			}
+			msleep(25);
 		}
-		msleep(100);
+		if (!done)
+			dev_info(s->dev, "H4 HS2: sin boot-ready tras 8s. RCHNUM=%08x BUSY=%08x\n",
+				 readl(ccif + 0x10), readl(ccif + 0x04));
 	}
-	if (i == 50)
-		dev_info(s->dev, "H4 HS2: sin respuesta nueva tras 5s. RCHNUM=0x%08x START=0x%08x BUSY=0x%08x\n",
-			 readl(ccif + 0x10), readl(ccif + 0x08), readl(ccif + 0x04));
 	iounmap(smem);
 	iounmap(ccif);
 	return 0;

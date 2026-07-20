@@ -52,5 +52,11 @@ Móvil restaurado a diario (#14). Fix + bucle en la COPIA LOCAL `spm-sweep`; el 
 NO tocado. Driver de test con el bucle: mismo que `mt6582-spm-H1.c.dataabort-fix-0718` + el bucle de
 servicio (writels del bucle documentados arriba). El Mac debería integrar ambos.
 
+**★INTEGRADO (Mac, 0720)**: ambos ya en el `mt6582-spm-H1.c` compartido del repo (data-abort fix
+byte-idéntico + bucle de servicio CCCI `< 8 && rch`/`msleep(25)`/ACK-al-final = la versión tested de
+casa). Compila RC=0 en la Pi (`drivers/soc/mediatek/mt6582-spm.o`). Confirmado que la Pi ya tenía esta
+misma versión en el árbol; el commit solo la sube al repo (antes tenía el `0x2000` buggy + poll one-shot).
+Siguiente = proxy FS (responder el open de "Z:\\").
+
 *2026-07-19, sesión Windows (Fable 5). Data abort resuelto + servicio CCCI; HS2 gated por el EFS/NVRAM
 del MD. Siguiente: proxy FS.*
