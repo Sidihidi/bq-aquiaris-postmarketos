@@ -46,11 +46,25 @@ Estado servidor FS mínimo (los ops del boot son OPEN/READ/CLOSE + los 42 metada
 4. **Backing-store**: la NVRAM real extraída (`~/modem-fsd/nvram/md`, 55 LIDs) → copiar a
    `/data/nvram/md` en pmOS.
 
-## Estado
-Op-codes OPEN/WRITE confirmados + encoding + secuencia de boot + NVRAM real. El resto de op-codes se
-completan del propio log del proxy H6 en pmOS (no hace falta más Lineage). **Siguiente = escribir el
-servidor FS en `spm_md_hs2` + build (Pi) + test HW** (pmOS + NVRAM en /data/nvram/md + spm_md_*).
-Herramientas y capturas: `~/modem-fsd/` (poller, strace, decompilaciones, nvram/). Móvil restaurado limpio.
+## Estado — servidor FS IMPLEMENTADO y COMPILANDO
+- `spm_fs_serve()` + `spm_fs_path()` escritos en `mt6582-spm-H1.c`; el bucle de `spm_md_hs2` los llama.
+- **COMPILA contra el kernel real** (`mt6582-spm.o` RC=0). Fix necesario: `strlcpy`→`strscpy` (strlcpy
+  removido en kernels modernos). El árbol de la Pi (`drivers/soc/mediatek/mt6582-spm.c`) estaba MÁS VIEJO
+  que el wip del repo (sin la región `fs` mapeada en spm_md_hs2) → actualizado con el wip (backup en
+  `/tmp/tree-spm-backup.c` de la Pi). ⚠️ el árbol de la Pi NO es git → el repo wip es la fuente de verdad.
+- Op-codes OPEN=0x1001 / WRITE=0x1004 confirmados; READ/CLOSE/GETSIZE/mount se completan del log del
+  propio proxy (`H6 FS REQ op=%08x`) en pmOS.
+
+### Pasos para el test HW (siguiente sesión, con el móvil en pmOS)
+1. Copiar la NVRAM real (`~/modem-fsd/nvram/md`, 55 LIDs) → `/data/nvram/md` en pmOS.
+2. Flashear el boot con este kernel (build-krillin/zImage) — OJO: la config tiene el firmware ROMv1 del
+   GPS; para el modem da igual (el spm es built-in). 
+3. `spm_md_load` → `spm_md_remap` → `spm_md_release` → `spm_md_hs2` (params del driver).
+4. Leer el dmesg: `H6 FS REQ op=%08x` revela los op-codes que faltan (READ/mount) → completar el `switch`
+   de `spm_fs_serve` → re-build → repetir hasta `NORMAL_BOOT_ID` (HS2 completo).
+
+Herramientas y capturas: `~/modem-fsd/` (poller, strace, decompilaciones, nvram/). Móvil restaurado limpio
+(LineageOS). Commits hasta `d2a8f4f`.
 
 *Mac (Opus 4.8), 2026-07-20. Op-codes del MD capturados (poller /dev/ccci_fs): OPEN=0x1001, WRITE=0x1004
 + encoding response ffff. El proxy revela el resto en su propio log. Camino A desbloqueado.*
