@@ -25,11 +25,15 @@
 extern void rtclock_intr(arm_saved_state_t * regs);
 extern void rtc_configure(uint64_t hz);
 
+extern void PE_fb_putc(char c);
+extern void PE_fb_verbose(void);
+
 vm_offset_t gMT6582UartBase;
 vm_offset_t gMT6582GICCPUBase;
 vm_offset_t gMT6582GICDistBase;
 vm_offset_t gMT6582TimerBase;
 vm_offset_t gMT6582WdtBase;
+vm_offset_t gMT6582SysirqBase;
 
 static uint64_t clock_decrementer = 0;
 static boolean_t clock_initialized = FALSE;
@@ -50,14 +54,34 @@ static void timer_configure(void)
 /* ---------------- UART (8250, reg-shift 2) ----------------
  * El krillin no expone el UART fisicamente; se implementa por completitud,
  * pero la consola real de este port es el framebuffer. */
+#define MT6582_UART_SPIN_MAX 100000
+
 void mt6582_putc(int c)
 {
+    unsigned int spin;
+
     if (!gMT6582UartBase)
         return;
     if (c == '\n')
         mt6582_putc('\r');
-    while (!(HwReg(gMT6582UartBase + UART_LSR) & UART_LSR_THRE))
+
+    /*
+     * El krillin NO expone el UART fisicamente.  pe_init.c hace
+     * PE_kputc = gPESocDispatch.uart_putc, o sea que TODO kprintf/kdb_printf/
+     * panic de XNU pasa por aqui: lo mandamos al framebuffer, que es la unica
+     * consola real de este port.  El UART se sigue intentando best-effort con
+     * espera ACOTADA (un busy-wait infinito colgaba el arranque entero).
+     */
+
+    for (spin = 0; spin < MT6582_UART_SPIN_MAX; spin++) {
+        if (HwReg(gMT6582UartBase + UART_LSR) & UART_LSR_THRE)
+            break;
         barrier();
+    }
+    if (spin >= MT6582_UART_SPIN_MAX) {
+        gMT6582UartBase = 0;
+        return;
+    }
     HwReg(gMT6582UartBase + UART_THR) = c;
 }
 
@@ -65,8 +89,16 @@ int mt6582_getc(void)
 {
     if (!gMT6582UartBase)
         return -1;
-    while (!(HwReg(gMT6582UartBase + UART_LSR) & UART_LSR_DR))
-        barrier();
+    {
+        unsigned int spin;
+        for (spin = 0; spin < MT6582_UART_SPIN_MAX; spin++) {
+            if (HwReg(gMT6582UartBase + UART_LSR) & UART_LSR_DR)
+                break;
+            barrier();
+        }
+        if (spin >= MT6582_UART_SPIN_MAX)
+            return -1;
+    }
     return (int) (HwReg(gMT6582UartBase + UART_RBR) & 0xff);
 }
 
@@ -77,6 +109,8 @@ void mt6582_uart_init(void)
     gMT6582GICCPUBase  = ml_io_map(MT6582_GIC_CPU_BASE,  PAGE_SIZE);
     gMT6582TimerBase   = ml_io_map(MT6582_TIMER_BASE,    PAGE_SIZE);
     gMT6582WdtBase     = ml_io_map(MT6582_WDT_BASE,      PAGE_SIZE);
+    gMT6582SysirqBase  = ml_io_map(MT6582_SYSIRQ_BASE,   PAGE_SIZE)
+                         + MT6582_SYSIRQ_INTPOL;
     return;
 }
 
@@ -122,9 +156,44 @@ void mt6582_interrupt_init(void)
 uint64_t mt6582_timer_value(void);
 void mt6582_timer_enabled(int enable);
 
+/*
+ * Invierte la polaridad de un SPI en el bloque "sysirq" de MediaTek.
+ *
+ * El GIC solo entiende nivel-ALTO / flanco-ascendente, pero el GPT del MT6582
+ * es activo-BAJO: el DTS de Linux que funciona en este mismo telefono lo
+ * declara IRQ_TYPE_LEVEL_LOW.  MediaTek intercala un bloque de inversion en
+ * 0x10200100; sin programarlo el GIC NO VE NUNCA el tick del timer, y
+ * mt6582_timebase_init se queda esperando para siempre.
+ *
+ * Replica exacta de drivers/irqchip/irq-mtk-sysirq.c: bit (spi & 31) de la
+ * palabra (spi >> 5).  Para el timer, SPI 112 -> bit 16 de la palabra 3.
+ */
+static void mt6582_sysirq_set_low(uint32_t spi)
+{
+    uint32_t word = spi >> 5;
+    uint32_t bit = 1u << (spi & 0x1f);
+
+    if (!gMT6582SysirqBase)
+        return;
+    HwReg(gMT6582SysirqBase + word * 4) |= bit;
+}
+
 void mt6582_timebase_init(void)
 {
     uint32_t reg, bit;
+
+    PE_early_puts("TB entrada\n");
+
+    /*
+     * El GPT es un bloque COMPARTIDO: los 6 timers cuelgan de una sola linea
+     * de interrupcion.  Si el LK dejo cualquiera de ellos con su IRQ
+     * habilitada y el estado pendiente, la linea queda asserted; al habilitar
+     * interrupciones entra de inmediato y, al ser de NIVEL, se re-dispara para
+     * siempre.  Nadie limpiaba esto: enmascaramos los 6 y reconocemos todo lo
+     * pendiente antes de configurar los nuestros.
+     */
+    HwReg(gMT6582TimerBase + GPT_IRQ_EN_REG) = 0;
+    HwReg(gMT6582TimerBase + GPT_IRQ_ACK_REG) = 0x3f;
 
     timer_configure();
     mt6582_timer_enabled(FALSE);
@@ -136,17 +205,44 @@ void mt6582_timebase_init(void)
     HwReg(gMT6582TimerBase + GPT_CTRL_REG(MT6582_TIMER_CLK_SRC)) =
         GPT_CTRL_OP(GPT_CTRL_OP_FREERUN) | GPT_CTRL_ENABLE;
 
+    PE_early_puts("TB gpt2 freerun\n");
+
+    /* polaridad ANTES de habilitarlo en el GIC */
+    mt6582_sysirq_set_low(MT6582_INT_TIMER - 32);
+    PE_early_puts("TB sysirq pol ok\n");
+
     /* habilitar el IRQ del timer en el GIC */
     reg = GIC_DIST_ENABLE_SET + (MT6582_INT_TIMER / 32) * 4;
     bit = 1 << (MT6582_INT_TIMER & 31);
     HwReg(gMT6582GICDistBase + reg) = bit;
+    PE_early_puts("TB gic enable ok\n");
 
     ml_set_interrupts_enabled(TRUE);
-    mt6582_timer_enabled(TRUE);
-    clock_initialized = TRUE;
+    PE_early_puts("TB irq on\n");
 
-    while (!clock_had_irq)
-        barrier();
+    mt6582_timer_enabled(TRUE);
+    PE_early_puts("TB timer on\n");
+
+    clock_initialized = TRUE;
+    PE_early_puts("TB esperando IRQ\n");
+
+    /*
+     * Espera ACOTADA.  Antes era un while(!clock_had_irq) infinito: si el tick
+     * no llega, el arranque se cuelga sin decir nada.  Es la misma familia de
+     * bug que el putc del UART.  Acotada, un timer que no responde es un
+     * diagnostico, no un cuelgue mudo.
+     */
+    {
+        unsigned int spin;
+
+        for (spin = 0; spin < 20000000 && !clock_had_irq; spin++)
+            barrier();
+
+        if (clock_had_irq)
+            PE_early_puts("TB IRQ TIMER OK\n");
+        else
+            PE_early_puts("TB SIN IRQ - sigo sin timer\n");
+    }
 
     return;
 }
@@ -155,9 +251,30 @@ void mt6582_handle_interrupt(void *context)
 {
     uint32_t irq_no = HwReg(gMT6582GICCPUBase + GIC_CPU_INTACK);
 
+    /* Sondas de UN SOLO disparo: el kprintf esta silenciado, y ademas imprimir
+     * en cada interrupcion inundaria la pantalla. */
+    static int seen_any = 0, seen_spur = 0, seen_timer = 0, seen_other = 0;
+
+    if (!seen_any) {
+        seen_any = 1;
+        PE_early_puts("IRQ: manejador entrado\n");
+    }
+
     if (irq_no >= NR_IRQS) {
-        kprintf(KPRINTF_PREFIX "IRQ espuria %u\n", irq_no);
+        if (!seen_spur) {
+            seen_spur = 1;
+            PE_early_puts("IRQ: espuria\n");
+        }
         return;
+    }
+
+    if (irq_no != MT6582_INT_TIMER && !seen_other) {
+        seen_other = 1;
+        PE_early_puts("IRQ: NO es la del timer\n");
+    }
+    if (irq_no == MT6582_INT_TIMER && !seen_timer) {
+        seen_timer = 1;
+        PE_early_puts("IRQ: es la del TIMER\n");
     }
 
     if (irq_no == MT6582_INT_TIMER) {
@@ -225,18 +342,20 @@ void mt6582_timer_enabled(int enable)
 }
 
 /* ---------------- Framebuffer (el que deja el LK; validado en M1) ---------------- */
+/* vcputc() = consola vc_ de XNU; solo vale si initialize_screen() corrio
+ * (boot-arg -xnu-vc).  Por defecto usamos la consola del pexpert. */
 void vcputc(__unused int l, __unused int u, int c);
 
 static void _fb_putc(int c)
 {
-    if (c == '\n')
-        vcputc(0, 0, '\r');
-    vcputc(0, 0, c);
+    PE_fb_putc((char) c);
 }
 
 void mt6582_framebuffer_init(void)
 {
     char tempbuf[16];
+
+    PE_early_puts("FB0 fb_init entrada\n");
 
     PE_state.video.v_baseAddr = (unsigned long) MT6582_FB_BASE;
     PE_state.video.v_rowBytes = MT6582_FB_STRIDE;   /* 2176, NO width*4 */
@@ -244,16 +363,36 @@ void mt6582_framebuffer_init(void)
     PE_state.video.v_height   = MT6582_FB_HEIGHT;
     PE_state.video.v_depth    = MT6582_FB_DEPTH;
 
+    PE_early_puts("FB0b video struct ok\n");
+
+    if (PE_parse_boot_argn("-xnu-verbose", tempbuf, sizeof(tempbuf)))
+        PE_fb_verbose();          /* recupera el kprintf completo de XNU */
+
+    PE_early_puts("FB1 video set\n");
+    PE_early_puts("FB2 pre kprintf\n");
     kprintf(KPRINTF_PREFIX "framebuffer %ux%u stride %u @ 0x%08x\n",
             MT6582_FB_WIDTH, MT6582_FB_HEIGHT, MT6582_FB_STRIDE, MT6582_FB_BASE);
+    PE_early_puts("FB3 post kprintf\n");
 
     if (PE_parse_boot_argn("-early-fb-debug", tempbuf, sizeof(tempbuf)))
         initialize_screen((void *) &PE_state.video, kPEAcquireScreen);
 
-    if (PE_parse_boot_argn("-graphics-mode", tempbuf, sizeof(tempbuf)))
-        initialize_screen((void *) &PE_state.video, kPEGraphicsMode);
-    else
-        initialize_screen((void *) &PE_state.video, kPETextMode);
+    /*
+     * initialize_screen() arranca la consola vc_ de XNU sobre ESTE MISMO
+     * framebuffer, con su propia fuente y su propio cursor en (0,0): pinta
+     * encima de la traza del pexpert = texto solapado e ilegible.  Durante el
+     * bring-up la pantalla es del pexpert; se cede a vc_ con -xnu-vc.
+     */
+    if (PE_parse_boot_argn("-xnu-vc", tempbuf, sizeof(tempbuf))) {
+        PE_early_puts("FB4 vc on\n");
+        if (PE_parse_boot_argn("-graphics-mode", tempbuf, sizeof(tempbuf)))
+            initialize_screen((void *) &PE_state.video, kPEGraphicsMode);
+        else
+            initialize_screen((void *) &PE_state.video, kPETextMode);
+        PE_early_puts("FB5 vc done\n");
+    } else {
+        PE_early_puts("FB4 sin vc\n");
+    }
 
     return;
 }
@@ -294,15 +433,18 @@ void PE_init_SocSupport_mt6582(void)
     gPESocDispatch.timer_enabled    = mt6582_timer_enabled;
     gPESocDispatch.framebuffer_init = mt6582_framebuffer_init;
 
+    PE_early_puts("SOC1 pre io_map\n");
     mt6582_uart_init();          /* mapea los MMIO ANTES de tocar el fb */
+    PE_early_puts("SOC2 io_map ok\n");
     mt6582_framebuffer_init();
+    PE_early_puts("SOC3 soc done\n");
 
     PE_halt_restart = mt6582_halt_restart;
 }
 
 void PE_init_SocSupport_stub(void)
 {
-    PE_early_puts("PE_init_SocSupport: Initializing for MediaTek MT6582 (krillin)\n");
+    PE_early_puts("SoC MT6582 krillin\n");
     PE_init_SocSupport_mt6582();
 }
 

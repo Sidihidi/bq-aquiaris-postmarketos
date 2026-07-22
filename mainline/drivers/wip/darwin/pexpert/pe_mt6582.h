@@ -8,6 +8,8 @@
 #define _PEXPERT_MT6582_H_
 
 /* ---- GIC-400 (offsets estandar ARM; solo cambian las bases) ---- */
+#define MT6582_SYSIRQ_BASE       0x10200000   /* pagina del bloque sysirq */
+#define MT6582_SYSIRQ_INTPOL     0x100        /* registros de polaridad: 0x10200100 */
 #define MT6582_GIC_DIST_BASE     0x10211000
 #define MT6582_GIC_CPU_BASE      0x10212000
 #define GIC_CPU_REG(off)         ((off))
@@ -66,8 +68,17 @@
 #define MT6582_FB_BASE           0xBF400000
 #define MT6582_FB_WIDTH          540
 #define MT6582_FB_HEIGHT         960
-#define MT6582_FB_STRIDE         2176   /* 544 * 4 (ancho alineado) */
-#define MT6582_FB_DEPTH          32
+#define MT6582_FB_STRIDE         2176   /* lo que se le DICE a XNU (ver nota) */
+#define MT6582_FB_DEPTH          32     /* lo que se le DICE a XNU (ver nota) */
+
+/*
+ * NOTA: el panel es RGB565 de 16 bits, stride 1088 (medido con un patron de
+ * calibracion).  Nuestra consola pinta asi.  Pero estos dos valores son solo
+ * lo que se copia a PE_state.video, o sea lo que XNU CREE.  Poniendolos a
+ * 16/1088 el arranque se muere y la pantalla queda roja; con 32/2176 llegaba
+ * mucho mas lejos.  Como toda la salida de video propia de XNU esta
+ * desactivada, declararlo como 32bpp es inocuo y evita ese camino.
+ */
 
 /* ---- Watchdog TOPRGU (VALIDADO en HW: sin desarmarlo, reset a los segundos) ---- */
 #define MT6582_WDT_BASE          0x10007000
