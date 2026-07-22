@@ -1,0 +1,5651 @@
+diff --git a/bsd/arm/param.h b/bsd/arm/param.h
+index a7f7204..293c2ef 100644
+--- a/bsd/arm/param.h
++++ b/bsd/arm/param.h
+@@ -87,6 +87,11 @@
+ #define	M16KCLBYTES	(1 << M16KCLSHIFT)	/* size of a jumbo cluster */
+ 
+ #define	MCLOFSET	(MCLBYTES - 1)
++/* fallback CONFIG_NMBCLUSTERS: la seleccion por etiquetas del MASTER no lo emite
++ * para maquinas nuevas; usamos el valor <bsmall> del MASTER */
++#undef CONFIG_NMBCLUSTERS
++#define CONFIG_NMBCLUSTERS      ((1024 * 256) / MCLBYTES)
++
+ #ifndef NMBCLUSTERS
+ #define	NMBCLUSTERS	CONFIG_NMBCLUSTERS	/* cl map size */
+ #endif
+diff --git a/bsd/dev/arm/unix_syscalls.c b/bsd/dev/arm/unix_syscalls.c
+index ef4cf81..3fed3ad 100644
+--- a/bsd/dev/arm/unix_syscalls.c
++++ b/bsd/dev/arm/unix_syscalls.c
+@@ -187,6 +187,35 @@ void unix_syscall(arm_saved_state_t * state)
+     uthread->uu_rval[0] = 0;
+     uthread->uu_rval[1] = 0;
+ 
++    /*
++     * PRUEBA DE VIDA DEL ESPACIO DE USUARIO.
++     *
++     * Hasta ahora sabiamos que launchd arrancaba solo por AUSENCIA de panic en
++     * load_init_program().  Esto es la observacion directa: si el proceso 1
++     * hace syscalls, hay codigo ARM de usuario ejecutandose de verdad desde el
++     * ramdisk HFS+.  Se imprimen las primeras y se congela la pantalla, porque
++     * despues IOKit sigue emitiendo y se llevaria la traza por scroll.
++     */
++    {
++        extern void PE_early_puts(char *s);
++        extern void PE_fb_freeze(void);
++        static int vida = 0;
++
++        if (vida < 60) {
++            vida++;
++            PE_early_puts("SYS pid=");
++            { extern void PE_early_puthex(unsigned int v);
++              PE_early_puthex(p ? (unsigned int) p->p_pid : 0xffffffff); }
++            PE_early_puts(" "); 
++            PE_early_puts((char *) syscallnames[code >= NUM_SYSENT ? 63 : code]);
++            PE_early_puts("\n");
++            if (vida == 60) {
++                /* Ya no se congela: por UART el historico no se pierde. */
++                PE_early_puts("*** 60 syscalls trazadas, dejo de imprimir ***\n");
++            }
++        }
++    }
++
+     AUDIT_SYSCALL_ENTER(code, p, uthread);
+     error = (*(callp->sy_call)) (p, (void *) uthread->uu_arg, &(uthread->uu_rval[0]));
+     AUDIT_SYSCALL_EXIT(code, p, uthread, error);
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+index b27213e..e157ee4 100644
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -401,7 +401,11 @@ bsd_init(void)
+ 	boolean_t       netboot = FALSE;
+ #endif
+ 
+-#define bsd_init_kprintf(x...) // kprintf("bsd_init: " x)
++/* krillin/MT6582 (M-iokit): reapuntar los 56 marcadores de bsd_init a la consola
++ * fb del pexpert (todas las llamadas son cadenas planas, sin args de formato ->
++ * el operador coma no aplica).  Mapa completo de bsd_init hasta el techo (root). */
++extern void PE_early_puts(char *s);
++#define bsd_init_kprintf(x...) PE_early_puts((char *)("bsd_init: " x))
+ 
+ 	throttle_init();
+ 
+@@ -758,17 +762,19 @@ bsd_init(void)
+ 	bsd_init_kprintf("calling sysctl_mib_init\n");
+ 	sysctl_mib_init();
+ #if NETWORKING
+-	bsd_init_kprintf("calling dlil_init\n");
+-	dlil_init();
+-	bsd_init_kprintf("calling proto_kpi_init\n");
+-	proto_kpi_init();
++	/* krillin/MT6582 (M42): saltar la init de RED entera. dlil_init cuelga
++	 * (crea el hilo de input con affinity de processor-set, fragil en el
++	 * bring-up de 1 CPU) y la red no hace falta para el montaje de root local.
++	 * loopattach/ether_family_init/net_init_run dependen de dlil -> tambien. */
++	bsd_init_kprintf("SKIP dlil_init/proto_kpi (red no necesaria)\n");
++	/* dlil_init(); */
++	/* proto_kpi_init(); */
+ #endif /* NETWORKING */
+ #if SOCKETS
+-	bsd_init_kprintf("calling socketinit\n");
+-	socketinit();
+-	bsd_init_kprintf("calling domaininit\n");
+-	domaininit();
+-	iptap_init();
++	bsd_init_kprintf("SKIP socketinit/domaininit (red)\n");
++	/* socketinit(); */
++	/* domaininit(); */
++	/* iptap_init(); */
+ #endif /* SOCKETS */
+ 
+ 	kernproc->p_fd->fd_cdir = NULL;
+@@ -812,8 +818,8 @@ bsd_init(void)
+ 	 */
+ #include <loop.h>
+ #if NLOOP > 0
+-	bsd_init_kprintf("calling loopattach\n");
+-	loopattach();			/* XXX */
++	bsd_init_kprintf("SKIP loopattach (depende de dlil)\n");
++	/* loopattach(); */		/* XXX */
+ #endif
+ 
+ #if PFLOG
+@@ -823,19 +829,20 @@ bsd_init(void)
+ 
+ #if NETHER > 0
+ 	/* Register the built-in dlil ethernet interface family */
+-	bsd_init_kprintf("calling ether_family_init\n");
+-	ether_family_init();
++	bsd_init_kprintf("SKIP ether_family_init (depende de dlil)\n");
++	/* ether_family_init(); */
+ #endif /* ETHER */
+ 
+ #if NETWORKING
+ 	/* Call any kext code that wants to run just after network init */
+-	bsd_init_kprintf("calling net_init_run\n");
+-	net_init_run();
++	bsd_init_kprintf("SKIP net_init_run (red)\n");
++	/* net_init_run(); */
+ 	
+ 	/* register user tunnel kernel control handler */
+-	utun_register_control();
+-	netsrc_init();
+-	nstat_init();
++	/* krillin M42: dependen de dlil (saltado) */
++	/* utun_register_control(); */
++	/* netsrc_init(); */
++	/* nstat_init(); */
+ #endif /* NETWORKING */
+ 
+ 	bsd_init_kprintf("calling vnode_pager_bootstrap\n");
+@@ -850,6 +857,19 @@ bsd_init(void)
+ 	bsd_init_kprintf("calling inittodr\n");
+ 	inittodr(0);
+ 
++	/*
++	 * A partir de aqui la consola pasa a VERBOSE.  Lo que viene es la busqueda
++	 * del dispositivo raiz, y IOFindBSDRoot() informa por IOLog()/printf(),
++	 * que estaban silenciados: sus "Still waiting for root device" son
++	 * justamente lo que necesitamos ver.  Ya no hay riesgo de inundar la
++	 * pantalla con ruido, porque esto es el final del arranque.
++	 */
++	{
++		extern void PE_fb_verbose(void);
++		PE_fb_verbose();
++	}
++	bsd_init_kprintf("=== consola VERBOSE, buscando raiz ===\n");
++
+ 	/* Mount the root file system. */
+ 	while( TRUE) {
+ 		int err;
+@@ -1020,19 +1040,52 @@ lightning_bolt(__unused void *dummy)
+ kern_return_t
+ bsd_autoconf(void)
+ {
+-	kprintf("bsd_autoconf: calling kminit\n");
++	/*
++	 * Los kprintf() de aqui dentro estan silenciados en la consola del
++	 * pexpert (solo se abren durante un panic), asi que bsd_autoconf era una
++	 * caja negra.  Marcadores por PE_early_puts para ver cual de los tres
++	 * pasos muere: kminit (tty de consola), los pseudo-dispositivos, o
++	 * IOKitBSDInit (que busca el dispositivo RAIZ, y aqui no hay ninguno).
++	 */
++	bsd_init_kprintf("BA0 pre kminit\n");
+ 	kminit();
++	bsd_init_kprintf("BA1 kminit ok\n");
+ 
+ 	/* 
+ 	 * Early startup for bsd pseudodevices.
+ 	 */
+ 	{
+ 	    struct pseudo_init *pi;
+-	
+-	    for (pi = pseudo_inits; pi->ps_func; pi++)
++	    extern int bpf_init(int);
++	    int idx = 0;
++	    char mark[8];
++
++	    for (pi = pseudo_inits; pi->ps_func; pi++) {
++		/* marcador por entrada: la ultima impresa es la que muere */
++		mark[0] = 'P'; mark[1] = 'S';
++		mark[2] = (char) ('0' + idx);
++		mark[3] = '\n'; mark[4] = 0;
++		PE_early_puts(mark);   /* el macro concatena literales: aqui no vale */
++
++		/*
++		 * bpf (Berkeley Packet Filter) es un pseudo-dispositivo de RED.
++		 * Este build salta a proposito dlil_init/proto_kpi y
++		 * socketinit/domaininit, asi que bpf_init correria contra un
++		 * subsistema de red SIN INICIALIZAR.  Saltarlo es lo coherente.
++		 */
++		if (pi->ps_func == bpf_init) {
++		    bsd_init_kprintf("   bpf SALTADO (red off)\n");
++		    idx++;
++		    continue;
++		}
++
+ 		(*pi->ps_func) (pi->ps_count);
++		idx++;
++	    }
+ 	}
++	bsd_init_kprintf("BA2 pseudo_inits ok\n");
+ 
++	bsd_init_kprintf("BA3 -> IOKitBSDInit (busca raiz)\n");
+ 	return( IOKitBSDInit());
+ }
+ 
+@@ -1050,7 +1103,9 @@ setconf(void)
+ 	 * which needs to be under network funnel. Right thing to do
+ 	 * here is to drop the funnel alltogether and regrab it afterwards
+ 	 */
++	bsd_init_kprintf("SC0 -> IOFindBSDRoot (espera dispositivo raiz)\n");
+ 	err = IOFindBSDRoot(rootdevice, sizeof(rootdevice), &rootdev, &flags);
++	bsd_init_kprintf("SC1 IOFindBSDRoot RETURNED\n");
+ 	if( err) {
+ 		printf("setconf: IOFindBSDRoot returned an error (%d);"
+ 			"setting rootdevice to 'sd0a'.\n", err); /* XXX DEBUG TEMP */
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+index eae4a73..91512cb 100644
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -3374,6 +3374,8 @@ handle_mac_transition:
+ 	/* Update the process' identity version and set the security token */
+ 	p->p_idversion++;
+ 	set_security_token(p);
++	{ extern void PE_early_puts(char *s); PE_early_puts("LP 4 security token ok\n"); }
++
+ 
+ 	return(error);
+ }
+@@ -3512,9 +3514,66 @@ load_init_program(proc_t p)
+ 
+     kprintf("attempting to start init of %s\n", init_program_name);
+ 
+-	(void) copyout((caddr_t) init_program_name, CAST_USER_ADDR_T(init_addr),
++	/* krillin M69: aislar el cuelgue del copyout a 0x1000. Test de acceso
++	 * PRIVILEGIADO (str/ldr normal) a 0x1000 antes del copyout (strt=unpriv). */
++	kprintf("LP0 pre-copyout init_addr=%llx len=%u\n",
++			(uint64_t)init_addr, (unsigned)sizeof(init_program_name)+1);
++	{
++		/* M71: el despacho de fault esta roto con la pmap de usuario activa.
++		 * Volcamos VBAR (base de vectores), TTBCR (split TTBR0/1), TTBR0/1 y
++		 * SCTLR. Si VBAR < 0x40000000 -> vive en rango TTBR0 y la L1 de usuario
++		 * no lo mapea = double-fault. Sin acceso que falle: solo lee CP15. */
++		uint32_t __vbar=0,__sctlr=0,__ttbcr=0,__ttbr0=0,__ttbr1=0;
++		__asm__ volatile("mrc p15,0,%0,c12,c0,0":"=r"(__vbar));
++		__asm__ volatile("mrc p15,0,%0,c1,c0,0":"=r"(__sctlr));
++		__asm__ volatile("mrc p15,0,%0,c2,c0,2":"=r"(__ttbcr));
++		__asm__ volatile("mrc p15,0,%0,c2,c0,0":"=r"(__ttbr0));
++		__asm__ volatile("mrc p15,0,%0,c2,c0,1":"=r"(__ttbr1));
++		kprintf("REGS VBAR=%x SCTLR=%x TTBCR=%x TTBR0=%x TTBR1=%x\n",
++				__vbar,__sctlr,__ttbcr,__ttbr0,__ttbr1);
++	}
++	{
++		/* M74: volcar el descriptor L1 de la pmap de usuario (phys 0x82fb4000).
++		 * Entrada 0 = 0x1000, entrada 768 = 0x30000000. Si es no-nulo apuntando
++		 * a un L2/seccion en RAM muerta -> el walk cuelga. Lo leemos desde el
++		 * kernel via phys_to_virt = (p - gPhysBase) + gVirtBase. */
++		extern unsigned long gPhysBase, gVirtBase;
++		volatile unsigned int *__l1 =
++			(volatile unsigned int *)((0x82fb4000UL - gPhysBase) + gVirtBase);
++		kprintf("L1DUMP gPB=%lx gVB=%lx l1va=%p\n", gPhysBase, gVirtBase, __l1);
++		kprintf("L1DUMP [0]=%08x [1]=%08x [2]=%08x [768]=%08x\n",
++				__l1[0], __l1[1], __l1[2], __l1[0x300]);
++	}
++	{
++		/* M75: ¿la pila de kernel (SVC sp) esta por debajo de 0x40000000?
++		 * Con TTBCR=2 eso la traduce TTBR0 (pmap de usuario) -> al fallar el
++		 * copyout, el handler de abort escribe ahi y DOUBLE-FAULTEA. */
++		unsigned int __sp = 0, __far = 0;
++		__asm__ volatile("mov %0, sp":"=r"(__sp));
++		/* tambien: donde vive intstack/el mapa de kernel bajo? */
++		kprintf("KSTACK sp=%08x (si <40000000 -> TTBR0 = BUG)\n", __sp);
++		(void)__far;
++	}
++	{
++		/* M76: hipotesis coherencia. Flush (DCCMVAC) de la L1 de usuario a RAM
++		 * para que el table-walk del MMU (inner-NC) la vea = a la CPU. Si tras
++		 * esto el fault de 0x1000 despacha (FALLO/vm_fault) o el copyout
++		 * completa -> era incoherencia de tablas (SMP/SCU off). */
++		extern unsigned long gPhysBase, gVirtBase;
++		char *__l1b = (char *)((0x82fb4000UL - gPhysBase) + gVirtBase);
++		int __i;
++		for (__i = 0; __i < 0x1000; __i += 32)
++			__asm__ volatile("mcr p15,0,%0,c7,c10,1"::"r"(__l1b+__i)); /* DCCMVAC */
++		__asm__ volatile("dsb");
++		kprintf("FLUSH L1 usuario a RAM hecho\n");
++	}
++	{
++		int __cerr = copyout((caddr_t) init_program_name, CAST_USER_ADDR_T(init_addr),
+ 			(unsigned) sizeof(init_program_name)+1);
++		kprintf("LP0b copyout RET=%d\n", __cerr);
++	}
+ 
++	{ extern void PE_early_puts(char *s); PE_early_puts("LP 1 copyout nombre ok\n"); }
+ 	argv[argc++] = (uint32_t)init_addr;
+ 	init_addr += sizeof(init_program_name);
+ 	init_addr = (vm_offset_t)ROUND_PTR(char, init_addr);
+@@ -3535,6 +3594,7 @@ load_init_program(proc_t p)
+ 		init_addr = (vm_offset_t)ROUND_PTR(char, init_addr);
+ 	}
+ 
++	{ extern void PE_early_puts(char *s); PE_early_puts("LP 2 args -s ok\n"); }
+ 	/*
+ 	 * Null-end the argument list
+ 	 */
+@@ -3546,6 +3606,7 @@ load_init_program(proc_t p)
+ 	(void) copyout((caddr_t) argv, CAST_USER_ADDR_T(init_addr),
+ 			(unsigned) sizeof(argv));
+ 
++	{ extern void PE_early_puts(char *s); PE_early_puts("LP 3 copyout argv ok\n"); }
+ 	/*
+ 	 * Set up argument block for fake call to execve.
+ 	 */
+@@ -3559,10 +3620,20 @@ load_init_program(proc_t p)
+ 	 */
+ 	set_security_token(p);
+ 
++	{
++		extern void PE_early_puts(char *s);
++		PE_early_puts("\n*** LI0: execve /sbin/launchd (proceso 1) ***\n");
++	}
++
+ 	error = execve(p,&init_exec_args,retval);
+ 	if (error)
+ 		panic("Process 1 exec of %s failed, errno %d",
+ 		      init_program_name, error);
++
++	{
++		extern void PE_early_puts(char *s);
++		PE_early_puts("*** LI1: launchd EN EJECUCION ***\n");
++	}
+ }
+ 
+ /*
+diff --git a/iokit/Drivers/KernelBuiltIn/ARM/AppleARMPlatform/AppleARMIO.cpp b/iokit/Drivers/KernelBuiltIn/ARM/AppleARMPlatform/AppleARMIO.cpp
+index d0421d1..3dac82e 100644
+--- a/iokit/Drivers/KernelBuiltIn/ARM/AppleARMPlatform/AppleARMIO.cpp
++++ b/iokit/Drivers/KernelBuiltIn/ARM/AppleARMPlatform/AppleARMIO.cpp
+@@ -24,9 +24,11 @@ OSMetaClassDefineReservedUnused(AppleARMIOBus, 3);
+ /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+ 
+ extern const IORegistryPlane *gIODTPlane;
++extern "C" void PE_early_puts(char *s);   /* consola fb del krillin (marcadores M-iokit) */
+ 
+ bool AppleARMIOBus::start(IOService * provider)
+ {
++    PE_early_puts("IO1 AppleARMIOBus::start (arm-io matched!)\n");
+     if (!super::start(provider))
+         return (false);
+ 
+diff --git a/iokit/Kernel/IOStartIOKit.cpp b/iokit/Kernel/IOStartIOKit.cpp
+index 838544d..592b561 100644
+--- a/iokit/Kernel/IOStartIOKit.cpp
++++ b/iokit/Kernel/IOStartIOKit.cpp
+@@ -63,7 +63,12 @@ void IOKitInitializeTime( void )
+ 	t.tv_sec = 2;
+ 	t.tv_nsec = 0;
+ 
+-	IOService::waitForService(IOService::resourceMatching("IORTC"), &t );
++	/* krillin/MT6582 (M41): el port no tiene driver IORTC, y el timeout de
++	 * waitForService necesita el calendario que se inicializa AQUI mismo
++	 * (huevo/gallina) -> espera infinita.  Lo saltamos; el calendario arranca
++	 * en epoch 0, irrelevante para el arranque. */
++	(void)t;
++	/* IOService::waitForService(IOService::resourceMatching("IORTC"), &t ); */
+ #if defined(__i386__) || defined(__x86_64__)
+ 	IOService::waitForService(IOService::resourceMatching("IONVRAM"), &t );
+ #endif
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+index 9efb8bf..731e5ed 100644
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -42,7 +42,16 @@ const char * gIOKernelConfigTables =
+ #ifdef __arm__
+ "   {"
+ "     'IOClass'         = AppleARMPE;"
+-"     'IONameMatch'     = 'AppleARM';"
++/*
++ * krillin (MT6582): AppleARMPE es el platform expert generico de ARM y
++ * acepta cualquier plataforma (su probe() devuelve this sin condiciones),
++ * pero solo se le ofrece si el nombre casa.  La raiz de nuestro DeviceTree
++ * se llama "mediatek,mt6582", asi que no casaba y el unico candidato que
++ * quedaba era IOPanicPlatform (IOProbeScore 0, comodin de ultimo recurso),
++ * cuyo start() solo sabe hacer una cosa:
++ *   panic("Unable to find driver for this platform: \"%s\".")
++ */
++"     'IONameMatch'     = ('AppleARM', 'mediatek,mt6582');"
+ "     'IOProviderClass' = IOPlatformExpertDevice;"
+ "     'IOProbeScore'    = 1:32;"
+ "   },"
+diff --git a/libkern/c++/OSRuntime.cpp b/libkern/c++/OSRuntime.cpp
+index d16fa34..9af0c4f 100644
+--- a/libkern/c++/OSRuntime.cpp
++++ b/libkern/c++/OSRuntime.cpp
+@@ -218,6 +218,8 @@ kern_os_malloc_size(void * addr)
+ *********************************************************************/
+ #if __GNUC__ >= 3
+ void __cxa_pure_virtual( void )    { panic("%s", __FUNCTION__); }
++/* stub: en el kernel no hay descarga ordenada de destructores estaticos */
++int __cxa_atexit(void (*func)(void*), void *arg, void *dso) { (void)func; (void)arg; (void)dso; return 0; }
+ #else
+ void __pure_virtual( void )        { panic("%s", __FUNCTION__); }
+ #endif
+diff --git a/libkern/kxld/kxld_object.h b/libkern/kxld/kxld_object.h
+index ab78f20..a6d8c88 100644
+--- a/libkern/kxld/kxld_object.h
++++ b/libkern/kxld/kxld_object.h
+@@ -56,7 +56,7 @@ kern_return_t kxld_object_init_from_macho(KXLDObject *object,
+     u_char *file, u_long size, const char *name,
+     struct kxld_array *section_order,
+     cpu_type_t cputype, cpu_subtype_t cpusubtype, KXLDFlags flags)
+-    __attribute__((nonnull(1,2,4) visibility("hidden")));
++    __attribute__((nonnull(1,2,4), visibility("hidden")));
+ 
+ void kxld_object_clear(KXLDObject *object)
+     __attribute__((nonnull, visibility("hidden")));
+diff --git a/makedefs/MakeInc.def b/makedefs/MakeInc.def
+index ee67e78..68f390e 100644
+--- a/makedefs/MakeInc.def
++++ b/makedefs/MakeInc.def
+@@ -121,7 +121,7 @@ endif
+ export SUPPORTED_I386_MACHINE_CONFIGS := DEFAULT
+ export SUPPORTED_X86_64_MACHINE_CONFIGS := DEFAULT
+ export SUPPORTED_ARM_MACHINE_CONFIGS := S5L8920X S5L8922X S5L8930X ARMPBA8 SUN4I OMAP3530 OMAP335X RASPBERRYPI \
+-					OMAP3430_RX51 ARM_RVEB_V6 S5L8720X S5L8900XRB MSM8960_TOUCHPAD IMX53
++					OMAP3430_RX51 ARM_RVEB_V6 S5L8720X S5L8900XRB MSM8960_TOUCHPAD IMX53 MT6582
+ export SUPPORTED_ARM64_MACHINE_CONFIGS := DEFAULT VEXPRESS 
+ 
+ #
+@@ -321,6 +321,7 @@ ARCH_FLAGS_ARM_OMAP3430_RX51 = -arch armv7
+ ARCH_FLAGS_ARM_OMAP335X	= -arch armv7
+ ARCH_FLAGS_ARM_ARMPBA8	= -arch armv7
+ ARCH_FLAGS_ARM_MSM8960_TOUCHPAD	= -arch armv7
++ARCH_FLAGS_ARM_MT6582	= -arch armv7
+ ARCH_FLAGS_ARM_RASPBERRYPI	= -arch armv6
+ ARCH_FLAGS_ARM_ARM_RVEB_V6	= -arch armv6
+ ARCH_FLAGS_ARM_IMX53		= -arch armv7
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+index c44b7c6..76dccdc 100644
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -73,7 +73,7 @@ void arm_init(boot_args * args)
+     thread_t thread;
+ 
+     /*
+-     * We are in. 
++     * We are in.  (M6: PE_early_puts -> consola de framebuffer del krillin.)
+      */
+     PE_early_puts("arm_init: starting up\n");
+ 
+@@ -130,16 +130,17 @@ void arm_init(boot_args * args)
+     /*
+      * Initialize the ARM platform expert. 
+      */
+-    PE_early_puts("arm_init: calling PE_init_platform\n");
++    PE_early_puts("PE_init_platform(1)\n");
+     PE_init_platform(FALSE, (void *) args);
+ 
+     /*
+-     * Initialize kprintf, but no VM is running yet. 
++     * Initialize kprintf, but no VM is running yet.
+      */
++    PE_early_puts("PE_init_kprintf\n");
+     PE_init_kprintf(FALSE);
+ 
+     /*
+-     * Set maximum memory size based on boot-args. 
++     * Set maximum memory size based on boot-args.
+      */
+     if (!PE_parse_boot_argn("maxmem", &baMaxMem, sizeof(baMaxMem)))
+         maxMem = 0;
+@@ -147,19 +148,25 @@ void arm_init(boot_args * args)
+         maxMem = (uint64_t) baMaxMem *(1024 * 1024);
+ 
+     /*
+-     * After this, we'll no longer be using physical mappings created by the bootloader. 
++     * After this, we'll no longer be using physical mappings created by the bootloader.
+      */
++    PE_early_puts("arm_vm_init...\n");
+     arm_vm_init(maxMem, args);
++    PE_early_puts("arm_vm_init DONE\n");
+ 
+     /*
+      * Kernel early bootstrap. 
+      */
++    PE_early_puts("A1 pre earlyboot\n");
+     kernel_early_bootstrap();
++    PE_early_puts("A2 post earlyboot\n");
+ 
+     /*
+      * PE platform init. 
+      */
+     PE_init_platform(TRUE, (void *) args);
++    PE_early_puts("A3 PE_init done\n");
++
+ 
+     /*
+      * Enable I+D cache. 
+@@ -172,6 +179,7 @@ void arm_init(boot_args * args)
+         kprintf("cache: initializing i+dcache ... ");
+         cache_initialize();
+         kprintf("done\n");
++        PE_fb_refresh();   /* barre el residuo cacheado del framebuffer */
+     }
+ 
+     /*
+@@ -193,6 +201,7 @@ void arm_init(boot_args * args)
+     /*
+      * Start system timers.
+      */
++    PE_early_puts("A4 timers\n");
+     thread = current_thread();
+     thread->machine.preempt_count = 1;
+     thread->machine.cpu_data = cpu_datap(cpu_number());
+@@ -202,12 +211,16 @@ void arm_init(boot_args * args)
+     /*
+      * Processor identification.
+      */
++    PE_early_puts("A5 cpuid\n");
+     arm_processor_identify();
++    PE_early_puts("A6 cpuid ok\n");
+ 
+     /*
+      * VFP/float initialization. 
+      */
+     init_vfp();
++    PE_early_puts("A7 vfp ok\n");
++    PE_fb_refresh();
+ 
+     /*
+      * Machine startup. 
+diff --git a/osfmk/arm/arm_vm_init.c b/osfmk/arm/arm_vm_init.c
+index 94e02ae..eab82bc 100644
+--- a/osfmk/arm/arm_vm_init.c
++++ b/osfmk/arm/arm_vm_init.c
+@@ -303,6 +303,9 @@ static void verify_lowGlo(void)
+  * kprintf so that we can get out of semihosting debug output (if enabled)
+  * and onto an actual serial port or something. Whatever.
+  */
++extern void PE_early_puts(char *s);
++extern void PE_fb_cache_flush(void);
++
+ void arm_vm_init(uint32_t mem_limit, boot_args * args)
+ {
+     uint32_t gMemSize;
+@@ -400,15 +403,45 @@ void arm_vm_init(uint32_t mem_limit, boot_args * args)
+     first_avail += 1 * L1_SIZE; /* temporary..... */
+ #endif
+     avail_end = gPhysBase + gMemSize;
++    PE_early_puts("VM4 idmap ok\n");
+ 
+     /*
+      * Clean caches and flush TLBs.. 
+      */
+     kdb_printf("arm_vm_init: switching translation-tables now...\n");
++    /*
++     * MT6582_FB_MAP: identity-map the framebuffer (PA == VA) as device memory
++     * into the new L1, so the pexpert framebuffer console keeps working after
++     * the translation-table switch below.  Section descriptor bits:
++     *   0x400 = AP[1:0]=01 (privileged RW), 0x4 = B (device), 0x2 = section.
++     */
++    {
++        volatile uint32_t *l1_fb = (volatile uint32_t *)phys_to_virt(cpu_ttb);
++        uint32_t fbsect;
++        /* MMIO del UART0 (0x11002000): sin esto la consola serie muere en
++         * cuanto XNU instala sus tablas, igual que le pasaba al framebuffer. */
++        l1_fb[0x11000000 >> 20] =
++            (0x11000000 & L1_SECT_ADDR_MASK) | 0x400 | 0x4 | L1_TYPE_SECT;
++
++        for (fbsect = 0xBF400000; fbsect < 0xBF800000; fbsect += 0x100000)
++            l1_fb[fbsect >> 20] =
++                (fbsect & L1_SECT_ADDR_MASK) | 0x400 | 0x4 | L1_TYPE_SECT;
++    }
++
++    PE_early_puts("VM5 pre TT\n");
++
++    /* Echa de la cache el framebuffer ANTES de que el remapeo lo vuelva
++     * memoria device: si no, las lineas sucias se vuelcan mas tarde y
++     * corrompen la pantalla. */
++    PE_fb_cache_flush();
++
+     set_mmu_ttb(cpu_ttb);
+     set_mmu_ttb_alt(cpu_ttb);
+     set_mmu_ttbcr(2);
+     flush_mmu_tlb();
++    /* el identity-map del UART ya esta vivo: se puede hablar por serie */
++    { extern void PE_uart_enable(void); PE_uart_enable(); }
++    PE_early_puts("VM6 post TT OK - UART ON\n");
+ 
+     /*
+      * Set settings for pmap. 
+@@ -480,7 +513,9 @@ void arm_vm_init(uint32_t mem_limit, boot_args * args)
+      * Bootstrap pmap. 
+      */
+     uint32_t bootstrap_addr = managedBaseVA + 0x1000;
++    PE_early_puts("VM7 pre pmap\n");
+     pmap_bootstrap(gMemSize, (vm_offset_t *) & bootstrap_addr, 0);
++    PE_early_puts("VM8 post pmap OK\n");
+ 
+     /*
+      * Subsystems. 
+diff --git a/osfmk/arm/asm_help.h b/osfmk/arm/asm_help.h
+index 258b8fb..c0477c1 100644
+--- a/osfmk/arm/asm_help.h
++++ b/osfmk/arm/asm_help.h
+@@ -156,13 +156,13 @@
+     mrc     p15, 0, register, c13, c0, 4
+ 
+ #define IncrementPreemptLevel(register, scratch)                      \
+-    ldr     scratch, [register, MACHINE_THREAD_PREEMPT_COUNT]     ;   \
++    ldr     scratch, [register, #MACHINE_THREAD_PREEMPT_COUNT]     ;   \
+     adds    scratch, scratch, #1                                  ;   \
+-    str     scratch, [register, MACHINE_THREAD_PREEMPT_COUNT]     ;
++    str     scratch, [register, #MACHINE_THREAD_PREEMPT_COUNT]     ;
+ 
+ #define DecrementPreemptLevel(register, scratch)                      \
+-    ldr     scratch, [register, MACHINE_THREAD_PREEMPT_COUNT]     ;   \
++    ldr     scratch, [register, #MACHINE_THREAD_PREEMPT_COUNT]     ;   \
+     subs    scratch, scratch, #1                                  ;   \
+-    str     scratch, [register, MACHINE_THREAD_PREEMPT_COUNT]     ;
++    str     scratch, [register, #MACHINE_THREAD_PREEMPT_COUNT]     ;
+ 
+ #endif
+diff --git a/osfmk/arm/bcopyinout.s b/osfmk/arm/bcopyinout.s
+index ab024ef..75fa1f7 100644
+--- a/osfmk/arm/bcopyinout.s
++++ b/osfmk/arm/bcopyinout.s
+@@ -63,31 +63,31 @@ EnterARM(copyinmsg)
+     stmfd   sp!,{r10,r11,lr}
+     mov     r3, #0
+     LoadThreadRegister(r10)
+-    adr     r12, .Lcopyin_fault
+-    str     r12, [r10, TH_RECOVER]
+-    bl      .Lcopyin_guts
++    ldr     r12, =Lcopyin_fault
++    str     r12, [r10, #TH_RECOVER]
++    bl      Lcopyin_guts
+     mov     r11, #0
+-    str     r11, [r10, TH_RECOVER]
++    str     r11, [r10, #TH_RECOVER]
+     mov     r0, #0
+     ldmfd   sp!,{r10,r11,pc}
+ 
+-.Lcopyin_fault:
++Lcopyin_fault:
+     mov     r11, #0
+-    str     r11, [r10, TH_RECOVER]
++    str     r11, [r10, #TH_RECOVER]
+ 	mov	r0, #0xE    /* EFAULT */
+ 	cmp	r3, #0x00
+-	ldmgtfd	sp!, {r4-r7}		/* r3 > 0 Restore r4-r7 */
+-	ldmltfd	sp!, {r4-r9}		/* r3 < 0 Restore r4-r9 */
++	ldmfdgt	sp!, {r4-r7}		/* r3 > 0 Restore r4-r7 */
++	ldmfdlt	sp!, {r4-r9}		/* r3 < 0 Restore r4-r9 */
+ 	ldmfd	sp!, {r10-r11, pc}
+ 
+-.Lcopyin_guts:
++Lcopyin_guts:
+ 	pld	[r0]
+ 	/* Word-align the destination buffer */
+ 	ands	ip, r1, #0x03		/* Already word aligned? */
+-	beq	.Lcopyin_wordaligned	/* Yup */
++	beq	Lcopyin_wordaligned	/* Yup */
+ 	rsb	ip, ip, #0x04
+ 	cmp	r2, ip			/* Enough bytes left to align it? */
+-	blt	.Lcopyin_l4_2		/* Nope. Just copy bytewise */
++	blt	Lcopyin_l4_2		/* Nope. Just copy bytewise */
+ 	sub	r2, r2, ip
+ 	rsbs	ip, ip, #0x03
+ 	addne	pc, pc, ip, lsl #3
+@@ -102,15 +102,15 @@ EnterARM(copyinmsg)
+ 	RETeq
+ 
+ 	/* Destination buffer is now word aligned */
+-.Lcopyin_wordaligned:
++Lcopyin_wordaligned:
+ 	ands	ip, r0, #0x03		/* Is src also word-aligned? */
+-	bne	.Lcopyin_bad_align	/* Nope. Things just got bad */
++	bne	Lcopyin_bad_align	/* Nope. Things just got bad */
+ 	cmp	r2, #0x08		/* Less than 8 bytes remaining? */
+-	blt	.Lcopyin_w_less_than8
++	blt	Lcopyin_w_less_than8
+ 
+ 	/* Quad-align the destination buffer */
+ 	tst	r1, #0x07		/* Already quad aligned? */
+-	ldrnet	ip, [r0], #0x04
++	ldrtne	ip, [r0], #0x04
+ 	strne	ip, [r1], #0x04
+ 	subne	r2, r2, #0x04
+ 	stmfd	sp!, {r4-r9}		/* Free up some registers */
+@@ -118,10 +118,10 @@ EnterARM(copyinmsg)
+ 
+ 	/* Destination buffer quad aligned, source is word aligned */
+ 	subs	r2, r2, #0x80
+-	blt	.Lcopyin_w_lessthan128
++	blt	Lcopyin_w_lessthan128
+ 
+ 	/* Copy 128 bytes at a time */
+-.Lcopyin_w_loop128:
++Lcopyin_w_loop128:
+ 	ldrt	r4, [r0], #0x04		/* LD:00-03 */
+ 	ldrt	r5, [r0], #0x04		/* LD:04-07 */
+ 	pld	[r0, #0x18]		/* Prefetch 0x20 */
+@@ -175,17 +175,17 @@ EnterARM(copyinmsg)
+ 	strd	r8, [r1], #0x08		/* ST:70-77 */
+ 	subs	r2, r2, #0x80
+ 	strd	r4, [r1], #0x08		/* ST:78-7f */
+-	bge	.Lcopyin_w_loop128
++	bge	Lcopyin_w_loop128
+ 
+-.Lcopyin_w_lessthan128:
++Lcopyin_w_lessthan128:
+ 	adds	r2, r2, #0x80		/* Adjust for extra sub */
+-	ldmeqfd	sp!, {r4-r9}
++	ldmfdeq	sp!, {r4-r9}
+ 	RETeq
+ 	subs	r2, r2, #0x20
+-	blt	.Lcopyin_w_lessthan32
++	blt	Lcopyin_w_lessthan32
+ 
+ 	/* Copy 32 bytes at a time */
+-.Lcopyin_w_loop32:
++Lcopyin_w_loop32:
+ 	ldrt	r4, [r0], #0x04
+ 	ldrt	r5, [r0], #0x04
+ 	pld	[r0, #0x18]
+@@ -200,11 +200,11 @@ EnterARM(copyinmsg)
+ 	strd	r8, [r1], #0x08
+ 	subs	r2, r2, #0x20
+ 	strd	r4, [r1], #0x08
+-	bge	.Lcopyin_w_loop32
++	bge	Lcopyin_w_loop32
+ 
+-.Lcopyin_w_lessthan32:
++Lcopyin_w_lessthan32:
+ 	adds	r2, r2, #0x20		/* Adjust for extra sub */
+-	ldmeqfd	sp!, {r4-r9}
++	ldmfdeq	sp!, {r4-r9}
+ 	RETeq				/* Return now if done */
+ 
+ 	and	r4, r2, #0x18
+@@ -236,19 +236,19 @@ EnterARM(copyinmsg)
+ 	RETeq				/* Return now if done */
+ 	mov	r3, #0x00
+ 
+-.Lcopyin_w_less_than8:
++Lcopyin_w_less_than8:
+ 	subs	r2, r2, #0x04
+-	ldrget	ip, [r0], #0x04
++	ldrtge	ip, [r0], #0x04
+ 	strge	ip, [r1], #0x04
+ 	RETeq				/* Return now if done */
+ 	addlt	r2, r2, #0x04
+ 	ldrbt	ip, [r0], #0x01
+ 	cmp	r2, #0x02
+-	ldrgebt	r2, [r0], #0x01
++	ldrbtge	r2, [r0], #0x01
+ 	strb	ip, [r1], #0x01
+-	ldrgtbt	ip, [r0]
+-	strgeb	r2, [r1], #0x01
+-	strgtb	ip, [r1]
++	ldrbtgt	ip, [r0]
++	strbge	r2, [r1], #0x01
++	strbgt	ip, [r1]
+ 	RET
+ 
+ /*
+@@ -256,17 +256,17 @@ EnterARM(copyinmsg)
+  * The destination buffer (r1) is word aligned, but the source buffer
+  * (r0) is not.
+  */
+-.Lcopyin_bad_align:
++Lcopyin_bad_align:
+ 	stmfd	sp!, {r4-r7}
+ 	mov	r3, #0x01
+ 	bic	r0, r0, #0x03
+ 	cmp	ip, #2
+ 	ldrt	ip, [r0], #0x04
+-	bgt	.Lcopyin_bad3
+-	beq	.Lcopyin_bad2
+-	b	.Lcopyin_bad1
++	bgt	Lcopyin_bad3
++	beq	Lcopyin_bad2
++	b	Lcopyin_bad1
+ 
+-.Lcopyin_bad1_loop16:
++Lcopyin_bad1_loop16:
+ #ifdef __ARMEB__
+ 	mov	r4, ip, lsl #8
+ #else
+@@ -298,18 +298,18 @@ EnterARM(copyinmsg)
+ 	str	r5, [r1], #0x04
+ 	str	r6, [r1], #0x04
+ 	str	r7, [r1], #0x04
+-.Lcopyin_bad1:
++Lcopyin_bad1:
+ 	subs	r2, r2, #0x10
+-	bge	.Lcopyin_bad1_loop16
++	bge	Lcopyin_bad1_loop16
+ 
+ 	adds	r2, r2, #0x10
+-	ldmeqfd	sp!, {r4-r7}
++	ldmfdeq	sp!, {r4-r7}
+ 	RETeq				/* Return now if done */
+ 	subs	r2, r2, #0x04
+ 	sublt	r0, r0, #0x03
+-	blt	.Lcopyin_l4
++	blt	Lcopyin_l4
+ 
+-.Lcopyin_bad1_loop4:
++Lcopyin_bad1_loop4:
+ #ifdef __ARMEB__
+ 	mov	r4, ip, lsl #8
+ #else
+@@ -323,11 +323,11 @@ EnterARM(copyinmsg)
+ 	orr	r4, r4, ip, lsl #24
+ #endif
+ 	str	r4, [r1], #0x04
+-	bge	.Lcopyin_bad1_loop4
++	bge	Lcopyin_bad1_loop4
+ 	sub	r0, r0, #0x03
+-	b	.Lcopyin_l4
++	b	Lcopyin_l4
+ 
+-.Lcopyin_bad2_loop16:
++Lcopyin_bad2_loop16:
+ #ifdef __ARMEB__
+ 	mov	r4, ip, lsl #16
+ #else
+@@ -359,18 +359,18 @@ EnterARM(copyinmsg)
+ 	str	r5, [r1], #0x04
+ 	str	r6, [r1], #0x04
+ 	str	r7, [r1], #0x04
+-.Lcopyin_bad2:
++Lcopyin_bad2:
+ 	subs	r2, r2, #0x10
+-	bge	.Lcopyin_bad2_loop16
++	bge	Lcopyin_bad2_loop16
+ 
+ 	adds	r2, r2, #0x10
+-	ldmeqfd	sp!, {r4-r7}
++	ldmfdeq	sp!, {r4-r7}
+ 	RETeq				/* Return now if done */
+ 	subs	r2, r2, #0x04
+ 	sublt	r0, r0, #0x02
+-	blt	.Lcopyin_l4
++	blt	Lcopyin_l4
+ 
+-.Lcopyin_bad2_loop4:
++Lcopyin_bad2_loop4:
+ #ifdef __ARMEB__
+ 	mov	r4, ip, lsl #16
+ #else
+@@ -384,11 +384,11 @@ EnterARM(copyinmsg)
+ 	orr	r4, r4, ip, lsl #16
+ #endif
+ 	str	r4, [r1], #0x04
+-	bge	.Lcopyin_bad2_loop4
++	bge	Lcopyin_bad2_loop4
+ 	sub	r0, r0, #0x02
+-	b	.Lcopyin_l4
++	b	Lcopyin_l4
+ 
+-.Lcopyin_bad3_loop16:
++Lcopyin_bad3_loop16:
+ #ifdef __ARMEB__
+ 	mov	r4, ip, lsl #24
+ #else
+@@ -420,18 +420,18 @@ EnterARM(copyinmsg)
+ 	str	r5, [r1], #0x04
+ 	str	r6, [r1], #0x04
+ 	str	r7, [r1], #0x04
+-.Lcopyin_bad3:
++Lcopyin_bad3:
+ 	subs	r2, r2, #0x10
+-	bge	.Lcopyin_bad3_loop16
++	bge	Lcopyin_bad3_loop16
+ 
+ 	adds	r2, r2, #0x10
+-	ldmeqfd	sp!, {r4-r7}
++	ldmfdeq	sp!, {r4-r7}
+ 	RETeq				/* Return now if done */
+ 	subs	r2, r2, #0x04
+ 	sublt	r0, r0, #0x01
+-	blt	.Lcopyin_l4
++	blt	Lcopyin_l4
+ 
+-.Lcopyin_bad3_loop4:
++Lcopyin_bad3_loop4:
+ #ifdef __ARMEB__
+ 	mov	r4, ip, lsl #24
+ #else
+@@ -445,15 +445,15 @@ EnterARM(copyinmsg)
+ 	orr	r4, r4, ip, lsl #8
+ #endif
+ 	str	r4, [r1], #0x04
+-	bge	.Lcopyin_bad3_loop4
++	bge	Lcopyin_bad3_loop4
+ 	sub	r0, r0, #0x01
+ 
+-.Lcopyin_l4:
++Lcopyin_l4:
+ 	ldmfd	sp!, {r4-r7}
+ 	mov	r3, #0x00
+ 	adds	r2, r2, #0x04
+ 	RETeq
+-.Lcopyin_l4_2:
++Lcopyin_l4_2:
+ 	rsbs	r2, r2, #0x03
+ 	addne	pc, pc, r2, lsl #3
+ 	nop
+@@ -482,32 +482,32 @@ EnterARM(copyoutmsg)
+     stmfd sp!,{r10,r11,lr}
+     LoadThreadRegister(r10)
+     mov     r3, #0
+-    adr     r12, .Lcopyout_fault
+-    ldr     r11, [r10, TH_RECOVER]
+-    str     r12, [r10, TH_RECOVER]
+-    bl  .Lcopyout_guts
++    ldr     r12, =Lcopyout_fault
++    ldr     r11, [r10, #TH_RECOVER]
++    str     r12, [r10, #TH_RECOVER]
++    bl  Lcopyout_guts
+     mov     r11, #0
+-    str     r11, [r10, TH_RECOVER]
++    str     r11, [r10, #TH_RECOVER]
+     mov r0, #0
+     ldmfd   sp!,{r10,r11,pc}
+ 
+-.Lcopyout_fault:
++Lcopyout_fault:
+     mov     r11, #0
+-    str     r11, [r10, TH_RECOVER]
++    str     r11, [r10, #TH_RECOVER]
+ 	mov r0, #0x0e
+ 	cmp	r3, #0x00
+-	ldmgtfd	sp!, {r4-r7}		/* r3 > 0 Restore r4-r7 */
+-	ldmltfd	sp!, {r4-r9}		/* r3 < 0 Restore r4-r9 */
++	ldmfdgt	sp!, {r4-r7}		/* r3 > 0 Restore r4-r7 */
++	ldmfdlt	sp!, {r4-r9}		/* r3 < 0 Restore r4-r9 */
+ 	ldmfd	sp!, {r10-r11, pc}
+ 
+-.Lcopyout_guts:
++Lcopyout_guts:
+ 	pld	[r0]
+ 	/* Word-align the destination buffer */
+ 	ands	ip, r1, #0x03		/* Already word aligned? */
+-	beq	.Lcopyout_wordaligned	/* Yup */
++	beq	Lcopyout_wordaligned	/* Yup */
+ 	rsb	ip, ip, #0x04
+ 	cmp	r2, ip			/* Enough bytes left to align it? */
+-	blt	.Lcopyout_l4_2		/* Nope. Just copy bytewise */
++	blt	Lcopyout_l4_2		/* Nope. Just copy bytewise */
+ 	sub	r2, r2, ip
+ 	rsbs	ip, ip, #0x03
+ 	addne	pc, pc, ip, lsl #3
+@@ -522,27 +522,27 @@ EnterARM(copyoutmsg)
+ 	RETeq
+ 
+ 	/* Destination buffer is now word aligned */
+-.Lcopyout_wordaligned:
++Lcopyout_wordaligned:
+ 	ands	ip, r0, #0x03		/* Is src also word-aligned? */
+-	bne	.Lcopyout_bad_align	/* Nope. Things just got bad */
++	bne	Lcopyout_bad_align	/* Nope. Things just got bad */
+ 	cmp	r2, #0x08		/* Less than 8 bytes remaining? */
+-	blt	.Lcopyout_w_less_than8
++	blt	Lcopyout_w_less_than8
+ 
+ 	/* Quad-align the destination buffer */
+ 	tst	r0, #0x07		/* Already quad aligned? */
+ 	ldrne	ip, [r0], #0x04
+ 	subne	r2, r2, #0x04
+-	strnet	ip, [r1], #0x04
++	strtne	ip, [r1], #0x04
+ 	
+ 	stmfd	sp!, {r4-r9}		/* Free up some registers */
+ 	mov	r3, #-1			/* Signal restore r4-r9 */
+ 
+ 	/* Destination buffer word aligned, source is quad aligned */
+ 	subs	r2, r2, #0x80
+-	blt	.Lcopyout_w_lessthan128
++	blt	Lcopyout_w_lessthan128
+ 
+ 	/* Copy 128 bytes at a time */
+-.Lcopyout_w_loop128:
++Lcopyout_w_loop128:
+ 	ldrd	r4, [r0], #0x08		/* LD:00-07 */
+ 	pld	[r0, #0x18]		/* Prefetch 0x20 */
+ 	ldrd	r6, [r0], #0x08		/* LD:08-0f */
+@@ -596,17 +596,17 @@ EnterARM(copyoutmsg)
+ 	subs	r2, r2, #0x80
+ 	strt	r4, [r1], #0x04		/* ST:78-7b */
+ 	strt	r5, [r1], #0x04		/* ST:7c-7f */
+-	bge	.Lcopyout_w_loop128
++	bge	Lcopyout_w_loop128
+ 
+-.Lcopyout_w_lessthan128:
++Lcopyout_w_lessthan128:
+ 	adds	r2, r2, #0x80		/* Adjust for extra sub */
+-	ldmeqfd	sp!, {r4-r9}
++	ldmfdeq	sp!, {r4-r9}
+ 	RETeq				/* Return now if done */
+ 	subs	r2, r2, #0x20
+-	blt	.Lcopyout_w_lessthan32
++	blt	Lcopyout_w_lessthan32
+ 
+ 	/* Copy 32 bytes at a time */
+-.Lcopyout_w_loop32:
++Lcopyout_w_loop32:
+ 	ldrd	r4, [r0], #0x08
+ 	pld	[r0, #0x18]
+ 	ldrd	r6, [r0], #0x08
+@@ -621,11 +621,11 @@ EnterARM(copyoutmsg)
+ 	subs	r2, r2, #0x20
+ 	strt	r4, [r1], #0x04
+ 	strt	r5, [r1], #0x04
+-	bge	.Lcopyout_w_loop32
++	bge	Lcopyout_w_loop32
+ 
+-.Lcopyout_w_lessthan32:
++Lcopyout_w_lessthan32:
+ 	adds	r2, r2, #0x20		/* Adjust for extra sub */
+-	ldmeqfd	sp!, {r4-r9}
++	ldmfdeq	sp!, {r4-r9}
+ 	RETeq				/* Return now if done */
+ 
+ 	and	r4, r2, #0x18
+@@ -657,19 +657,19 @@ EnterARM(copyoutmsg)
+ 	RETeq				/* Return now if done */
+ 	mov	r3, #0x00
+ 
+-.Lcopyout_w_less_than8:
++Lcopyout_w_less_than8:
+ 	subs	r2, r2, #0x04
+ 	ldrge	ip, [r0], #0x04
+-	strget	ip, [r1], #0x04
++	strtge	ip, [r1], #0x04
+ 	RETeq				/* Return now if done */
+ 	addlt	r2, r2, #0x04
+ 	ldrb	ip, [r0], #0x01
+ 	cmp	r2, #0x02
+-	ldrgeb	r2, [r0], #0x01
++	ldrbge	r2, [r0], #0x01
+ 	strbt	ip, [r1], #0x01
+-	ldrgtb	ip, [r0]
+-	strgebt	r2, [r1], #0x01
+-	strgtbt	ip, [r1]
++	ldrbgt	ip, [r0]
++	strbtge	r2, [r1], #0x01
++	strbtgt	ip, [r1]
+ 	RET
+ 
+ /*
+@@ -677,17 +677,17 @@ EnterARM(copyoutmsg)
+  * The destination buffer (r1) is word aligned, but the source buffer
+  * (r0) is not.
+  */
+-.Lcopyout_bad_align:
++Lcopyout_bad_align:
+ 	stmfd	sp!, {r4-r7}
+ 	mov	r3, #0x01
+ 	bic	r0, r0, #0x03
+ 	cmp	ip, #2
+ 	ldr	ip, [r0], #0x04
+-	bgt	.Lcopyout_bad3
+-	beq	.Lcopyout_bad2
+-	b	.Lcopyout_bad1
++	bgt	Lcopyout_bad3
++	beq	Lcopyout_bad2
++	b	Lcopyout_bad1
+ 
+-.Lcopyout_bad1_loop16:
++Lcopyout_bad1_loop16:
+ #ifdef	__ARMEB__
+ 	mov	r4, ip, lsl #8
+ #else
+@@ -719,18 +719,18 @@ EnterARM(copyoutmsg)
+ 	strt	r5, [r1], #0x04
+ 	strt	r6, [r1], #0x04
+ 	strt	r7, [r1], #0x04
+-.Lcopyout_bad1:
++Lcopyout_bad1:
+ 	subs	r2, r2, #0x10
+-	bge	.Lcopyout_bad1_loop16
++	bge	Lcopyout_bad1_loop16
+ 
+ 	adds	r2, r2, #0x10
+-	ldmeqfd	sp!, {r4-r7}
++	ldmfdeq	sp!, {r4-r7}
+ 	RETeq				/* Return now if done */
+ 	subs	r2, r2, #0x04
+ 	sublt	r0, r0, #0x03
+-	blt	.Lcopyout_l4
++	blt	Lcopyout_l4
+ 
+-.Lcopyout_bad1_loop4:
++Lcopyout_bad1_loop4:
+ #ifdef __ARMEB__
+ 	mov	r4, ip, lsl #8
+ #else
+@@ -744,11 +744,11 @@ EnterARM(copyoutmsg)
+ 	orr	r4, r4, ip, lsl #24
+ #endif
+ 	strt	r4, [r1], #0x04
+-	bge	.Lcopyout_bad1_loop4
++	bge	Lcopyout_bad1_loop4
+ 	sub	r0, r0, #0x03
+-	b	.Lcopyout_l4
++	b	Lcopyout_l4
+ 
+-.Lcopyout_bad2_loop16:
++Lcopyout_bad2_loop16:
+ #ifdef __ARMEB__
+ 	mov	r4, ip, lsl #16
+ #else
+@@ -780,18 +780,18 @@ EnterARM(copyoutmsg)
+ 	strt	r5, [r1], #0x04
+ 	strt	r6, [r1], #0x04
+ 	strt	r7, [r1], #0x04
+-.Lcopyout_bad2:
++Lcopyout_bad2:
+ 	subs	r2, r2, #0x10
+-	bge	.Lcopyout_bad2_loop16
++	bge	Lcopyout_bad2_loop16
+ 
+ 	adds	r2, r2, #0x10
+-	ldmeqfd	sp!, {r4-r7}
++	ldmfdeq	sp!, {r4-r7}
+ 	RETeq				/* Return now if done */
+ 	subs	r2, r2, #0x04
+ 	sublt	r0, r0, #0x02
+-	blt	.Lcopyout_l4
++	blt	Lcopyout_l4
+ 
+-.Lcopyout_bad2_loop4:
++Lcopyout_bad2_loop4:
+ #ifdef __ARMEB__
+ 	mov	r4, ip, lsl #16
+ #else
+@@ -805,11 +805,11 @@ EnterARM(copyoutmsg)
+ 	orr	r4, r4, ip, lsl #16
+ #endif
+ 	strt	r4, [r1], #0x04
+-	bge	.Lcopyout_bad2_loop4
++	bge	Lcopyout_bad2_loop4
+ 	sub	r0, r0, #0x02
+-	b	.Lcopyout_l4
++	b	Lcopyout_l4
+ 
+-.Lcopyout_bad3_loop16:
++Lcopyout_bad3_loop16:
+ #ifdef __ARMEB__
+ 	mov	r4, ip, lsl #24
+ #else
+@@ -841,18 +841,18 @@ EnterARM(copyoutmsg)
+ 	strt	r5, [r1], #0x04
+ 	strt	r6, [r1], #0x04
+ 	strt	r7, [r1], #0x04
+-.Lcopyout_bad3:
++Lcopyout_bad3:
+ 	subs	r2, r2, #0x10
+-	bge	.Lcopyout_bad3_loop16
++	bge	Lcopyout_bad3_loop16
+ 
+ 	adds	r2, r2, #0x10
+-	ldmeqfd	sp!, {r4-r7}
++	ldmfdeq	sp!, {r4-r7}
+ 	RETeq				/* Return now if done */
+ 	subs	r2, r2, #0x04
+ 	sublt	r0, r0, #0x01
+-	blt	.Lcopyout_l4
++	blt	Lcopyout_l4
+ 
+-.Lcopyout_bad3_loop4:
++Lcopyout_bad3_loop4:
+ #ifdef __ARMEB__
+ 	mov	r4, ip, lsl #24
+ #else
+@@ -866,15 +866,15 @@ EnterARM(copyoutmsg)
+ 	orr	r4, r4, ip, lsl #8
+ #endif
+ 	strt	r4, [r1], #0x04
+-	bge	.Lcopyout_bad3_loop4
++	bge	Lcopyout_bad3_loop4
+ 	sub	r0, r0, #0x01
+ 
+-.Lcopyout_l4:
++Lcopyout_l4:
+ 	ldmfd	sp!, {r4-r7}
+ 	mov	r3, #0x00
+ 	adds	r2, r2, #0x04
+ 	RETeq
+-.Lcopyout_l4_2:
++Lcopyout_l4_2:
+ 	rsbs	r2, r2, #0x03
+ 	addne	pc, pc, r2, lsl #3
+ 	nop
+@@ -946,8 +946,8 @@ EnterARM(copyinstr)
+ 
+    LoadThreadRegister(r4)
+ 
+-	adr	r5, .Lcopystrfault
+-	str	r5, [r4, TH_RECOVER]
++	ldr	r5, =Lcopystrfault
++	str	r5, [r4, #TH_RECOVER]
+ 
+ 1:	ldrbt	r5, [r0], #0x0001
+ 	add	r6, r6, #0x00000001
+@@ -957,7 +957,7 @@ EnterARM(copyinstr)
+ 	bne	1b
+ 
+ 	mov	r0, #0x00000000
+-	str	r0, [r4, TH_RECOVER]
++	str	r0, [r4, #TH_RECOVER]
+ 
+ 	teq	r5, #0x00000000
+ 	moveq	r0, #0x00000000
+@@ -987,8 +987,8 @@ EnterARM(copyoutstr)
+ 
+     LoadThreadRegister(r4)
+ 
+-	adr	r5, .Lcopystrfault
+-	str	r5, [r4, TH_RECOVER]
++	ldr	r5, =Lcopystrfault
++	str	r5, [r4, #TH_RECOVER]
+ 
+ 1:	ldrb	r5, [r0], #0x0001
+ 	add	r6, r6, #0x00000001
+@@ -998,7 +998,7 @@ EnterARM(copyoutstr)
+ 	bne	1b
+ 
+ 	mov	r0, #0x00000000
+-	str	r0, [r4, TH_RECOVER]
++	str	r0, [r4, #TH_RECOVER]
+ 
+ 	teq	r5, #0x00000000
+ 	moveq	r0, #0x00000000
+@@ -1011,37 +1011,37 @@ EnterARM(copyoutstr)
+ 	bx      lr
+ 
+ /* A fault occurred during the copy */
+-.Lcopystrfault:
++Lcopystrfault:
+ 	mov	r1, #0x00000000
+-	str	r1, [r4, TH_RECOVER]
++	str	r1, [r4, #TH_RECOVER]
+ 	RESTORE_REGS
+     bx      lr
+ 
+ copyio_kernel:
+ 	/* We're open to attack here since we don't really verify the addresses being copied... */
+     cmp     r2, #0x10
+-    blt     .Lcopyio_copy2
++    blt     Lcopyio_copy2
+     orr     r3, r0, r1
+     tst     r3, #3
+-    bne     .Lcopyio_copy2
++    bne     Lcopyio_copy2
+     sub     r2, r2, #8
+-.Lcopyio_copy8_loop:
++Lcopyio_copy8_loop:
+     ldr     r3, [r0], #4
+     ldr     r12, [r0], #4
+     str     r3, [r1], #4
+     str     r12, [r1], #4
+     subs    r2, r2, #8
+-    bge     .Lcopyio_copy8_loop
++    bge     Lcopyio_copy8_loop
+     adds    r2, r2, #8
+-    beq 	.Lcopyio_exit
+-.Lcopyio_copy2:
++    beq 	Lcopyio_exit
++Lcopyio_copy2:
+     subs    r2, r2, #2
+     ldrb    r3, [r0], #1
+-    ldrplb  r12, [r0], #1
++    ldrbpl  r12, [r0], #1
+     strb    r3, [r0], #1
+-    strplb  r12, [r1], #1
+-    bhi     .Lcopyio_copy2
+-.Lcopyio_exit:
++    strbpl  r12, [r1], #1
++    bhi     Lcopyio_copy2
++Lcopyio_exit:
+     movs    r0, #0
+     bx      lr
+ copyio_no_perms:
+@@ -1056,10 +1056,10 @@ copyio_no_perms:
+  */
+ EnterARM(copyinframe)
+ 	stmfd	sp!,{r4}
+-	adr 	r3, _copyinframe_error
++	ldr 	r3, =_copyinframe_error
+ 	LoadThreadRegister(r12)
+-	ldr 	r4, [r12, TH_RECOVER]
+-	str 	r3, [r12, TH_RECOVER]
++	ldr 	r4, [r12, #TH_RECOVER]
++	str 	r3, [r12, #TH_RECOVER]
+ 	ldmia	r0, {r2,r3}
+ 	stmia 	r1, {r2,r3}
+ _copyinframe_success:
+diff --git a/osfmk/arm/cswitch.s b/osfmk/arm/cswitch.s
+index 444ce5b..7645e57 100644
+--- a/osfmk/arm/cswitch.s
++++ b/osfmk/arm/cswitch.s
+@@ -43,7 +43,7 @@
+ EnterARM(Call_continuation)
+     /* Set the new stack pointer. */
+     LoadThreadRegister(r12)
+-    ldr     sp, [r12, TH_PCB_ISS]
++    ldr     sp, [r12, #TH_PCB_ISS]
+ 
+     /* Zero out frame pointer */
+     mov     r7, #0
+@@ -70,10 +70,10 @@ EnterARM(Call_continuation)
+ EnterARM(Switch_context)
+     /* Switch context to the new thread and save the continuation. */
+     teq     r1, #0
+-    strne   r1, [r0, TH_CONTINUATION]
++    strne   r1, [r0, #TH_CONTINUATION]
+ 
+     /* Only store registers if there is a continuation */
+-    ldreq   r3, [r0, TH_PCB_ISS]
++    ldreq   r3, [r0, #TH_PCB_ISS]
+     addeq   r3, r3, #16
+     stmiaeq r3!, {r4-lr}
+ 
+@@ -84,11 +84,11 @@ EnterARM(Switch_context)
+     /* Set old/new threads */
+     mcr     p15, 0, r2, c13, c0, 4
+ 
+-    ldr     r3, [r2, MACHINE_THREAD_CTHREAD_SELF]
++    ldr     r3, [r2, #MACHINE_THREAD_CTHREAD_SELF]
+     mcr     p15, 0, r3, c13, c0, 3
+ 
+     /* Load registers and go. */
+-    ldr     r3, [r2, TH_PCB_ISS]
++    ldr     r3, [r2, #TH_PCB_ISS]
+     add     r3, r3, #16
+     ldmia   r3!, {r4-lr}
+ 
+@@ -115,11 +115,11 @@ EnterARM(machine_load_context)
+     mcr     p15, 0, r0, c13, c0, 4
+ 
+     /* Set cthread value */
+-    ldr     r1, [r0, MACHINE_THREAD_CTHREAD_SELF]
++    ldr     r1, [r0, #MACHINE_THREAD_CTHREAD_SELF]
+     mrc     p15, 0, r2, c13, c0, 3
+ 
+     /* Load registers and go. */
+-    ldr     r3, [r0, TH_PCB_ISS]
++    ldr     r3, [r0, #TH_PCB_ISS]
+     mov     r0, #0
+ 
+     add     r3, r3, #16
+@@ -132,7 +132,7 @@ EnterARM(machine_load_context)
+ EnterARM(thread_syscall_return)
+     cpsid   i
+     LoadThreadRegister(r12)
+-    ldr     r4, [r12, TH_PCB_USS]
++    ldr     r4, [r12, #TH_PCB_USS]
+     str     r0, [r4]
+     b       thread_return_join
+ 
+@@ -150,8 +150,8 @@ thread_return_join:
+     /* Check for pending ast */
+     LoadThreadRegister(r12)
+ 
+-    ldr     r8, [r12, MACHINE_THREAD_CPU_DATA]
+-    ldr     r5, [r8, CPU_PENDING_AST]
++    ldr     r8, [r12, #MACHINE_THREAD_CPU_DATA]
++    ldr     r5, [r8, #CPU_PENDING_AST]
+ 
+     cmp     r5, #0
+     beq     return_to_user
+@@ -167,7 +167,7 @@ thread_return_join:
+ return_to_user:
+     /* Restore registers */
+     LoadThreadRegister(r12)
+-    ldr     sp, [r12, TH_PCB_USS]
++    ldr     sp, [r12, #TH_PCB_USS]
+     ldr     r0, [sp, #0x40]
+ 
+     msr     spsr_cxsf, r0
+diff --git a/osfmk/arm/hw_lock.s b/osfmk/arm/hw_lock.s
+index 263769e..8a92fee 100644
+--- a/osfmk/arm/hw_lock.s
++++ b/osfmk/arm/hw_lock.s
+@@ -76,7 +76,7 @@ EnterARM(hw_lock_lock)
+ hw_lock_lock_panic:
+     mov     r1, r0
+     ldr     r2, [r1]
+-    adr     r0, _panicString
++    ldr     r0, =_panicString
+     blx     _panic
+     b       .
+ _panicString:
+@@ -268,7 +268,7 @@ rwldstore:
+ rwldpanic:
+     mov         r2, r1
+     mov         r1, r0
+-    adr         r0, lckPanicString
++    ldr         r0, =lckPanicString
+     blx         _panic
+ lckPanicString:
+     .asciz "lck_rw_done(): lock (0x%08x: 0x%08x)"
+@@ -301,7 +301,7 @@ EnterARM(lck_rw_lock_shared_to_exclusive)
+ rwlsepanic:
+     mov         r1, r2
+     mov         r1, r0
+-    adr         r0, lckReadToWritePanicString
++    ldr         r0, =lckReadToWritePanicString
+     blx         _panic
+ lckReadToWritePanicString:
+     .asciz "lck_rw_lock_shared_to_exclusive(): lock (0x%08x 0x%08x)"
+@@ -341,7 +341,7 @@ EnterARM(lock_write_to_read)
+ rwlstexit:
+     mov         r2, r1
+     mov         r1, r0
+-    adr         r0, rwlstePanicString
++    ldr         r0, =rwlstePanicString
+     blx         _panic
+ rwlstePanicString:
+     .asciz "lck_rw_lock_exclusive_to_shared(): lock (0x%08x 0x%08x)"
+@@ -402,7 +402,7 @@ lmuret:
+ lmupanic:
+     mov         r1, r0
+     ldr         r2, [r1]
+-    adr         r0, lmuPanicString
++    ldr         r0, =lmuPanicString
+     blx         _panic
+ lmuPanicString:
+     .asciz      "lck_mtx_unlock(): mutex (0x%08x, 0x%08x)"
+@@ -463,7 +463,7 @@ mlckwait:
+ mlckpanic:
+     mov     r1, r0
+     ldr     r2, [r1]
+-    adr     r0, mlckpanicString
++    ldr     r0, =mlckpanicString
+     blx     _panic
+ mlckpanicString:
+     .asciz  "lck_mtx_lock(): mutex (0x%08x, 0x%08x)"
+@@ -525,7 +525,7 @@ lmtret:
+ lmtpanic:
+     mov         r1, r0
+     ldr         r2, [r1]
+-    adr         r0, lmtPanicString
++    ldr         r0, =lmtPanicString
+     blx         _panic
+ lmtPanicString:
+     .asciz "lck_mtx_try_lock(): mutex (0x%08x, 0x%08x)"
+@@ -542,7 +542,7 @@ EnterARM(lck_mtx_assert)
+     cmp     r3, r12
+     bxeq    lr
+     mov     r1, r0
+-    adr     r0, panicString_lockNotOwned
++    ldr     r0, =panicString_lockNotOwned
+     blx     _panic
+ lck_mtx_assert_owned:
+     cmp     r1, #2
+@@ -551,10 +551,10 @@ lck_mtx_assert_owned:
+     cmp     r3, r12
+     bxne    lr
+     mov     r1, r0
+-    adr     r0, panicString_lockOwned
++    ldr     r0, =panicString_lockOwned
+     blx     _panic
+ lck_mtx_assert_bad_arg:
+-    adr     r0, panicString_lockBadArgument
++    ldr     r0, =panicString_lockBadArgument
+     blx     _panic
+ 
+     .align 4
+@@ -605,7 +605,7 @@ rwtlsfail:
+ rwtlspanic:
+     mov     r2, r1
+     mov     r1, r0
+-    adr     r0, rwtlsPanicString
++    ldr     r0, =rwtlsPanicString
+     blx     _panic
+ rwtlsPanicString:
+     .asciz  "lck_rw_try_lock_shared: lock (0x%08x, 0x%08x)"
+@@ -642,7 +642,7 @@ rwtlefail:
+ rwtlepanic:
+     mov     r2, r1
+     mov     r1, r0
+-    adr     r0, rwtlePanicString
++    ldr     r0, =rwtlePanicString
+     blx     _panic
+ rwtlePanicString:
+     .asciz  "lck_rw_try_lock_exclusive: lock (0x%08x, 0x%08x)"
+@@ -662,7 +662,7 @@ EnterARM(hw_lock_bit)
+     bxeq    lr
+ hwlbitpanic:
+     mov     r0, r1
+-    adr     r0, hwlbitPanicString
++    ldr     r0, =hwlbitPanicString
+     blx     _panic
+ hwlbitPanicString:
+     .asciz "hw_lock_bit: lock 0x%08x"
+diff --git a/osfmk/arm/locore.s b/osfmk/arm/locore.s
+index 9f6a2ea..7ea9e01 100644
+--- a/osfmk/arm/locore.s
++++ b/osfmk/arm/locore.s
+@@ -50,6 +50,18 @@
+  */
+ 
+ EnterARM(_start)
++    /* PRUEBA DE VIDA (M3 debug): pintar el framebuffer del LK de BLANCO al entrar.
++     * Fisico 0xBF400000, MMU aun off. Si la pantalla se pone blanca -> XNU EJECUTA. */
++    movw    r4, #0x0000
++    movt    r4, #0xBF40          /* r4 = 0xBF400000 */
++    movw    r6, #0x0000
++    movt    r6, #0x0020          /* r6 = 0x200000 palabras (~2M px) */
++    mvn     r5, #0                /* r5 = 0xFFFFFFFF (blanco) */
++Lprobe_fill:
++    str     r5, [r4], #4
++    subs    r6, r6, #1
++    bne     Lprobe_fill
++    /* fin prueba de vida */
+     /* First, disable interrupts so that the BL doesn't get any. */
+     LOAD_ADDR(lr, arm_init)
+     cpsid   if
+@@ -140,11 +152,65 @@ map:
+     subs    r12, r12, #_1MB
+     bne     map
+ 
++    /* M4 FIX: RE-escribir el mapeo IDENTITY del PC actual DESPUES del bucle del
++     * mapa principal. En el MT6582 la DRAM fisica esta en 0x80000000 = virtBase,
++     * asi que el bucle sobreescribe la seccion del PC (0x810). Sin esto, al activar
++     * la MMU el fetch de la siguiente instruccion cae en una direccion mal mapeada
++     * y cuelga. r4=TTE base, r6=flags de seccion. */
++    mov     r7, pc, lsr#20
++    add     r5, r4, r7, lsl#2
++    mov     r7, r7, lsl#20
++    orr     r8, r7, r6
++    str     r8, [r5]
++
++    /* M4: mapear IDENTITY el framebuffer del LK (0xBF400000, 16 secciones=16MB)
++     * para que la consola de XNU pueda escribir tras la MMU. r4=TTE base, r6=flags. */
++    LoadConstantToReg((0xBF400000), r1)
++    mov     r7, r1, lsr#20
++    add     r5, r4, r7, lsl#2
++    mov     r9, #16
++Lmap_fb:
++    orr     r8, r1, r6
++    str     r8, [r5], #4
++    add     r1, r1, #_1MB
++    subs    r9, r9, #1
++    bne     Lmap_fb
++
++    /* M4 PRUEBA PRE-MMU (fisico): ROJO justo antes de activar la MMU.
++     * Si se ve rojo -> la tabla de paginas se monto sin fallar. */
++    push    {r4, r5, r6}
++    movw    r4, #0x0000
++    movt    r4, #0xBF40
++    movw    r6, #0x0000
++    movt    r6, #0x0020
++    movw    r5, #0x0000
++    movt    r5, #0x00FF          /* rojo 0x00FF0000 */
++Lprobe_red:
++    str     r5, [r4], #4
++    subs    r6, r6, #1
++    bne     Lprobe_red
++    pop     {r4, r5, r6}
++
+     /* Start MMU. */
+     mrc     p15, 0, r3, c1, c0, 0
+     orr     r3, r3, #1
+     mcr     p15, 0, r3, c1, c0, 0
+ 
++    /* M4 PRUEBA POST-ENABLE (MMU ya ON, ANTES del salto a virtual): VERDE-AZUL.
++     * fb mapeado identity. Si se ve -> la MMU activo bien; el fallo es el bx a virtual. */
++    push    {r4, r5, r6}
++    movw    r4, #0x0000
++    movt    r4, #0xBF40
++    movw    r6, #0x0000
++    movt    r6, #0x0020
++    movw    r5, #0xFFFF
++    movt    r5, #0x0000          /* 0x0000FFFF (cian en BGR) */
++Lprobe_cyan:
++    str     r5, [r4], #4
++    subs    r6, r6, #1
++    bne     Lprobe_cyan
++    pop     {r4, r5, r6}
++
+     /*
+      * Hopefully, if we got here, things are looking good and we
+      * are running in VM mode.
+@@ -154,12 +220,29 @@ map:
+       * xxx KASLR: we need to jump to a trampoline.
+       * The address in r3 is relative, we convert it to a KVA and jump.
+       */
+-    adr     r3, start_trampoline
+-    sub     r3, r3, r11
+-    add     r3, r3, r10
++    ldr     r3, =start_trampoline
++    /* M4 FIX: el kernel esta LINKADO en virtual (0x80000000-based) y el mapa
++     * principal mapea virtBase->physBase, asi que "ldr =start_trampoline" ya da
++     * la direccion VIRTUAL correcta. La conversion phys->virt original
++     * (sub physBase / add virtBase) la corrompe -> bx directo. */
+     bx      r3
+ start_trampoline:
+-    nop     
++    nop
++
++    /* M4 PRUEBA POST-MMU: pintar el fb de VERDE ya en modo virtual (MMU on).
++     * Si se ve verde -> MMU funciona, fb mapeado y XNU corre en virtual. */
++    push    {r0, r4, r5, r6}
++    movw    r4, #0x0000
++    movt    r4, #0xBF40
++    movw    r6, #0x0000
++    movt    r6, #0x0020
++    movw    r5, #0xFF00
++    movt    r5, #0x0000          /* verde 0x0000FF00 */
++Lprobe_green:
++    str     r5, [r4], #4
++    subs    r6, r6, #1
++    bne     Lprobe_green
++    pop     {r0, r4, r5, r6}
+ 
+ fix_boot_args_hack_for_bootkit:
+     /* Fix up boot-args */
+@@ -234,6 +317,20 @@ mmu_initialized:
+     /* Set up initial sp. */
+     LOAD_ADDR(sp, intstack_top)
+ 
++    /* M4->M5 PRUEBA PRE-arm_init: ROJO puro (RGB565 0xF800) justo antes de
++     * saltar a arm_init (C). Si se ve rojo -> _start asm completo, sp montado,
++     * lr=arm_init. r0(boot_args) y lr NO se tocan; r4/r5/r6 son scratch. */
++    movw    r4, #0x0000
++    movt    r4, #0xBF40          /* r4 = 0xBF400000 (fb, identity-mapped) */
++    movw    r6, #0x0000
++    movt    r6, #0x0020          /* r6 = 0x200000 palabras */
++    movw    r5, #0xF800
++    movt    r5, #0xF800          /* rojo puro RGB565: 0xF800F800 */
++Lprobe_pre_arminit:
++    str     r5, [r4], #4
++    subs    r6, r6, #1
++    bne     Lprobe_pre_arminit
++
+     /* Boot to ARM init. */
+     bx      lr
+ 
+@@ -278,7 +375,7 @@ EnterARM(sleep_test)
+ #endif
+ 
+     /* Jump to physical trampoline. */
+-    adr     r4, sleep_tramp
++    ldr     r4, =sleep_tramp
+     sub     r4, r4, r9
+     add     r4, r4, r8
+     bx      r4
+diff --git a/osfmk/arm/machine_routines.c b/osfmk/arm/machine_routines.c
+index 85fa6bd..1657668 100644
+--- a/osfmk/arm/machine_routines.c
++++ b/osfmk/arm/machine_routines.c
+@@ -293,7 +293,17 @@ void ml_install_interrupt_handler(void *nub, int source, void *target,
+ 
+     (void) ml_set_interrupts_enabled(current_state);
+ 
+-    initialize_screen(NULL, kPEAcquireScreen);
++    /*
++     * Este initialize_screen() arrancaba la consola vc_ a espaldas del
++     * pexpert: vc_ pinta sobre EL MISMO framebuffer con su propia geometria y
++     * superponia texto cizallado sobre la traza del arranque.  En el krillin
++     * la pantalla es del pexpert salvo que se pida -xnu-vc explicitamente.
++     */
++    {
++        char tempbuf[16];
++        if (PE_parse_boot_argn("-xnu-vc", tempbuf, sizeof(tempbuf)))
++            initialize_screen(NULL, kPEAcquireScreen);
++    }
+ }
+ 
+ /**
+diff --git a/osfmk/arm/machine_routines_asm.s b/osfmk/arm/machine_routines_asm.s
+index 9604835..6c4c3e3 100644
+--- a/osfmk/arm/machine_routines_asm.s
++++ b/osfmk/arm/machine_routines_asm.s
+@@ -65,15 +65,15 @@ EnterARM(machine_idle)
+ 
+     /* Disabled? We leave. */
+     teq     r0, #0
+-    beq     .Lmachine_idle_return
++    beq     Lmachine_idle_return
+ 
+     /* Disable all interrupts and go into wfi mode. */
+-.Lmachine_idle_wfi:
++Lmachine_idle_wfi:
+     cpsid   if
+     wfi
+     cpsie   if
+ 
+-.Lmachine_idle_return:
++Lmachine_idle_return:
+     bx      lr
+ 
+ /**
+@@ -310,7 +310,7 @@ EnterARM(Halt_system)
+     /* Disable interruptions. */
+     cpsid    if
+ 
+-.L_deadloop:
++L_deadloop:
+     /* Drain write buffer. */
+ #if __ARM_ARCH == 7
+     dsb      sy
+@@ -328,7 +328,7 @@ EnterARM(Halt_system)
+ #endif
+ 
+     /* Try again for a halt. */
+-    b        .L_deadloop
++    b        L_deadloop
+ 
+ LOAD_ADDR_GEN_DEF(do_power_save)
+ LOAD_ADDR_GEN_DEF(CurrentThread)
+diff --git a/osfmk/arm/mem_aliases.s b/osfmk/arm/mem_aliases.s
+new file mode 100644
+index 0000000..6951c95
+--- /dev/null
++++ b/osfmk/arm/mem_aliases.s
+@@ -0,0 +1,9 @@
++/* Alias para los thunks memcpy.N/memset.N que ld64-274.2 genera durante el link
++ * (interworking ARM). Apuntan a las implementaciones reales en bcopy.s / bzero.s. */
++.text
++.globl _memcpy.2
++.globl _memcpy.417
++.globl _memset.188
++.set _memcpy.2, _memcpy
++.set _memcpy.417, _memcpy
++.set _memset.188, _memset
+diff --git a/osfmk/arm/model_dep.c b/osfmk/arm/model_dep.c
+index ffc045a..d1f1b95 100644
+--- a/osfmk/arm/model_dep.c
++++ b/osfmk/arm/model_dep.c
+@@ -394,16 +394,99 @@ Debugger(
+     if (panicstr) {
+         disable_preemption();
+ 
++        { extern void PE_early_puts(char *s); PE_early_puts("\n*** PANIC ***\n"); }
++
+         /* Obtain current frame pointer */
+ #if defined (__arm__)
+         __asm__ volatile("mov %0, r7" : "=r" (stackptr));
+ #endif
+ 
+-        /* Print backtrace - callee is internally synchronized */
+-        panic_arm_backtrace(stackptr, 48, NULL, FALSE, NULL);
++        /* Backtrace corto: con 48 marcos el mensaje del panic se va de la
++         * pantalla por arriba, y el mensaje es lo que nos interesa. */
++        panic_arm_backtrace(stackptr, 12, NULL, FALSE, NULL);
++
++        /*
++         * draw_panic_dialog() repinta el framebuffer ENTERO con la imagen de
++         * pánico de XNU, borrando el mensaje y el backtrace que acabamos de
++         * escribir — es el "rojo plano" que tapaba el diagnóstico.  En el
++         * krillin la salida de pánico es texto por la consola del pexpert.
++         */
++        {
++            char tempbuf[16];
++            if (PE_parse_boot_argn("-xnu-vc", tempbuf, sizeof(tempbuf)))
++                draw_panic_dialog();
++        }
++
++        /*
++         * Y aqui se queda: repintando la consola en bucle.  Un panic no tiene
++         * vuelta atras, asi que lo unico que importa es que el mensaje y el
++         * backtrace SEAN VISIBLES.  Repintando sin parar, cualquier cosa que
++         * pinte encima dura un ciclo y queda tapada.
++         */
++        /*
++         * El motivo, AL FINAL.  El informe de panico de XNU (version, UUID,
++         * modelo, uptime) ocupa mas que las 28 lineas de pantalla y empuja la
++         * linea del panic() fuera por arriba — que es justo la unica que
++         * necesitamos.  Reimprimirla la ultima garantiza que se vea.
++         */
++        /*
++         * El motivo, AL FINAL y YA FORMATEADO.
++         *
++         * panicstr guarda la cadena de FORMATO sin expandir ("%s:%d Assertion
++         * failed: %s"), que dice el tipo de fallo pero no el fichero, la linea
++         * ni la condicion.  El texto expandido lo va acumulando debug_putc()
++         * en debug_buf, asi que es de ahi de donde hay que sacarlo.
++         *
++         * Solo las 2 primeras lineas: ahi esta el
++         * "panic(cpu N caller 0x...): fichero.c:LINEA Assertion failed: expr".
++         */
++        /*
++         * El motivo, AL FINAL y YA FORMATEADO.
++         *
++         * panicstr guarda la cadena de FORMATO sin expandir ("%s:%d Assertion
++         * failed: %s"): dice el tipo de fallo pero no el fichero, la linea ni
++         * la condicion.  El texto expandido lo acumula debug_putc() en
++         * debug_buf — pero OJO: debug_buf recoge TODO el kdb_printf del
++         * arranque entero desde el primer instante, no solo el panico.  Su
++         * comienzo es el volcado de boot_args de arm_vm_init.  El mensaje que
++         * buscamos esta al FINAL, asi que localizamos la ULTIMA aparicion de
++         * "panic(" y volcamos desde ahi.
++         */
++        PE_early_puts("\n*** MOTIVO DEL PANIC ***\n");
++        {
++            extern char debug_buf[];
++            extern char *debug_buf_ptr;
++            static char motivo[420];
++            char *q, *found = (char *) 0;
++            int i = 0;
++
++            for (q = debug_buf; q + 6 < debug_buf_ptr; q++) {
++                if (q[0] == 'p' && q[1] == 'a' && q[2] == 'n' &&
++                    q[3] == 'i' && q[4] == 'c' && q[5] == '(')
++                    found = q;
++            }
++            if (!found)
++                found = debug_buf;
++
++            for (q = found; q < debug_buf_ptr && i < (int) sizeof(motivo) - 1; q++) {
++                if (*q == '\n')
++                    motivo[i++] = ' ';
++                else if (*q >= 0x20 && *q <= 0x7e)
++                    motivo[i++] = *q;
++            }
++            motivo[i] = 0;
++            PE_early_puts(motivo);
++        }
++        PE_early_puts("\n*** fin ***\n");
++
++        {
++            extern void PE_fb_refresh(void);
+ 
+-        /* Draw panic dialog if needed */
+-        draw_panic_dialog();
++            PE_fb_refresh();        /* un solo repintado: sin parpadeo */
++            PE_early_puts("*** fin del panic - kernel detenido ***\n");
++            for (;;)
++                ;
++        }
+     }
+ 
+     /* Enter KDP if necessary. */
+@@ -428,9 +511,15 @@ extern void *manual_pkt;
+  *
+  * Configure core kernel variables and go to Mach kernel bootstrap.
+  */
++extern void PE_early_puts(char *s);
++extern void PE_fb_refresh(void);
++
+ void machine_startup(void)
+ {
++    PE_early_puts("MS entrada\n");
++    PE_fb_refresh();
+     machine_conf();
++    PE_early_puts("MS machine_conf ok\n");
+ 
+     if (PE_parse_boot_argn("debug", &debug_boot_arg, sizeof(debug_boot_arg))) {
+         panicDebugging = TRUE;
+@@ -464,6 +553,7 @@ void machine_startup(void)
+         active_debugger = 1;
+     }
+ 
++    PE_early_puts("MS pre kernel_bootstrap\n");
+     kernel_bootstrap();
+     return;
+ }
+diff --git a/osfmk/arm/param.h b/osfmk/arm/param.h
+index 2d4c0ee..a93e457 100644
+--- a/osfmk/arm/param.h
++++ b/osfmk/arm/param.h
+@@ -87,6 +87,11 @@
+ #define	M16KCLBYTES	(1 << M16KCLSHIFT)  /* size of a jumbo cluster */
+ 
+ #define	MCLOFSET	(MCLBYTES - 1)
++/* fallback CONFIG_NMBCLUSTERS: la seleccion por etiquetas del MASTER no lo emite
++ * para maquinas nuevas; usamos el valor <bsmall> del MASTER */
++#undef CONFIG_NMBCLUSTERS
++#define CONFIG_NMBCLUSTERS      ((1024 * 256) / MCLBYTES)
++
+ #ifndef NMBCLUSTERS
+ #define	NMBCLUSTERS	CONFIG_NMBCLUSTERS  /* cl map size */
+ #endif
+diff --git a/osfmk/arm/pmap.c b/osfmk/arm/pmap.c
+index 784e81d..4e5bd61 100644
+--- a/osfmk/arm/pmap.c
++++ b/osfmk/arm/pmap.c
+@@ -2207,6 +2207,18 @@ void pmap_switch(pmap_t new_pmap)
+         if (pmap_asid_ncpus) {
+             pmap_asid_activate(new_pmap, cpu_number());
+         }
++        {
++            extern void PE_early_puts(char *s);
++            extern void PE_early_puthex(unsigned int v);
++            static int nsw = 0;
++
++            if (nsw < 10) {
++                nsw++;
++                PE_early_puts("pmap_switch L1=");
++                PE_early_puthex((unsigned int) new_pmap->pm_l1_phys);
++                PE_early_puts("\n");
++            }
++        }
+         current_cpu_datap()->user_pmap = new_pmap;
+         arm_set_context_id(new_pmap->pm_asid & 0xFF);
+         arm_context_switch(new_pmap->pm_l1_phys);
+@@ -3549,17 +3561,37 @@ pmap_t pmap_create(ledger_t ledger, vm_map_size_t size, __unused boolean_t is_64
+         pmap_asid_initialize(our_pmap);
+ 
+     /*
+-     * Grab a new page and set the new L1 region.
++     * Reservar la L1 del pmap: 16 KB CONTIGUOS Y ALINEADOS A 16 KB.
++     *
++     * Antes esto era un simple pmap_grab_page(): una pagina suelta del VM,
++     * alineada solo a 4 KB.  El hardware toma la base de TTBR0 con alineacion
++     * de 16 KB (ignora los bits [13:12]), asi que con una L1 en, por ejemplo,
++     * 0x82f92000 la MMU caminaba desde 0x82f90000 — 8 KB mas abajo, donde no
++     * hay tabla.  Resultado: el kernel escribia descriptores perfectamente
++     * validos que el hardware no veia nunca, y toda direccion de USUARIO daba
++     * "fallo de traduccion de seccion".  Era loteria: solo funcionaba si la
++     * pagina caia por casualidad en un multiplo de 16 KB.
++     *
++     * cpm_allocate() con pnum_mask = 3 pide 4 paginas contiguas alineadas a
++     * 4 paginas, que es exactamente lo que exige TTBR0.  Con pm_l1_size ya al
++     * maximo (0x4000), pmap_expand_ttb() no tendra nunca que expandir.
+      */
+-    new_l1 = pmap_grab_page(our_pmap);
+-    our_pmap->pm_l1_phys = new_l1->phys_page << PAGE_SHIFT;
+-    our_pmap->pm_l1_virt = phys_to_virt(new_l1->phys_page << PAGE_SHIFT);
+-    bzero((void *)phys_to_virt(new_l1->phys_page << PAGE_SHIFT), PAGE_SIZE);
++    {
++        kern_return_t l1ret;
+ 
+-    /*
+-     * New pmaps have 4096 bytes of TTB area.
+-     */
+-    our_pmap->pm_l1_size = PAGE_SIZE;
++        l1ret = cpm_allocate(0x4000, &new_l1, 0, 3, FALSE, KMA_LOMEM);
++        if (l1ret != KERN_SUCCESS)
++            panic("pmap_create: no se pudo reservar una L1 alineada a 16KB");
++
++        our_pmap->pm_l1_phys = new_l1->phys_page << PAGE_SHIFT;
++        our_pmap->pm_l1_virt = phys_to_virt(our_pmap->pm_l1_phys);
++        bzero((void *) our_pmap->pm_l1_virt, 0x4000);
++        our_pmap->pm_l1_size = 0x4000;
++
++        if (our_pmap->pm_l1_phys & 0x3FFF)
++            panic("pmap_create: L1 sigue desalineada: 0x%08x",
++                  (unsigned int) our_pmap->pm_l1_phys);
++    }
+ 
+     /*
+      * Done.
+diff --git a/osfmk/arm/trap.c b/osfmk/arm/trap.c
+index 1c5533e..881a740 100644
+--- a/osfmk/arm/trap.c
++++ b/osfmk/arm/trap.c
+@@ -161,6 +161,8 @@ void sleh_fatal_exception(abort_information_context_t * arm_ctx, char *message)
+  * Handle prefetch and data aborts. (EXC_BAD_ACCESS IS NOT HERE YET)
+  */
+ static int __abort_count = 0;
++static uint32_t ttb0_saved;
++
+ void sleh_abort(void *context, int reason)
+ {
+     uint32_t dfsr = 0, dfar = 0, ifsr = 0, ifar = 0, cpsr, exception_type =
+@@ -175,6 +177,61 @@ void sleh_abort(void *context, int reason)
+ #if 0
+     kprintf("sleh_abort: pc %x lr %x far %x fsr %x psr %x\n", arm_ctx->pc, arm_ctx->lr, arm_ctx->far, arm_ctx->fsr, arm_ctx->cpsr);
+ #endif
++    /*
++     * Volcado de los primeros fallos.  Si launchd ejecuta y revienta, aqui se
++     * ve: cpsr con los bits de modo a 0x10 = fallo en MODO USUARIO, y pc/far
++     * dicen exactamente donde.  Es la otra mitad de la prueba de vida: o hay
++     * syscalls, o hay un fallo, o no vuelve nunca a modo usuario.
++     */
++    {
++        extern void PE_early_puts(char *s);
++        extern void PE_early_puthex(unsigned int v);
++        static int nfault = 0;
++
++        if (nfault < 8) {
++            nfault++;
++            PE_early_puts(reason == SLEH_ABORT_TYPE_DATA_ABORT
++                          ? "FALLO datos pc=" : "FALLO instr pc=");
++            PE_early_puthex(arm_ctx->pc);
++            PE_early_puts(" far=");  PE_early_puthex(arm_ctx->far);
++            PE_early_puts(" fsr=");  PE_early_puthex(arm_ctx->fsr);
++            PE_early_puts(" cpsr="); PE_early_puthex(arm_ctx->cpsr);
++            /*
++             * TTBR0 es la tabla que traduce el espacio de USUARIO (TTBCR=2 la
++             * pone a cargo de 0..0x3FFFFFFF).  Si aqui sale la tabla del
++             * kernel en vez del L1 del pmap del proceso, ninguna direccion de
++             * usuario puede resolverse jamas: ese seria el bug.
++             */
++            {
++                uint32_t ttb0 = 0;
++                __asm__ volatile ("mrc p15, 0, %0, c2, c0, 0" : "=r"(ttb0));
++                ttb0_saved = ttb0;
++                PE_early_puts(" TTBR0="); PE_early_puthex(ttb0);
++            }
++            /*
++             * Registros de control de la CAMINATA.  La entrada L1 es un
++             * descriptor de tabla VALIDO (0x...001): si el HW la hubiera
++             * leido, el fallo seria de pagina (FS=0x7), no de seccion
++             * (FS=0x5).  Pararse en nivel 1 significa que la MMU ni siquiera
++             * mira la tabla.  Sospechoso: TTBCR.PD0 (bit 4), que DESHABILITA
++             * las caminatas por TTBR0.  Tambien miramos DACR (dominios) y
++             * CONTEXTIDR (ASID).
++             */
++            {
++                uint32_t ttbcr = 0, dacr = 0, ctxid = 0, sctlr = 0;
++                __asm__ volatile ("mrc p15, 0, %0, c2, c0, 2" : "=r"(ttbcr));
++                __asm__ volatile ("mrc p15, 0, %0, c3, c0, 0" : "=r"(dacr));
++                __asm__ volatile ("mrc p15, 0, %0, c13, c0, 1" : "=r"(ctxid));
++                __asm__ volatile ("mrc p15, 0, %0, c1, c0, 0" : "=r"(sctlr));
++                PE_early_puts(" TTBCR="); PE_early_puthex(ttbcr);
++                PE_early_puts(" DACR=");  PE_early_puthex(dacr);
++                PE_early_puts(" CTX=");   PE_early_puthex(ctxid);
++                PE_early_puts(" SCTLR="); PE_early_puthex(sctlr);
++            }
++            PE_early_puts("\n");
++        }
++    }
++
+     if (reason == SLEH_ABORT_TYPE_DATA_ABORT) {
+         dfsr = arm_ctx->fsr;
+         dfar = arm_ctx->far;
+@@ -293,6 +350,259 @@ void sleh_abort(void *context, int reason)
+                              : (VM_PROT_READ), FALSE, THREAD_UNINT, NULL,
+                              vm_map_trunc_page(0));
+ 
++                /*
++                 * DIAGNOSTICO: vm_fault dice KERN_SUCCESS pero la instruccion
++                 * vuelve a fallar en bucle, y el codigo de fallo (FS=0x5,
++                 * seccion) dice que la entrada L1 sigue VACIA.  Dos candidatos:
++                 *
++                 *  (a) se esta faltando sobre un pmap DISTINTO del que tiene el
++                 *      hardware en TTBR0  -> pm_l1_phys != base de TTBR0
++                 *  (b) es el pmap correcto pero vm_fault no llega a llamar a
++                 *      pmap_enter        -> pm_l1_phys == TTBR0 y la TTE = 0
++                 */
++                {
++                    extern void PE_early_puts(char *s);
++                    extern void PE_early_puthex(unsigned int v);
++                    static int ndiag = 0;
++                    pmap_t fp = vm_map_pmap(map);
++
++                    if (ndiag < 4 && fp) {
++                        uint32_t tte = 0;
++                        ndiag++;
++                        PE_early_puts("  vm_fault code=");
++                        PE_early_puthex((unsigned int) code);
++                        PE_early_puts(" pmap_L1=");
++                        PE_early_puthex((unsigned int) fp->pm_l1_phys);
++                        if (fp->pm_l1_virt)
++                            tte = *(volatile uint32_t *)
++                                  (fp->pm_l1_virt + ((dfar >> 20) << 2));
++                        PE_early_puts(" TTE=");
++                        PE_early_puthex(tte);
++
++                        /*
++                         * La pregunta que queda: el software escribe la L1 por
++                         * pm_l1_virt y la MMU camina por pm_l1_phys.  Si esas
++                         * dos NO son la misma pagina fisica, escribimos en una
++                         * tabla y el hardware lee otra — que es exactamente lo
++                         * que se observa (TTE valida y aun asi fallo de
++                         * traduccion de seccion).  Comparamos l1v con
++                         * phys_to_virt(l1p) y releemos la TTE por la via
++                         * fisica: si difieren, esta cazado.
++                         */
++                        {
++                            uint32_t l1v = (uint32_t) fp->pm_l1_virt;
++                            uint32_t p2v = (uint32_t) phys_to_virt(fp->pm_l1_phys);
++                            uint32_t tte2 = 0;
++
++                            if (p2v)
++                                tte2 = *(volatile uint32_t *)
++                                       (p2v + ((dfar >> 20) << 2));
++
++                            PE_early_puts(" l1v=");     PE_early_puthex(l1v);
++                            PE_early_puts(" p2v=");     PE_early_puthex(p2v);
++                            PE_early_puts(" TTEfis="); PE_early_puthex(tte2);
++
++                            /*
++                             * PRUEBA DEL DESFASE DE UNA PAGINA.
++                             *
++                             * El mapa identidad se construye con
++                             *   l2_map_linear_range(.., gPhysBase - sectionOffset, ..)
++                             * o sea VA = PA - (gPhysBase - sectionOffset) + gVirtBase,
++                             * mientras que la macro dice
++                             *   phys_to_virt(p) = p - gPhysBase + gVirtBase.
++                             * Difieren en sectionOffset (0x1000): leer por VA
++                             * toca la pagina fisica ANTERIOR a la que camina
++                             * la MMU.  Releemos la TTE compensando el desfase:
++                             * si sale 0 (que es lo que ve el hardware) mientras
++                             * la otra sale valida, queda demostrado.
++                             */
++                            {
++                                extern uint32_t sectionOffset;
++                                uint32_t corr = l1v + sectionOffset;
++                                uint32_t ttec = *(volatile uint32_t *)
++                                                (corr + ((dfar >> 20) << 2));
++
++                                PE_early_puts(" secOff="); PE_early_puthex(sectionOffset);
++                                PE_early_puts(" TTEcorr="); PE_early_puthex(ttec);
++                            }
++
++                            /*
++                             * LECTURA SIN SUPOSICIONES.
++                             *
++                             * TTE, TTEfis y TTEcorr se leen todas via
++                             * phys_to_virt(): si esa macro no describe el mapa
++                             * real, las tres mienten IGUAL y coinciden entre
++                             * si — que es justo lo que pasa.  Aqui leemos la
++                             * memoria que camina la MMU sin usarla: creamos a
++                             * mano un mapeo de SECCION en la L1 del kernel
++                             * apuntando a la base fisica de TTBR0, leemos por
++                             * ahi, y lo deshacemos.
++                             *
++                             *   TTEhw == 0            -> la tabla real esta
++                             *      vacia: el kernel escribe en otro sitio.
++                             *   TTEhw == 0x82fc2001   -> el HW lee un
++                             *      descriptor valido y aun asi falla: no es
++                             *      un problema de tablas.
++                             */
++                            {
++                                uint32_t *kl1 = (uint32_t *) kernel_pmap->pm_l1_virt;
++                                uint32_t base = ttb0_saved & 0xFFFFF000;
++                                uint32_t idx  = 0xE00;          /* VA 0xE0000000 */
++                                uint32_t save = kl1[idx];
++                                uint32_t v;
++
++                                kl1[idx] = (base & 0xFFF00000) | 0x400 | 0x4 | 2;
++                                __asm__ volatile ("dsb" : : : "memory");
++                                __asm__ volatile ("mcr p15, 0, %0, c8, c7, 0"
++                                                  : : "r"(0) : "memory");
++                                __asm__ volatile ("dsb\n\tisb" : : : "memory");
++
++                                v = *(volatile uint32_t *)
++                                    (0xE0000000 + (base & 0x000FFFFF)
++                                     + ((dfar >> 20) << 2));
++
++                                kl1[idx] = save;
++                                __asm__ volatile ("dsb" : : : "memory");
++                                __asm__ volatile ("mcr p15, 0, %0, c8, c7, 0"
++                                                  : : "r"(0) : "memory");
++                                __asm__ volatile ("dsb\n\tisb" : : : "memory");
++
++                                PE_early_puts(" TTEhw="); PE_early_puthex(v);
++
++                                /*
++                                 * ALINEACION DE TTBR0.
++                                 *
++                                 * Con TTBCR.N=2 la base son los bits [31:12]
++                                 * (4KB).  Pero 0x82f92000 NO esta alineada a
++                                 * 16KB: si el HW toma [31:14], la base
++                                 * efectiva seria 0x82f90000 y leeria una
++                                 * entrada distinta — vacia — que es justo el
++                                 * fallo que vemos.  Leemos ahi tambien.
++                                 */
++                                {
++                                    uint32_t b16 = base & ~0x3FFFu;
++                                    uint32_t save2 = kl1[idx];
++                                    uint32_t v16;
++
++                                    kl1[idx] = (b16 & 0xFFF00000) | 0x400 | 0x4 | 2;
++                                    __asm__ volatile ("dsb" : : : "memory");
++                                    __asm__ volatile ("mcr p15, 0, %0, c8, c7, 0"
++                                                      : : "r"(0) : "memory");
++                                    __asm__ volatile ("dsb\n\tisb" : : : "memory");
++
++                                    v16 = *(volatile uint32_t *)
++                                          (0xE0000000 + (b16 & 0x000FFFFF)
++                                           + ((dfar >> 20) << 2));
++
++                                    kl1[idx] = save2;
++                                    __asm__ volatile ("dsb" : : : "memory");
++                                    __asm__ volatile ("mcr p15, 0, %0, c8, c7, 0"
++                                                      : : "r"(0) : "memory");
++                                    __asm__ volatile ("dsb\n\tisb" : : : "memory");
++
++                                    PE_early_puts(" align=");
++                                    PE_early_puthex(base & 0x3FFFu);
++                                    PE_early_puts(" TTE16k=");
++                                    PE_early_puthex(v16);
++
++                                    /*
++                                     * CONTENIDO DE LA L2.
++                                     *
++                                     * La L1 apunta a una tabla L2; nunca hemos
++                                     * mirado dentro.  Si la PTE de esta pagina
++                                     * esta VACIA, vm_fault devuelve exito sin
++                                     * mapear nada y el problema esta en la capa
++                                     * VM, no en la MMU.  Se lee por la misma
++                                     * ventana de seccion, sin phys_to_virt.
++                                     */
++                                    if ((v & 3) == 1) {
++                                        uint32_t l2b = v & 0xFFFFFC00u;
++                                        uint32_t sv  = kl1[idx];
++                                        uint32_t pte;
++
++                                        kl1[idx] = (l2b & 0xFFF00000) | 0x400 | 0x4 | 2;
++                                        __asm__ volatile ("dsb" : : : "memory");
++                                        __asm__ volatile ("mcr p15, 0, %0, c8, c7, 0"
++                                                          : : "r"(0) : "memory");
++                                        __asm__ volatile ("dsb\n\tisb" : : : "memory");
++
++                                        pte = *(volatile uint32_t *)
++                                              (0xE0000000 + (l2b & 0x000FFFFF)
++                                               + (((dfar >> 12) & 0xff) << 2));
++
++                                        kl1[idx] = sv;
++                                        __asm__ volatile ("dsb" : : : "memory");
++                                        __asm__ volatile ("mcr p15, 0, %0, c8, c7, 0"
++                                                          : : "r"(0) : "memory");
++                                        __asm__ volatile ("dsb\n\tisb" : : : "memory");
++
++                                        PE_early_puts(" L2=");  PE_early_puthex(l2b);
++                                        PE_early_puts(" PTE="); PE_early_puthex(pte);
++                                    }
++                                }
++                            }
++                        }
++                        PE_early_puts("\n");
++                    }
++                }
++
++                /*
++                 * Coherencia del table walker.
++                 *
++                 * Se ha comprobado que la entrada L1 es valida, esta en la
++                 * pagina fisica que carga TTBR0 y se lee igual por las dos
++                 * vias — y aun asi el HW da fallo de traduccion de SECCION.
++                 * Es decir: la MMU lee memoria rancia porque el walker no ve
++                 * lo que sigue en la D-cache.  Activar ACTLR.SMP arreglaria la
++                 * coherencia pero cuelga la CPU aqui (SCU probablemente sin
++                 * habilitar), asi que limpiamos a mano a PoC la TTE y la PTE
++                 * de esta VA y invalidamos su TLB antes de reintentar.
++                 *
++                 * Si con esto el fallo deja de repetirse, la hipotesis queda
++                 * confirmada y el arreglo definitivo es hacer esta misma
++                 * limpieza dentro del pmap, al escribir cada entrada.
++                 */
++                if (code == KERN_SUCCESS) {
++                    pmap_t cp = vm_map_pmap(map);
++
++                    if (cp && cp->pm_l1_virt) {
++                        uint32_t tteva = (uint32_t) cp->pm_l1_virt
++                                         + ((dfar >> 20) << 2);
++                        uint32_t ttev = *(volatile uint32_t *) tteva;
++
++                        /* limpia la TTE */
++                        __asm__ volatile ("mcr p15, 0, %0, c7, c10, 1"
++                                          : : "r"(tteva) : "memory");
++
++                        /* si apunta a una L2, limpia tambien la PTE */
++                        if ((ttev & 3) == 1) {
++                            uint32_t l2 = (uint32_t) phys_to_virt(ttev & 0xfffffc00);
++                            uint32_t pteva = l2 + (((dfar >> 12) & 0xff) << 2);
++                            __asm__ volatile ("mcr p15, 0, %0, c7, c10, 1"
++                                              : : "r"(pteva) : "memory");
++                        }
++
++                        __asm__ volatile ("dsb" : : : "memory");
++
++                        /*
++                         * TLB: invalidacion COMPLETA, no por VA.
++                         *
++                         * El intento anterior usaba TLBIMVA pasando solo la
++                         * direccion, con los bits de ASID a cero — y CONTEXTIDR
++                         * dice que el proceso corre con ASID=1, asi que se
++                         * invalidaba la entrada del ASID 0 y no se tocaba nada.
++                         * Aqui se barre el TLB unificado entero (TLBIALL) mas
++                         * el predictor de saltos, que es lo contundente y
++                         * descarta el ASID como variable.
++                         */
++                        __asm__ volatile ("mcr p15, 0, %0, c8, c7, 0"
++                                          : : "r"(0) : "memory");   /* TLBIALL */
++                        __asm__ volatile ("mcr p15, 0, %0, c7, c5, 6"
++                                          : : "r"(0) : "memory");   /* BPIALL  */
++                        __asm__ volatile ("dsb\n\tisb" : : : "memory");
++                    }
++                }
++
+                 if (code != KERN_SUCCESS) {
+                     /*
+                      * Still, die in a fire.
+@@ -544,6 +854,14 @@ boolean_t irq_handler(void *context)
+ void irq_iokit_dispatch(uint32_t irq)
+ {
+     cpu_data_t *datap = current_cpu_datap();
++    /* krillin M68: detector de tormenta de IRQ (primeras 40 con su numero).
++     * Si el copyout de launchd cuelga por IRQs continuas, aqui se ve. */
++    {
++        extern void PE_early_puts(char *s);
++        extern void PE_early_puthex(unsigned int v);
++        static int nirq = 0;
++        if (nirq < 40) { nirq++; PE_early_puts("IRQ#"); PE_early_puthex(irq); PE_early_puts(" "); }
++    }
+     if(datap->handler) {
+         datap->handler(datap->target, NULL, datap->nub, irq);
+     }
+@@ -556,6 +874,20 @@ void irq_iokit_dispatch(uint32_t irq)
+  */
+ void sleh_undef(arm_saved_state_t * state)
+ {
++    {
++        extern void PE_early_puts(char *s);
++        extern void PE_early_puthex(unsigned int v);
++        static int nundef = 0;
++
++        if (nundef < 6) {
++            nundef++;
++            PE_early_puts("INSTR ILEGAL pc=");
++            PE_early_puthex(state->pc);
++            PE_early_puts(" cpsr=");
++            PE_early_puthex(state->cpsr);
++            PE_early_puts("\n");
++        }
++    }
+     uint32_t cpsr, exception_type = 0, exception_subcode = 0;
+     arm_saved_state_t *arm_ctx = (arm_saved_state_t *) state;
+     thread_t thread = current_thread();
+diff --git a/osfmk/arm/traps_lo.s b/osfmk/arm/traps_lo.s
+index d3f2d54..51dc47c 100644
+--- a/osfmk/arm/traps_lo.s
++++ b/osfmk/arm/traps_lo.s
+@@ -142,7 +142,7 @@ swi_trap_ret:
+ 
+ swi_mach:
+     /* Load the mach function from the mach trap table and call it. */
+-    adr     lr, swi_exit
++    ldr     lr, =swi_exit
+     mov     r4, r5
+     cmp     r5, #0x80
+     bge     swi_mach_error
+@@ -577,7 +577,7 @@ restore_kernel_context:
+ irqvec_panic:
+     LOAD_ADDR(sp, irqstack_top)
+     mov     r1, r0
+-    adr     r0, vecPanicString
++    ldr     r0, =vecPanicString
+     blx     _panic
+     b       .
+ 
+diff --git a/osfmk/conf/Makefile.template b/osfmk/conf/Makefile.template
+index c39e844..07d2701 100644
+--- a/osfmk/conf/Makefile.template
++++ b/osfmk/conf/Makefile.template
+@@ -120,7 +120,7 @@ genassym.o: $(SOURCE_DIR)/$(COMPONENT)/$(GENASSYM_LOCATION)/genassym.c
+ 	$(_v)${KCC} $(subst -flto,,${CFLAGS}) -MD ${_HOST_EXTRA_CFLAGS} -S -o ${@} -c ${INCFLAGS} $<
+ 
+ assym.s: genassym.o
+-	$(_v)sed -e '/#DEFINITION#/!d' -e 's/^.*#DEFINITION#//' -e 's/\$$//' -e 'p' -e 's/#//2' -e 's/[^A-Za-z0-9_]*\([A-Za-z0-9_]*\)/ \1_NUM/2' genassym.o > ${@}
++	$(_v)python3 $(SRCROOT)/tools/gen_assym.py genassym.o > ${@}
+ 
+ ${SOBJS}: assym.s
+ 
+diff --git a/osfmk/conf/files.arm b/osfmk/conf/files.arm
+index 7a82f36..17e5513 100644
+--- a/osfmk/conf/files.arm
++++ b/osfmk/conf/files.arm
+@@ -68,3 +68,4 @@ osfmk/kdp/ml/arm/kdp_arm_common.c      optional        mach_kdp
+ osfmk/kdp/ml/arm/kdp_machdep.c         optional        mach_kdp
+ osfmk/kdp/ml/arm/kdp_vm.c              optional        mach_kdp
+ 
++osfmk/arm/mem_aliases.s standard
+diff --git a/osfmk/console/video_console.c b/osfmk/console/video_console.c
+index 1848a01..6b34b4d 100644
+--- a/osfmk/console/video_console.c
++++ b/osfmk/console/video_console.c
+@@ -1286,6 +1286,16 @@ gc_update_color(int color, boolean_t fore)
+ void
+ vcputc(__unused int l, __unused int u, int c)
+ {
++#ifdef BOARD_CONFIG_MT6582
++	/*
++	 * El krillin tiene UNA sola consola: la de framebuffer del pexpert.
++	 * Redirigimos aqui para no perder la salida de printf() y para que vc_
++	 * no toque nunca el framebuffer por su cuenta.
++	 */
++	extern void PE_fb_putc(char c);
++	PE_fb_putc((char) c);
++	return;
++#endif
+ 	if ( gc_initialized && ( gc_enabled || debug_mode ) )
+ 	{
+ 		spl_t s;
+@@ -2831,6 +2841,23 @@ void vcattach(void); /* XXX gcc 4 warning cleanup */
+ void
+ vcattach(void)
+ {
++#ifdef BOARD_CONFIG_MT6582
++	/*
++	 * En el krillin la pantalla es de la consola de framebuffer del pexpert:
++	 * initialize_screen() esta gateado tras -xnu-vc para que vc_ no pinte
++	 * encima, asi que gc_ops se queda a NULL.  vcattach() arranca la
++	 * maquinaria de vc_ igualmente y acaba en gc_reset_vt100() ->
++	 * gc_update_color(), que revienta contra
++	 * "Assertion failed: gc_ops.update_color".
++	 *
++	 * Con vc_ desactivada por diseño, vcattach() no tiene nada que hacer.
++	 */
++	{
++		extern void PE_early_puts(char *s);
++		PE_early_puts("vcattach OMITIDO (vc_ off)\n");
++	}
++	return;
++#endif
+ #ifdef __arm__
+ 	/* Print out video console information to serial and screen */
+ 	printf("%svideo console at 0x%lx (%ldx%ldx%ld)\n", (vinfo.v_depth >= 8) ? "\033[31mC\033[32mO\033[33mL\033[34mO\033[35mR\033[0m " : "",
+diff --git a/osfmk/kern/startup.c b/osfmk/kern/startup.c
+index 2d62172..3a0349e 100644
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -172,7 +172,11 @@ kernel_bootstrap(void)
+ 
+ 	printf("%s\n", version); /* log kernel version */
+ 
+-#define kernel_bootstrap_kprintf(x...) /* kprintf("kernel_bootstrap: " x) */
++extern void PE_early_puts(char *s);
++/* XNU ya trae estos marcadores en cada etapa del bootstrap, solo que
++ * comentados.  Reactivados contra la consola de framebuffer: es el mapa
++ * completo de kernel_bootstrap sin tener que sembrarlo a mano. */
++#define kernel_bootstrap_kprintf(x...) PE_early_puts((char *)(x))
+ 
+ 	if (PE_parse_boot_argn("-l", namep, sizeof (namep))) /* leaks logging */
+ 		turn_on_log_leaks = 1;
+@@ -269,7 +273,7 @@ kernel_bootstrap_thread(void)
+ {
+ 	processor_t		processor = current_processor();
+ 
+-#define kernel_bootstrap_thread_kprintf(x...) /* kprintf("kernel_bootstrap_thread: " x) */
++#define kernel_bootstrap_thread_kprintf(x...) PE_early_puts((char *)(x))
+ 	kernel_bootstrap_thread_kprintf("calling idle_thread_create\n");
+ 	/*
+ 	 * Create the idle processor thread.
+@@ -351,10 +355,13 @@ kernel_bootstrap_thread(void)
+ #endif
+ 
+ #ifdef	IOKIT
++	PE_early_puts("MB0 -> PE_init_iokit\n");
+ 	PE_init_iokit();
++	PE_early_puts("MB1 PE_init_iokit RETURNED\n");
+ #endif
+-	
++
+ 	(void) spllo();		/* Allow interruptions */
++	PE_early_puts("MB2 post spllo (IRQs on)\n");
+ 
+ #if (defined(__i386__) || defined(__x86_64__)) && NCOPY_WINDOWS > 0
+ 	/*
+@@ -381,6 +388,7 @@ kernel_bootstrap_thread(void)
+ 	vm_shared_region_init();
+ 	vm_commpage_init();
+ 	vm_commpage_text_init();
++	PE_early_puts("MB3 post commpage init\n");
+ 
+ #if CONFIG_MACF
+ 	mac_policy_initmach();
+@@ -398,9 +406,11 @@ kernel_bootstrap_thread(void)
+ 	/*
+ 	 *	Start the user bootstrap.
+ 	 */
++	PE_early_puts("=== BS_MAIN: IOKit+VM ok, -> bsd_init ===\n");
+ #ifdef	MACH_BSD
+ 	bsd_init();
+ #endif
++	PE_early_puts("=== BS_MAIN: bsd_init RETURNED ===\n");
+ 
+         /*
+          * Get rid of segments used to bootstrap kext loading. This removes
+diff --git a/osfmk/vm/vm_pageout.c b/osfmk/vm/vm_pageout.c
+index 2bfd6e7..1a910bc 100644
+--- a/osfmk/vm/vm_pageout.c
++++ b/osfmk/vm/vm_pageout.c
+@@ -3022,7 +3022,7 @@ uint32_t vm_pageout_considered_page_last = 0;
+  * called once per-second via "compute_averages"
+  */
+ void
+-compute_pageout_gc_throttle()
++compute_pageout_gc_throttle(__unused void *arg)
+ {
+ 	if (vm_pageout_considered_page != vm_pageout_considered_page_last) {
+ 
+diff --git a/pexpert/arm/common/mt6582_consolefont.c b/pexpert/arm/common/mt6582_consolefont.c
+new file mode 100644
+index 0000000..3a592ab
+--- /dev/null
++++ b/pexpert/arm/common/mt6582_consolefont.c
+@@ -0,0 +1,2053 @@
++const char console_font[256*8] = {
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x7e,
++0x81,
++0xa5,
++0x81,
++0xbd,
++0x99,
++0x81,
++0x7e,
++0x7e,
++0xff,
++0xdb,
++0xff,
++0xc3,
++0xe7,
++0xff,
++0x7e,
++0x6c,
++0xfe,
++0xfe,
++0xfe,
++0x7c,
++0x38,
++0x10,
++0x0,
++0x10,
++0x38,
++0x7c,
++0xfe,
++0x7c,
++0x38,
++0x10,
++0x0,
++0x38,
++0x7c,
++0x38,
++0xfe,
++0xfe,
++0x7c,
++0x38,
++0x7c,
++0x10,
++0x10,
++0x38,
++0x7c,
++0xfe,
++0x7c,
++0x38,
++0x7c,
++0x0,
++0x0,
++0x18,
++0x3c,
++0x3c,
++0x18,
++0x0,
++0x0,
++0xff,
++0xff,
++0xe7,
++0xc3,
++0xc3,
++0xe7,
++0xff,
++0xff,
++0x0,
++0x3c,
++0x66,
++0x42,
++0x42,
++0x66,
++0x3c,
++0x0,
++0xff,
++0xc3,
++0x99,
++0xbd,
++0xbd,
++0x99,
++0xc3,
++0xff,
++0xf,
++0x7,
++0xf,
++0x7d,
++0xcc,
++0xcc,
++0xcc,
++0x78,
++0x3c,
++0x66,
++0x66,
++0x66,
++0x3c,
++0x18,
++0x7e,
++0x18,
++0x3f,
++0x33,
++0x3f,
++0x30,
++0x30,
++0x70,
++0xf0,
++0xe0,
++0x7f,
++0x63,
++0x7f,
++0x63,
++0x63,
++0x67,
++0xe6,
++0xc0,
++0x99,
++0x5a,
++0x3c,
++0xe7,
++0xe7,
++0x3c,
++0x5a,
++0x99,
++0x80,
++0xe0,
++0xf8,
++0xfe,
++0xf8,
++0xe0,
++0x80,
++0x0,
++0x2,
++0xe,
++0x3e,
++0xfe,
++0x3e,
++0xe,
++0x2,
++0x0,
++0x18,
++0x3c,
++0x7e,
++0x18,
++0x18,
++0x7e,
++0x3c,
++0x18,
++0x66,
++0x66,
++0x66,
++0x66,
++0x66,
++0x0,
++0x66,
++0x0,
++0x7f,
++0xdb,
++0xdb,
++0x7b,
++0x1b,
++0x1b,
++0x1b,
++0x0,
++0x3e,
++0x63,
++0x38,
++0x6c,
++0x6c,
++0x38,
++0xcc,
++0x78,
++0x0,
++0x0,
++0x0,
++0x0,
++0x7e,
++0x7e,
++0x7e,
++0x0,
++0x18,
++0x3c,
++0x7e,
++0x18,
++0x7e,
++0x3c,
++0x18,
++0xff,
++0x18,
++0x3c,
++0x7e,
++0x18,
++0x18,
++0x18,
++0x18,
++0x0,
++0x18,
++0x18,
++0x18,
++0x18,
++0x7e,
++0x3c,
++0x18,
++0x0,
++0x0,
++0x18,
++0xc,
++0xfe,
++0xc,
++0x18,
++0x0,
++0x0,
++0x0,
++0x30,
++0x60,
++0xfe,
++0x60,
++0x30,
++0x0,
++0x0,
++0x0,
++0x0,
++0xc0,
++0xc0,
++0xc0,
++0xfe,
++0x0,
++0x0,
++0x0,
++0x24,
++0x66,
++0xff,
++0x66,
++0x24,
++0x0,
++0x0,
++0x0,
++0x18,
++0x3c,
++0x7e,
++0xff,
++0xff,
++0x0,
++0x0,
++0x0,
++0xff,
++0xff,
++0x7e,
++0x3c,
++0x18,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x80,
++0x80,
++0x80,
++0x80,
++0x80,
++0x0,
++0x80,
++0x0,
++0x50,
++0x50,
++0xa0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x50,
++0x50,
++0xf8,
++0x50,
++0xf8,
++0x50,
++0x50,
++0x0,
++0x20,
++0x78,
++0x80,
++0x70,
++0x8,
++0xf0,
++0x20,
++0x0,
++0x88,
++0x90,
++0x10,
++0x20,
++0x40,
++0x48,
++0x88,
++0x0,
++0x20,
++0x50,
++0x20,
++0x68,
++0xb0,
++0x90,
++0x68,
++0x0,
++0x40,
++0x40,
++0x80,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x30,
++0x40,
++0x80,
++0x80,
++0x80,
++0x40,
++0x30,
++0x0,
++0xc0,
++0x20,
++0x10,
++0x10,
++0x10,
++0x20,
++0xc0,
++0x0,
++0x0,
++0x0,
++0x90,
++0x60,
++0x90,
++0x0,
++0x0,
++0x0,
++0x0,
++0x20,
++0x20,
++0xf8,
++0x20,
++0x20,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x80,
++0x80,
++0x80,
++0x0,
++0x0,
++0x0,
++0xf8,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x80,
++0x80,
++0x0,
++0x8,
++0x10,
++0x10,
++0x20,
++0x40,
++0x40,
++0x80,
++0x0,
++0x70,
++0x88,
++0x98,
++0xa8,
++0xc8,
++0x88,
++0x70,
++0x0,
++0x20,
++0x60,
++0x20,
++0x20,
++0x20,
++0x20,
++0xf8,
++0x0,
++0x70,
++0x88,
++0x8,
++0x30,
++0x40,
++0x88,
++0xf8,
++0x0,
++0x70,
++0x88,
++0x8,
++0x30,
++0x8,
++0x88,
++0x70,
++0x0,
++0x18,
++0x28,
++0x48,
++0x88,
++0xf8,
++0x8,
++0x8,
++0x0,
++0xf8,
++0x80,
++0xf0,
++0x8,
++0x8,
++0x88,
++0x70,
++0x0,
++0x30,
++0x40,
++0x80,
++0xf0,
++0x88,
++0x88,
++0x70,
++0x0,
++0xf8,
++0x88,
++0x8,
++0x10,
++0x20,
++0x20,
++0x20,
++0x0,
++0x70,
++0x88,
++0x88,
++0x70,
++0x88,
++0x88,
++0x70,
++0x0,
++0x70,
++0x88,
++0x88,
++0x78,
++0x8,
++0x10,
++0x60,
++0x0,
++0x0,
++0x80,
++0x80,
++0x0,
++0x0,
++0x80,
++0x80,
++0x0,
++0x0,
++0x80,
++0x80,
++0x0,
++0x0,
++0x80,
++0x80,
++0x80,
++0x10,
++0x20,
++0x40,
++0x80,
++0x40,
++0x20,
++0x10,
++0x0,
++0x0,
++0x0,
++0xf8,
++0x0,
++0x0,
++0xf8,
++0x0,
++0x0,
++0x80,
++0x40,
++0x20,
++0x10,
++0x20,
++0x40,
++0x80,
++0x0,
++0x70,
++0x88,
++0x8,
++0x10,
++0x20,
++0x0,
++0x20,
++0x0,
++0x78,
++0x84,
++0xb4,
++0xb4,
++0xbc,
++0x80,
++0x78,
++0x0,
++0x70,
++0x88,
++0xf8,
++0x88,
++0x88,
++0x88,
++0x88,
++0x0,
++0xf0,
++0x88,
++0xf0,
++0x88,
++0x88,
++0x88,
++0xf0,
++0x0,
++0x70,
++0x88,
++0x80,
++0x80,
++0x80,
++0x88,
++0x70,
++0x0,
++0xf0,
++0x88,
++0x88,
++0x88,
++0x88,
++0x88,
++0xf0,
++0x0,
++0xf8,
++0x80,
++0xe0,
++0x80,
++0x80,
++0x80,
++0xf8,
++0x0,
++0xf8,
++0x80,
++0xe0,
++0x80,
++0x80,
++0x80,
++0x80,
++0x0,
++0x78,
++0x80,
++0x98,
++0x88,
++0x88,
++0x88,
++0x70,
++0x0,
++0x88,
++0x88,
++0xf8,
++0x88,
++0x88,
++0x88,
++0x88,
++0x0,
++0xe0,
++0x40,
++0x40,
++0x40,
++0x40,
++0x40,
++0xe0,
++0x0,
++0x8,
++0x8,
++0x8,
++0x8,
++0x8,
++0x88,
++0x70,
++0x0,
++0x88,
++0x90,
++0xe0,
++0x90,
++0x88,
++0x88,
++0x88,
++0x0,
++0x80,
++0x80,
++0x80,
++0x80,
++0x80,
++0x80,
++0xf8,
++0x0,
++0x88,
++0xd8,
++0xa8,
++0x88,
++0x88,
++0x88,
++0x88,
++0x0,
++0x88,
++0xc8,
++0xa8,
++0x98,
++0x88,
++0x88,
++0x88,
++0x0,
++0x70,
++0x88,
++0x88,
++0x88,
++0x88,
++0x88,
++0x70,
++0x0,
++0xf0,
++0x88,
++0xf0,
++0x80,
++0x80,
++0x80,
++0x80,
++0x0,
++0x70,
++0x88,
++0x88,
++0x88,
++0x88,
++0x90,
++0x68,
++0x0,
++0xf0,
++0x88,
++0xf0,
++0x88,
++0x88,
++0x88,
++0x88,
++0x0,
++0x78,
++0x80,
++0x70,
++0x8,
++0x8,
++0x88,
++0x70,
++0x0,
++0xf8,
++0x20,
++0x20,
++0x20,
++0x20,
++0x20,
++0x20,
++0x0,
++0x88,
++0x88,
++0x88,
++0x88,
++0x88,
++0x88,
++0x70,
++0x0,
++0x88,
++0x88,
++0x88,
++0x88,
++0x50,
++0x50,
++0x20,
++0x0,
++0x88,
++0x88,
++0x88,
++0x88,
++0xa8,
++0xd8,
++0x88,
++0x0,
++0x88,
++0x50,
++0x20,
++0x50,
++0x88,
++0x88,
++0x88,
++0x0,
++0x88,
++0x50,
++0x20,
++0x20,
++0x20,
++0x20,
++0x20,
++0x0,
++0xf8,
++0x8,
++0x10,
++0x20,
++0x40,
++0x80,
++0xf8,
++0x0,
++0xe0,
++0x80,
++0x80,
++0x80,
++0x80,
++0x80,
++0xe0,
++0x0,
++0x80,
++0x40,
++0x40,
++0x20,
++0x10,
++0x10,
++0x8,
++0x0,
++0xe0,
++0x20,
++0x20,
++0x20,
++0x20,
++0x20,
++0xe0,
++0x0,
++0x20,
++0x50,
++0x88,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0xf8,
++0x80,
++0x80,
++0x40,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x70,
++0x8,
++0x78,
++0x88,
++0x78,
++0x0,
++0x80,
++0x80,
++0xb0,
++0xc8,
++0x88,
++0x88,
++0xf0,
++0x0,
++0x0,
++0x0,
++0x70,
++0x88,
++0x80,
++0x88,
++0x70,
++0x0,
++0x8,
++0x8,
++0x68,
++0x98,
++0x88,
++0x88,
++0x78,
++0x0,
++0x0,
++0x0,
++0x70,
++0x88,
++0xf8,
++0x80,
++0x78,
++0x0,
++0x30,
++0x40,
++0xf0,
++0x40,
++0x40,
++0x40,
++0x40,
++0x0,
++0x0,
++0x0,
++0x78,
++0x88,
++0x88,
++0x78,
++0x8,
++0xf0,
++0x80,
++0x80,
++0xb0,
++0xc8,
++0x88,
++0x88,
++0x88,
++0x0,
++0x80,
++0x0,
++0x80,
++0x80,
++0x80,
++0x80,
++0x80,
++0x0,
++0x8,
++0x0,
++0x8,
++0x8,
++0x8,
++0x88,
++0x88,
++0x70,
++0x80,
++0x80,
++0x90,
++0xa0,
++0xc0,
++0xa0,
++0x90,
++0x0,
++0x80,
++0x80,
++0x80,
++0x80,
++0x80,
++0x80,
++0x40,
++0x0,
++0x0,
++0x0,
++0xd0,
++0xa8,
++0xa8,
++0x88,
++0x88,
++0x0,
++0x0,
++0x0,
++0xf0,
++0x88,
++0x88,
++0x88,
++0x88,
++0x0,
++0x0,
++0x0,
++0x70,
++0x88,
++0x88,
++0x88,
++0x70,
++0x0,
++0x0,
++0x0,
++0xb0,
++0xc8,
++0x88,
++0xf0,
++0x80,
++0x80,
++0x0,
++0x0,
++0x68,
++0x98,
++0x88,
++0x78,
++0x8,
++0x8,
++0x0,
++0x0,
++0xb0,
++0xc8,
++0x80,
++0x80,
++0x80,
++0x0,
++0x0,
++0x0,
++0x78,
++0x80,
++0x70,
++0x8,
++0xf0,
++0x0,
++0x40,
++0x40,
++0xe0,
++0x40,
++0x40,
++0x40,
++0x20,
++0x0,
++0x0,
++0x0,
++0x88,
++0x88,
++0x88,
++0x88,
++0x78,
++0x0,
++0x0,
++0x0,
++0x88,
++0x88,
++0x88,
++0x50,
++0x20,
++0x0,
++0x0,
++0x0,
++0x88,
++0x88,
++0xa8,
++0xa8,
++0x78,
++0x0,
++0x0,
++0x0,
++0x88,
++0x50,
++0x20,
++0x50,
++0x88,
++0x0,
++0x0,
++0x0,
++0x88,
++0x88,
++0x88,
++0x78,
++0x8,
++0xf0,
++0x0,
++0x0,
++0xf8,
++0x10,
++0x20,
++0x40,
++0xf8,
++0x0,
++0x30,
++0x40,
++0x40,
++0x80,
++0x40,
++0x40,
++0x30,
++0x0,
++0x80,
++0x80,
++0x80,
++0x0,
++0x80,
++0x80,
++0x80,
++0x0,
++0xc0,
++0x20,
++0x20,
++0x10,
++0x20,
++0x20,
++0xc0,
++0x0,
++0x64,
++0x98,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x20,
++0x50,
++0x88,
++0x88,
++0xf8,
++0x0,
++0x70,
++0x88,
++0x80,
++0x80,
++0x88,
++0x70,
++0x8,
++0x30,
++0x50,
++0x0,
++0x88,
++0x88,
++0x88,
++0x88,
++0x78,
++0x0,
++0x18,
++0x0,
++0x70,
++0x88,
++0xf8,
++0x80,
++0x78,
++0x0,
++0x70,
++0x88,
++0x70,
++0x8,
++0x78,
++0x88,
++0x78,
++0x0,
++0x50,
++0x0,
++0x70,
++0x8,
++0x78,
++0x88,
++0x78,
++0x0,
++0xc0,
++0x0,
++0x70,
++0x8,
++0x78,
++0x88,
++0x78,
++0x0,
++0x20,
++0x0,
++0x70,
++0x8,
++0x78,
++0x88,
++0x78,
++0x0,
++0x0,
++0x70,
++0x88,
++0x80,
++0x88,
++0x70,
++0x8,
++0x30,
++0x70,
++0x88,
++0x70,
++0x88,
++0xf8,
++0x80,
++0x78,
++0x0,
++0x50,
++0x0,
++0x70,
++0x88,
++0xf8,
++0x80,
++0x78,
++0x0,
++0xc0,
++0x0,
++0x70,
++0x88,
++0xf8,
++0x80,
++0x78,
++0x0,
++0xa0,
++0x0,
++0x40,
++0x40,
++0x40,
++0x40,
++0x40,
++0x0,
++0x70,
++0x88,
++0x20,
++0x20,
++0x20,
++0x20,
++0x20,
++0x0,
++0xc0,
++0x0,
++0x40,
++0x40,
++0x40,
++0x40,
++0x40,
++0x0,
++0x88,
++0x70,
++0x88,
++0xf8,
++0x88,
++0x88,
++0x88,
++0x0,
++0x20,
++0x0,
++0x70,
++0x88,
++0xf8,
++0x88,
++0x88,
++0x0,
++0x18,
++0x0,
++0xf8,
++0x80,
++0xe0,
++0x80,
++0xf8,
++0x0,
++0x0,
++0x0,
++0x50,
++0x28,
++0x78,
++0xa0,
++0x78,
++0x0,
++0x78,
++0xa0,
++0xf0,
++0xa0,
++0xa0,
++0xa0,
++0xb8,
++0x0,
++0x70,
++0x88,
++0x70,
++0x88,
++0x88,
++0x88,
++0x70,
++0x0,
++0x50,
++0x0,
++0x70,
++0x88,
++0x88,
++0x88,
++0x70,
++0x0,
++0xc0,
++0x0,
++0x70,
++0x88,
++0x88,
++0x88,
++0x70,
++0x0,
++0x70,
++0x88,
++0x0,
++0x88,
++0x88,
++0x88,
++0x78,
++0x0,
++0xc0,
++0x0,
++0x88,
++0x88,
++0x88,
++0x88,
++0x78,
++0x0,
++0x50,
++0x0,
++0x88,
++0x88,
++0x88,
++0x78,
++0x8,
++0xf0,
++0x88,
++0x70,
++0x88,
++0x88,
++0x88,
++0x88,
++0x70,
++0x0,
++0x88,
++0x0,
++0x88,
++0x88,
++0x88,
++0x88,
++0x70,
++0x0,
++0x0,
++0x0,
++0x70,
++0x98,
++0xa8,
++0xc8,
++0x70,
++0x20,
++0x30,
++0x48,
++0x40,
++0xf0,
++0x40,
++0x40,
++0xf8,
++0x0,
++0x70,
++0x88,
++0x98,
++0xa8,
++0xc8,
++0x88,
++0x70,
++0x0,
++0x0,
++0x0,
++0xa0,
++0x40,
++0xa0,
++0x0,
++0x0,
++0x0,
++0x10,
++0x28,
++0x20,
++0x70,
++0x20,
++0x20,
++0xa0,
++0x40,
++0x18,
++0x0,
++0x70,
++0x8,
++0x78,
++0x88,
++0x78,
++0x0,
++0xc0,
++0x0,
++0x80,
++0x80,
++0x80,
++0x80,
++0x80,
++0x0,
++0x18,
++0x0,
++0x70,
++0x88,
++0x88,
++0x88,
++0x70,
++0x0,
++0x18,
++0x0,
++0x88,
++0x88,
++0x88,
++0x88,
++0x78,
++0x0,
++0xf8,
++0x0,
++0xf0,
++0x88,
++0x88,
++0x88,
++0x88,
++0x0,
++0xf8,
++0x0,
++0x88,
++0xc8,
++0xa8,
++0x98,
++0x88,
++0x0,
++0x70,
++0x8,
++0xf8,
++0x78,
++0x0,
++0xf8,
++0x0,
++0x0,
++0x70,
++0x88,
++0x88,
++0x70,
++0x0,
++0xf8,
++0x0,
++0x0,
++0x20,
++0x0,
++0x20,
++0x40,
++0x80,
++0x88,
++0x70,
++0x0,
++0x0,
++0x78,
++0xb4,
++0xa4,
++0xd4,
++0x78,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0xf8,
++0x8,
++0x8,
++0x0,
++0x0,
++0x88,
++0x90,
++0x10,
++0x20,
++0x48,
++0x50,
++0x98,
++0x0,
++0x88,
++0x90,
++0x10,
++0x20,
++0x58,
++0x58,
++0x88,
++0x0,
++0x0,
++0x80,
++0x0,
++0x80,
++0x80,
++0x80,
++0x80,
++0x0,
++0x0,
++0x28,
++0x50,
++0xa0,
++0x50,
++0x28,
++0x0,
++0x0,
++0x0,
++0xa0,
++0x50,
++0x28,
++0x50,
++0xa0,
++0x0,
++0x0,
++0x22,
++0x88,
++0x22,
++0x88,
++0x22,
++0x88,
++0x22,
++0x88,
++0x55,
++0xaa,
++0x55,
++0xaa,
++0x55,
++0xaa,
++0x55,
++0xaa,
++0xdb,
++0x77,
++0xdb,
++0xee,
++0xdb,
++0x77,
++0xdb,
++0xee,
++0x18,
++0x18,
++0x18,
++0x18,
++0x18,
++0x18,
++0x18,
++0x18,
++0x18,
++0x18,
++0x18,
++0x18,
++0xf8,
++0x18,
++0x18,
++0x18,
++0x18,
++0x18,
++0xf8,
++0x18,
++0xf8,
++0x18,
++0x18,
++0x18,
++0x36,
++0x36,
++0x36,
++0x36,
++0xf6,
++0x36,
++0x36,
++0x36,
++0x0,
++0x0,
++0x0,
++0x0,
++0xfe,
++0x36,
++0x36,
++0x36,
++0x0,
++0x0,
++0xf8,
++0x18,
++0xf8,
++0x18,
++0x18,
++0x18,
++0x36,
++0x36,
++0xf6,
++0x6,
++0xf6,
++0x36,
++0x36,
++0x36,
++0x36,
++0x36,
++0x36,
++0x36,
++0x36,
++0x36,
++0x36,
++0x36,
++0x0,
++0x0,
++0xfe,
++0x6,
++0xf6,
++0x36,
++0x36,
++0x36,
++0x36,
++0x36,
++0xf6,
++0x6,
++0xfe,
++0x0,
++0x0,
++0x0,
++0x36,
++0x36,
++0x36,
++0x36,
++0xfe,
++0x0,
++0x0,
++0x0,
++0x18,
++0x18,
++0xf8,
++0x18,
++0xf8,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0xf8,
++0x18,
++0x18,
++0x18,
++0x18,
++0x18,
++0x18,
++0x18,
++0x1f,
++0x0,
++0x0,
++0x0,
++0x18,
++0x18,
++0x18,
++0x18,
++0xff,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0xff,
++0x18,
++0x18,
++0x18,
++0x18,
++0x18,
++0x18,
++0x18,
++0x1f,
++0x18,
++0x18,
++0x18,
++0x0,
++0x0,
++0x0,
++0x0,
++0xff,
++0x0,
++0x0,
++0x0,
++0x18,
++0x18,
++0x18,
++0x18,
++0xff,
++0x18,
++0x18,
++0x18,
++0x18,
++0x18,
++0x1f,
++0x18,
++0x1f,
++0x18,
++0x18,
++0x18,
++0x36,
++0x36,
++0x36,
++0x36,
++0x37,
++0x36,
++0x36,
++0x36,
++0x36,
++0x36,
++0x37,
++0x30,
++0x3f,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x3f,
++0x30,
++0x37,
++0x36,
++0x36,
++0x36,
++0x36,
++0x36,
++0xf7,
++0x0,
++0xff,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0xff,
++0x0,
++0xf7,
++0x36,
++0x36,
++0x36,
++0x36,
++0x36,
++0x37,
++0x30,
++0x37,
++0x36,
++0x36,
++0x36,
++0x0,
++0x0,
++0xff,
++0x0,
++0xff,
++0x0,
++0x0,
++0x0,
++0x36,
++0x36,
++0xf7,
++0x0,
++0xf7,
++0x36,
++0x36,
++0x36,
++0x18,
++0x18,
++0xff,
++0x0,
++0xff,
++0x0,
++0x0,
++0x0,
++0x36,
++0x36,
++0x36,
++0x36,
++0xff,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0xff,
++0x0,
++0xff,
++0x18,
++0x18,
++0x18,
++0x0,
++0x0,
++0x0,
++0x0,
++0xff,
++0x36,
++0x36,
++0x36,
++0x36,
++0x36,
++0x36,
++0x36,
++0x3f,
++0x0,
++0x0,
++0x0,
++0x18,
++0x18,
++0x1f,
++0x18,
++0x1f,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x1f,
++0x18,
++0x1f,
++0x18,
++0x18,
++0x18,
++0x0,
++0x0,
++0x0,
++0x0,
++0x3f,
++0x36,
++0x36,
++0x36,
++0x36,
++0x36,
++0x36,
++0x36,
++0xff,
++0x36,
++0x36,
++0x36,
++0x18,
++0x18,
++0xff,
++0x18,
++0xff,
++0x18,
++0x18,
++0x18,
++0x18,
++0x18,
++0x18,
++0x18,
++0xf8,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x1f,
++0x18,
++0x18,
++0x18,
++0xff,
++0xff,
++0xff,
++0xff,
++0xff,
++0xff,
++0xff,
++0xff,
++0x0,
++0x0,
++0x0,
++0x0,
++0xff,
++0xff,
++0xff,
++0xff,
++0xf0,
++0xf0,
++0xf0,
++0xf0,
++0xf0,
++0xf0,
++0xf0,
++0xf0,
++0xf,
++0xf,
++0xf,
++0xf,
++0xf,
++0xf,
++0xf,
++0xf,
++0xff,
++0xff,
++0xff,
++0xff,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x76,
++0xdc,
++0xc8,
++0xdc,
++0x76,
++0x0,
++0x0,
++0x78,
++0xcc,
++0xf8,
++0xcc,
++0xf8,
++0xc0,
++0xc0,
++0x0,
++0xfc,
++0xcc,
++0xc0,
++0xc0,
++0xc0,
++0xc0,
++0x0,
++0x0,
++0xfe,
++0x6c,
++0x6c,
++0x6c,
++0x6c,
++0x6c,
++0x0,
++0xfc,
++0xcc,
++0x60,
++0x30,
++0x60,
++0xcc,
++0xfc,
++0x0,
++0x0,
++0x0,
++0x7e,
++0xd8,
++0xd8,
++0xd8,
++0x70,
++0x0,
++0x0,
++0x66,
++0x66,
++0x66,
++0x66,
++0x7c,
++0x60,
++0xc0,
++0x0,
++0x76,
++0xdc,
++0x18,
++0x18,
++0x18,
++0x18,
++0x0,
++0xfc,
++0x30,
++0x78,
++0xcc,
++0xcc,
++0x78,
++0x30,
++0xfc,
++0x38,
++0x6c,
++0xc6,
++0xfe,
++0xc6,
++0x6c,
++0x38,
++0x0,
++0x38,
++0x6c,
++0xc6,
++0xc6,
++0x6c,
++0x6c,
++0xee,
++0x0,
++0x1c,
++0x30,
++0x18,
++0x7c,
++0xcc,
++0xcc,
++0x78,
++0x0,
++0x0,
++0x0,
++0x7e,
++0xdb,
++0xdb,
++0x7e,
++0x0,
++0x0,
++0x6,
++0xc,
++0x7e,
++0xdb,
++0xdb,
++0x7e,
++0x60,
++0xc0,
++0x38,
++0x60,
++0xc0,
++0xf8,
++0xc0,
++0x60,
++0x38,
++0x0,
++0x78,
++0xcc,
++0xcc,
++0xcc,
++0xcc,
++0xcc,
++0xcc,
++0x0,
++0x0,
++0xfc,
++0x0,
++0xfc,
++0x0,
++0xfc,
++0x0,
++0x0,
++0x30,
++0x30,
++0xfc,
++0x30,
++0x30,
++0x0,
++0xfc,
++0x0,
++0x60,
++0x30,
++0x18,
++0x30,
++0x60,
++0x0,
++0xfc,
++0x0,
++0x18,
++0x30,
++0x60,
++0x30,
++0x18,
++0x0,
++0xfc,
++0x0,
++0xe,
++0x1b,
++0x1b,
++0x18,
++0x18,
++0x18,
++0x18,
++0x18,
++0x18,
++0x18,
++0x18,
++0x18,
++0x18,
++0xd8,
++0xd8,
++0x70,
++0x30,
++0x30,
++0x0,
++0xfc,
++0x0,
++0x30,
++0x30,
++0x0,
++0x0,
++0x76,
++0xdc,
++0x0,
++0x76,
++0xdc,
++0x0,
++0x0,
++0x38,
++0x6c,
++0x6c,
++0x38,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x18,
++0x18,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x18,
++0x0,
++0x0,
++0x0,
++0xf,
++0xc,
++0xc,
++0xc,
++0xec,
++0x6c,
++0x3c,
++0x1c,
++0x78,
++0x6c,
++0x6c,
++0x6c,
++0x6c,
++0x0,
++0x0,
++0x0,
++0x70,
++0x18,
++0x30,
++0x60,
++0x78,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x3c,
++0x3c,
++0x3c,
++0x3c,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0,
++0x0
++};
++const char console_font_widths[256] = {
++1,8,8,7,7,7,7,6,8,7,8,8,7,8,8,8,7,7,7,7,8,8,7,8,7,7,7,7,7,8,8,8,4,1,4,5,5,5,5,2,4,4,4,5,1,5,1,5,5,5,5,5,5,5,5,5,5,5,1,1,4,5,4,5,6,5,5,5,5,5,5,5,5,3,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,3,5,3,5,5,2,5,5,5,5,5,4,5,5,1,5,4,2,5,5,5,5,5,5,5,3,5,5,5,5,5,5,4,1,4,6,5,5,5,5,5,5,5,5,5,5,5,5,3,5,2,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,3,5,5,2,5,5,5,5,5,5,5,6,5,5,5,1,5,5,7,8,8,5,5,5,7,7,5,7,7,7,7,7,5,5,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,5,8,8,8,4,8,8,7,6,6,7,6,7,7,7,6,7,7,6,8,8,5,6,6,6,6,6,8,5,6,7,6,5,5,8,6,5,6,1
++};
+\ No newline at end of file
+diff --git a/pexpert/arm/common/pe_bringup.c b/pexpert/arm/common/pe_bringup.c
+index 9661f09..84bf997 100644
+--- a/pexpert/arm/common/pe_bringup.c
++++ b/pexpert/arm/common/pe_bringup.c
+@@ -39,15 +39,450 @@
+ #include <machine/machine_routines.h>
+ #include "semihost.h"
+ 
++/*
++ * M6 (krillin/MT6582): consola de framebuffer para XNU.
++ *
++ * PE_early_puts original usa SEMIHOSTING (escribe a un debugger JTAG por SVC/BKPT),
++ * que en el movil sin depurador NO imprime nada. Lo re-cableamos a una consola de
++ * framebuffer directa, portada 1:1 del GenericBooter (plat-mt6582/fb.c), YA PROBADA
++ * en este hardware (sus mensajes de arranque salian en pantalla en M3).
++ *
++ * El LK deja el panel hx8389 (qHD 540x960, DSI video, auto-refresco) con su fb en el
++ * FISICO 0xBF400000, stride 2176 = 544*4 (32bpp XRGB8888). En modo virtual de XNU ese
++ * fisico esta IDENTITY-MAPPED por el fix de M4, asi que la escritura directa funciona
++ * desde arm_init. Texto BLANCO sobre NEGRO -> legible con cualquier orden de canal.
++ */
++#define FB_FONT_WIDTH  8
++#define FB_BASE        0xBF400000
++/*
++ * El framebuffer del krillin es RGB565 (16 BITS por pixel), stride 1088 bytes
++ * = 544 pixeles.  Antes lo tratabamos como 32bpp con stride 2176: cada palabra
++ * de 32 bits pintaba DOS pixeles reales y cada fila nuestra ocupaba DOS filas
++ * reales, asi que todo salia al doble de tamaño y cada linea de mas de ~34
++ * caracteres derramaba su mitad derecha sobre la fila siguiente.  Ese era el
++ * "solape" que arrastrabamos desde el principio.
++ */
++#define FB_STRIDE_PX   544          /* pixeles de 16 bits (1088 bytes) */
++/*
++ * COORDENADAS LOGICAS, no reales.
++ *
++ * El panel es RGB565 (16 bits) pero escribimos palabras de 32, que es la
++ * configuracion con la que el arranque llega lejos; escribiendo de 16 en 16 el
++ * kernel muere antes de A3 por razones aun sin identificar.  Con escrituras de
++ * 32 bits, cada pixel logico nuestro cubre DOS pixeles reales en horizontal y
++ * cada fila logica DOS filas reales.  Declarando 270x480 logicos cubrimos
++ * exactamente los 540x960 reales del panel: nada se sale por abajo (antes se
++ * perdia la mitad de la traza) y ninguna linea invade la fila siguiente.
++ *
++ * El texto sale al doble: 33 columnas x 28 lineas.  Los marcadores estan
++ * pensados para caber en ese ancho.
++ */
++#define FB_WIDTH       270          /* 540 reales / 2 */
++#define FB_HEIGHT      480          /* 960 reales / 2 */
++#define FB_BG_COLOR    0x00000000
++#define FB_FG_COLOR    0x00FFFFFF
++#define FB_FONT_H      16           /* iso_font es 8x16 */
++#define FB_SCALE       fbcon_scale  /* escala en runtime */
++#define FB_LINE_H      ((FB_FONT_H + 1) * FB_SCALE)       /* alto de linea (1px de aire) */
++#define FB_CH          (FB_FONT_H * FB_SCALE)             /* alto del glifo escalado */
++#define FB_CW          (FB_FONT_WIDTH * FB_SCALE)         /* ancho del glifo escalado */
++#define FB_ADV         (FB_FONT_WIDTH * FB_SCALE)         /* la ISO 8x16 ya trae su propio aire lateral */
++#define FB_TAB_PX      (FB_ADV * 4)                       /* parada de tabulador, en pixeles */
++
++/*
++ * Fuente ISO 8x16 de XNU (osfmk/console/iso_font.c), la misma que usa la
++ * consola vc_.  Sustituye a la 8x8 de antes: al doble de alto los glifos
++ * tienen DETALLE real, mientras que ampliar una 8x8 por 3 solo produce
++ * bloques de 3x3 escalonados — mas grande pero no mas legible.
++ *
++ * OJO: los bits van LSB PRIMERO (bit 0 = pixel izquierdo), al reves que la
++ * 8x8.  Lo fija video_console.c: 'unsigned char mask = 1' y mask <<= 1.
++ */
++extern unsigned char iso_font[];
++
++/*
++ * Escala 1 = 60 columnas x 53 lineas en el panel de 540x960, con glifos de
++ * 16px de alto: mas pequeño que la 8x8 a escala 3 y bastante mas legible.
++ */
++static int fbcon_scale = 1;
++/*
++ * 0 = VERBOSO desde el arranque.  Se silenciaba porque el kprintf de XNU
++ * ahogaba una pantalla de 30 columnas; por UART no hay tal limite y cada
++ * power-cycle cuesta bateria, asi que interesa exprimir cada arranque.
++ */
++static int fbcon_quiet = 0;
++static int fbcon_inited = 0;
++
++static inline void fbcon_setPixel(int x, int y, unsigned int color)
++{
++    volatile unsigned int *fb = (volatile unsigned int *)FB_BASE;
++    if (x < 0 || y < 0 || x >= FB_WIDTH || y >= FB_HEIGHT)
++        return;
++    fb[y * FB_STRIDE_PX + x] = color;
++}
++
++static void fbcon_drawRect(int bx, int by, int w, int h, unsigned int color)
++{
++    int x, y;
++    for (y = by; y < by + h; y++)
++        for (x = bx; x < bx + w; x++)
++            fbcon_setPixel(x, y, color);
++}
++
++static int fbcon_drawChar(char c, int row, int col)
++{
++    int index = ((int)(unsigned char) c) * FB_FONT_H;
++    int rr, cc, sx, sy;
++    for (rr = 0; rr < FB_FONT_H; rr++) {
++        int myrow = iso_font[index + rr];
++        for (cc = 0; cc < FB_FONT_WIDTH; cc++) {
++            if ((myrow >> cc) & 0x1)
++                for (sy = 0; sy < FB_SCALE; sy++)
++                    for (sx = 0; sx < FB_SCALE; sx++)
++                        fbcon_setPixel(col + cc * FB_SCALE + sx,
++                                       row + rr * FB_SCALE + sy, FB_FG_COLOR);
++        }
++    }
++    /* La ISO es monoespaciada: avance fijo, 1px de aire entre caracteres. */
++    return FB_ADV;
++}
++
++/*
++ * La consola se apoya en un BUFFER DE TEXTO en DRAM, no en los pixeles.
++ *
++ * La version anterior hacia el scroll moviendo ~2MB de pixeles dentro del
++ * framebuffer, que esta mapeado como memoria device.  En hardware eso NO
++ * desplazaba nada: al llegar abajo el cursor volvia arriba y el texto nuevo se
++ * pintaba sobre el viejo (el "solape" que arrastrabamos).  Guardando el texto
++ * en RAM, el scroll es un memmove de ~6KB en memoria normal y la pantalla se
++ * REDIBUJA entera desde el buffer.  Deja de depender de como se comporte el
++ * framebuffer y es reproducible fuera del movil.
++ */
++#define FB_MAXROWS 64
++#define FB_MAXCOLS 96
++
++static char fbcon_buf[FB_MAXROWS][FB_MAXCOLS];
++static int fbcon_rows, fbcon_cols;   /* tamaño util en caracteres */
++static int fbcon_r, fbcon_c;         /* cursor, en CARACTERES */
++static int fbcon_heal;
++static int fbcon_frozen;      /* 1 = la pantalla deja de aceptar texto */               /* cuenta para el repintado periodico */
++
++/* Borra el buffer ENTERO, incluidas las columnas fuera de pantalla que
++ * fbcon_drawRect() no toca (stride 544 px frente a 540 visibles). */
++static void fbcon_clear_all(void)
++{
++    volatile unsigned int *fb = (volatile unsigned int *)FB_BASE;
++    int i, total = 960 * FB_STRIDE_PX;   /* area COMPLETA, igual que M16 */
++
++    for (i = 0; i < total; i++)
++        fb[i] = FB_BG_COLOR;
++}
++
++static void fbcon_redraw(void)
++{
++    int r, c, x;
++
++    fbcon_clear_all();
++    for (r = 0; r < fbcon_rows; r++) {
++        x = 0;
++        for (c = 0; c < fbcon_cols && fbcon_buf[r][c]; c++)
++            x += fbcon_drawChar(fbcon_buf[r][c], r * FB_LINE_H, x);
++    }
++}
++
++#define XNU_KRILLIN_BUILD "M67-diag"
++
++static void fbcon_init(void)
++{
++    int r, c;
++
++    fbcon_rows = FB_HEIGHT / FB_LINE_H;
++    fbcon_cols = FB_WIDTH / FB_ADV;
++    if (fbcon_rows > FB_MAXROWS)
++        fbcon_rows = FB_MAXROWS;
++    if (fbcon_cols > FB_MAXCOLS)
++        fbcon_cols = FB_MAXCOLS;
++
++    for (r = 0; r < FB_MAXROWS; r++)
++        for (c = 0; c < FB_MAXCOLS; c++)
++            fbcon_buf[r][c] = 0;
++
++    fbcon_r = fbcon_c = 0;
++    fbcon_clear_all();
++
++    /* Barra verde de 4px: prueba visual de que XNU LLEGO hasta aqui.  Si la
++     * pantalla sale de un color plano sin esta barra, el arranque murio antes
++     * de la consola y lo que se ve lo dejo el booter. */
++    {
++        int x, y;
++        for (y = 0; y < 4; y++)
++            for (x = 0; x < FB_WIDTH; x++)
++                fbcon_setPixel(x, y, 0x07E0);
++    }
++    fbcon_inited = 1;            /* antes del banner: corta la recursion */
++    PE_early_puts("=== XNU krillin build " XNU_KRILLIN_BUILD " ===\n");
++}
++
++static void fbcon_newline(void)
++{
++    int r, c, keep;
++
++    fbcon_c = 0;
++    fbcon_r++;
++
++    /*
++     * Auto-reparacion.  Hay algo mas en XNU que repinta el framebuffer entero
++     * y sepulta la traza (el dialogo de panico era uno, pero no el unico).  En
++     * vez de perseguir cada pintor, repintamos NOSOTROS periodicamente desde
++     * el buffer de texto: quien pinte encima queda tapado en el siguiente
++     * ciclo y lo que acaba viendose es siempre nuestra consola.
++     */
++    if (fbcon_r < fbcon_rows)
++        return;
++
++    /* pantalla llena: se descarta la mitad de arriba y se redibuja */
++    keep = fbcon_rows / 2;
++    for (r = 0; r + keep < fbcon_rows; r++)
++        for (c = 0; c < fbcon_cols; c++)
++            fbcon_buf[r][c] = fbcon_buf[r + keep][c];
++    for (; r < fbcon_rows; r++)
++        for (c = 0; c < fbcon_cols; c++)
++            fbcon_buf[r][c] = 0;
++
++    fbcon_r = fbcon_rows - keep;
++    fbcon_redraw();
++}
++
++/*
++ * Congela la pantalla.  Tras el arranque, IOKit sigue emparejando drivers y su
++ * salida hace scroll de la traza antes de que se pueda leer.  Congelando, la
++ * ultima pantalla se queda fija mientras el kernel sigue corriendo.
++ */
++/* Imprime un entero en hex; hace falta para volcar PC/FAR de un fallo. */
++void PE_early_puthex(unsigned int v)
++{
++    static const char hexd[] = "0123456789abcdef";
++    char buf[11];
++    int i;
++
++    buf[0] = '0';
++    buf[1] = 'x';
++    for (i = 0; i < 8; i++)
++        buf[2 + i] = hexd[(v >> (28 - 4 * i)) & 0xf];
++    buf[10] = 0;
++    PE_early_puts(buf);
++}
++
++/*
++ * Salida por UART0 (0x11002000), en PARALELO al framebuffer.
++ *
++ * Se escribe la direccion FISICA directamente: el UART esta identity-mapeado
++ * (por el booter antes del cambio de tablas, y por arm_vm_init despues), asi
++ * que funciona desde la primerisima linea del arranque — antes incluso de que
++ * ml_io_map() exista.  Espera ACOTADA: si el THRE no llega, se abandona en vez
++ * de colgar el arranque (nos mordio en M8).
++ *
++ * Confirmado en hardware: el krillin SI expone UART0 por D+/D- del micro-USB,
++ * a 921600 8N1.  El LK imprime ahi todo su arranque.
++ */
++/*
++ * Hasta que arm_vm_init no instala el identity-map del MMIO, escribir en
++ * 0x11002000 provoca un fallo de datos y mata el arranque en el primer
++ * caracter del banner.  Se habilita explicitamente cuando el mapeo ya existe.
++ */
++static int fbcon_uart_ok;
++
++void PE_uart_enable(void)
++{
++    fbcon_uart_ok = 1;
++}
++
++static void fbcon_uart_putc(char c)
++{
++    if (!fbcon_uart_ok)
++        return;
++
++    volatile unsigned int *thr = (volatile unsigned int *) (0x11002000 + 0x00);
++    volatile unsigned int *lsr = (volatile unsigned int *) (0x11002000 + 0x14);
++    unsigned int spin;
++
++    for (spin = 0; spin < 100000; spin++) {
++        if (*lsr & 0x20)        /* LSR.THRE: hay hueco en el transmisor */
++            break;
++    }
++    if (spin >= 100000)
++        return;
++    *thr = (unsigned int) (unsigned char) c;
++}
++
++void PE_fb_freeze(void)
++{
++    fbcon_frozen = 1;
++}
++
++static void fbcon_putchar(char c)
++{
++    unsigned char u = (unsigned char) c;
++
++    /* Todo lo que va a pantalla va tambien por serie, con CRLF. */
++    if (u == 0x0A)
++        fbcon_uart_putc('\r');
++    fbcon_uart_putc(c);
++
++    if (fbcon_frozen)
++        return;
++    if (!fbcon_inited)
++        fbcon_init();
++
++    if (u == 0x0A) {                 /* LF */
++        fbcon_newline();
++        return;
++    }
++    if (u == 0x0D) {                 /* CR */
++        fbcon_c = 0;
++        return;
++    }
++    if (u == 0x09) {                 /* TAB: espacios hasta la parada de 4 */
++        int stop = ((fbcon_c / 4) + 1) * 4;
++        while (fbcon_c < stop && fbcon_c < fbcon_cols) {
++            fbcon_buf[fbcon_r][fbcon_c] = ' ';
++            fbcon_c++;
++        }
++        return;
++    }
++    if (u < 0x20 || u > 0x7E)        /* no imprimible */
++        return;
++
++    if (fbcon_c >= fbcon_cols)
++        fbcon_newline();
++
++    fbcon_buf[fbcon_r][fbcon_c] = c;
++    fbcon_drawChar(c, fbcon_r * FB_LINE_H, fbcon_c * FB_ADV);
++    fbcon_c++;
++}
++
++/**
++ * PE_fb_calibrate
++ *
++ * Patron de calibracion.  NO asume formato: escribe por OFFSET DE BYTE crudo y
++ * deja que la pantalla nos diga como se interpretan esos bytes.
++ *
++ * Cuatro bandas consecutivas de 100 filas de 2176 bytes:
++ *   1. u32 0x00FF0000  -> ROJA  si el framebuffer es XRGB8888 de 32 bits
++ *   2. u32 0x000000FF  -> AZUL  si es XRGB8888
++ *   3. u16 0xF800      -> ROJA  si el framebuffer es RGB565 de 16 bits
++ *   4. u16 0x001F      -> AZUL  si es RGB565
++ *
++ * Cual de las bandas sale roja identifica la PROFUNDIDAD.  Y la altura total
++ * de las cuatro identifica el STRIDE: ~40%% de la pantalla si son 2176 bytes
++ * por fila, ~83%% si son 1088.
++ */
++void PE_fb_calibrate(void)
++{
++    volatile unsigned int   *w = (volatile unsigned int *) FB_BASE;
++    volatile unsigned short *h = (volatile unsigned short *) FB_BASE;
++    unsigned int band = 100 * 2176;      /* bytes por banda */
++    unsigned int i;
++
++    for (i = 0; i < (960 * 2176) / 4; i++)          /* todo a negro */
++        w[i] = 0;
++
++    for (i = 0;          i < band;     i += 4) w[i / 4] = 0x00FF0000;
++    for (i = band;       i < 2 * band; i += 4) w[i / 4] = 0x000000FF;
++    for (i = 2 * band;   i < 3 * band; i += 2) h[i / 2] = 0xF800;
++    for (i = 3 * band;   i < 4 * band; i += 2) h[i / 2] = 0x001F;
++}
++
++/**
++ * PE_fb_cache_flush
++ *
++ * Limpia+invalida la D-cache sobre el rango del framebuffer (DCCIMVAC, hasta
++ * el punto de coherencia).
++ *
++ * Las primeras lineas del arranque se pintan con el framebuffer aun mapeado
++ * como memoria NORMAL CACHEABLE por el bootloader, asi que quedan sucias en la
++ * D-cache.  arm_vm_init lo remapea despues como memoria device, pero esas
++ * lineas sucias siguen ahi y se vuelcan MAS TARDE, segun la cache se llena y
++ * las va expulsando, reescribiendo pantalla ya actualizada: son los rayajos
++ * diagonales que ensuciaban la traza, y por eso iban a mas segun avanzaba el
++ * arranque.  Expulsandolas a mano ANTES del cambio de tablas, y con el mapeo
++ * device ya instalado, el residuo no puede reaparecer.
++ *
++ * flush_dcache() esta declarada en arm/pmap.h pero NO implementada para ARM en
++ * este arbol (solo existe la version x86_64), de ahi el ensamblador.
++ */
++void PE_fb_cache_flush(void)
++{
++    unsigned int addr;
++    unsigned int end = FB_BASE + (unsigned int)(960 * FB_STRIDE_PX * 4);
++
++    for (addr = FB_BASE; addr < end; addr += 32)
++        __asm__ volatile ("mcr p15, 0, %0, c7, c14, 1" : : "r"(addr) : "memory");
++
++    __asm__ volatile ("dsb" : : : "memory");
++}
++
++/**
++ * PE_fb_refresh
++ *
++ * Repinta la pantalla ENTERA desde el buffer de texto.
++ *
++ * Las primeras lineas del arranque se escriben con el framebuffer aun mapeado
++ * como memoria normal CACHEABLE (las tablas del bootloader).  Esas escrituras
++ * se quedan sucias en la D-cache; cuando mas tarde se vuelcan, reaparecen
++ * encima de la pantalla actual y producen el texto viejo rayado que veiamos.
++ * Llamando a esto una vez las cachés estan configuradas, la pantalla se
++ * reconstruye desde RAM y el residuo desaparece.
++ */
++void PE_fb_refresh(void)
++{
++    if (fbcon_inited)
++        fbcon_redraw();
++}
++
+ /**
+  * PE_early_puts
+  *
+- * Bringup function, use for semihosting. Prints to SYS_OUTPUT0.
++ * M6: re-cableado a la consola de framebuffer del krillin (arriba). El texto de XNU
++ * (empezando por "arm_init: starting up") aparece en pantalla.
++ */
++/**
++ * PE_fb_putc
++ *
++ * Un solo caracter. Es lo que se engancha a PE_kputc para que kprintf(),
++ * kdb_printf() y panic() de XNU salgan por ESTA consola (el krillin no tiene
++ * UART, y la consola vc_ pelearia por el mismo framebuffer).
+  */
++extern const char *panicstr;    /* != NULL en cuanto XNU entra en panic() */
++
++void PE_fb_putc(char c)
++{
++    /*
++     * Este es el destino de kprintf()/kdb_printf()/panic() de XNU.
++     *
++     * El kprintf normal es DEMASIADO verboso para 30 columnas: llena la
++     * pantalla de ruido y sepulta los marcadores del arranque, que es lo unico
++     * que podemos leer en una foto.  Se silencia por defecto.
++     *
++     * Dos excepciones: el boot-arg -xnu-verbose, y un panic() en curso, donde
++     * el mensaje es justo lo que estamos buscando (ahi encogemos la letra para
++     * que quepa entero).
++     */
++    if (panicstr == (const char *) 0 && fbcon_quiet)
++        return;
++    fbcon_putchar(c);
++}
++
++/* Llamado desde el pexpert si aparece el boot-arg -xnu-verbose. */
++void PE_fb_verbose(void)
++{
++    fbcon_quiet = 0;
++}
++
+ void PE_early_puts(char *s)
+ {
+     while (*s != '\0') {
+-        PE_semihost_write_char(*s);
++        fbcon_putchar(*s);
+         s++;
+     }
+     return;
+diff --git a/pexpert/arm/common/pe_kprintf.c b/pexpert/arm/common/pe_kprintf.c
+index 358cccb..f902db8 100644
+--- a/pexpert/arm/common/pe_kprintf.c
++++ b/pexpert/arm/common/pe_kprintf.c
+@@ -50,6 +50,8 @@ unsigned int disable_serial_output = FALSE;
+ unsigned int disable_serial_output = TRUE;
+ #endif
+ 
++extern void PE_fb_putc(char c);
++
+ void (*PE_kputc) (char c);
+ decl_simple_lock_data(static, kprintf_lock)
+ 
+@@ -79,10 +81,21 @@ void PE_init_kprintf(boolean_t vm_initialized)
+          * * call pal_serial_init() if our previous state was
+          * * not enabled 
+          */
++#ifdef BOARD_CONFIG_MT6582
++        /*
++         * El krillin no tiene UART accesible ni depurador JTAG: el semihosting
++         * (SVC/BKPT) no lleva a ninguna parte en hardware real, y cnputc()
++         * exige la consola vc_ que aun no existe.  La unica salida viva en
++         * esta ventana del arranque es el framebuffer del pexpert.
++         */
++        (void) pal_serial_init;
++        PE_kputc = PE_fb_putc;
++#else
+         if (!new_disable_serial_output && (!disable_serial_output || pal_serial_init()))
+             PE_kputc = PE_semihost_write_char;
+         else
+             PE_kputc = cnputc;
++#endif
+ 
+         disable_serial_output = new_disable_serial_output;
+     }
+diff --git a/pexpert/arm/pe_mt6582.c b/pexpert/arm/pe_mt6582.c
+new file mode 100644
+index 0000000..b53a38e
+--- /dev/null
++++ b/pexpert/arm/pe_mt6582.c
+@@ -0,0 +1,466 @@
++/*
++ * pexpert/arm/pe_mt6582.c — Platform Expert para MediaTek MT6582
++ * (BQ Aquaris E4.5 "krillin"). Cortex-A7 quad + GIC-400.
++ *
++ * Basado en pe_apq8060.c (Qualcomm) por ser GIC + ARMv7 igual que este SoC
++ * (el de OMAP3/N900 usa el INTC de TI, que no aplica).
++ * Framebuffer y watchdog VALIDADOS EN HARDWARE por GenericBooter (M1).
++ */
++#if defined(BOARD_CONFIG_MT6582)
++
++#include <mach/mach_types.h>
++#include <IOKit/IOPlatformExpert.h>
++#include <pexpert/pexpert.h>
++#include <pexpert/arm/protos.h>
++#include <pexpert/arm/boot.h>
++#include <machine/machine_routines.h>
++#include <vm/pmap.h>
++#include <arm/pmap.h>
++#include "pe_mt6582.h"
++
++#define KPRINTF_PREFIX  "PE_MT6582: "
++#define HwReg(x) *((volatile unsigned long*)(x))
++#define barrier() __asm__ __volatile__("": : :"memory")
++
++extern void rtclock_intr(arm_saved_state_t * regs);
++extern void rtc_configure(uint64_t hz);
++
++extern void PE_fb_putc(char c);
++extern void PE_fb_verbose(void);
++
++vm_offset_t gMT6582UartBase;
++vm_offset_t gMT6582GICCPUBase;
++vm_offset_t gMT6582GICDistBase;
++vm_offset_t gMT6582TimerBase;
++vm_offset_t gMT6582WdtBase;
++vm_offset_t gMT6582SysirqBase;
++
++static uint64_t clock_decrementer = 0;
++static boolean_t clock_initialized = FALSE;
++static boolean_t clock_had_irq = FALSE;
++static uint64_t clock_absolute_time = 0;
++
++static void timer_configure(void)
++{
++    uint64_t hz = MT6582_TIMER_RATE;
++    gPEClockFrequencyInfo.timebase_frequency_hz = hz;
++    clock_decrementer = hz / 100;          /* tick de 10ms */
++    kprintf(KPRINTF_PREFIX "decrementer = %llu (rate %llu Hz)\n",
++            clock_decrementer, hz);
++    rtc_configure(hz);
++    return;
++}
++
++/* ---------------- UART (8250, reg-shift 2) ----------------
++ * El krillin no expone el UART fisicamente; se implementa por completitud,
++ * pero la consola real de este port es el framebuffer. */
++#define MT6582_UART_SPIN_MAX 100000
++
++void mt6582_putc(int c)
++{
++    unsigned int spin;
++
++    if (!gMT6582UartBase)
++        return;
++    if (c == '\n')
++        mt6582_putc('\r');
++
++    /*
++     * El krillin NO expone el UART fisicamente.  pe_init.c hace
++     * PE_kputc = gPESocDispatch.uart_putc, o sea que TODO kprintf/kdb_printf/
++     * panic de XNU pasa por aqui: lo mandamos al framebuffer, que es la unica
++     * consola real de este port.  El UART se sigue intentando best-effort con
++     * espera ACOTADA (un busy-wait infinito colgaba el arranque entero).
++     */
++
++    for (spin = 0; spin < MT6582_UART_SPIN_MAX; spin++) {
++        if (HwReg(gMT6582UartBase + UART_LSR) & UART_LSR_THRE)
++            break;
++        barrier();
++    }
++    if (spin >= MT6582_UART_SPIN_MAX) {
++        gMT6582UartBase = 0;
++        return;
++    }
++    HwReg(gMT6582UartBase + UART_THR) = c;
++}
++
++int mt6582_getc(void)
++{
++    if (!gMT6582UartBase)
++        return -1;
++    {
++        unsigned int spin;
++        for (spin = 0; spin < MT6582_UART_SPIN_MAX; spin++) {
++            if (HwReg(gMT6582UartBase + UART_LSR) & UART_LSR_DR)
++                break;
++            barrier();
++        }
++        if (spin >= MT6582_UART_SPIN_MAX)
++            return -1;
++    }
++    return (int) (HwReg(gMT6582UartBase + UART_RBR) & 0xff);
++}
++
++void mt6582_uart_init(void)
++{
++    gMT6582UartBase    = ml_io_map(MT6582_UART0_BASE,    PAGE_SIZE);
++    gMT6582GICDistBase = ml_io_map(MT6582_GIC_DIST_BASE, PAGE_SIZE);
++    gMT6582GICCPUBase  = ml_io_map(MT6582_GIC_CPU_BASE,  PAGE_SIZE);
++    gMT6582TimerBase   = ml_io_map(MT6582_TIMER_BASE,    PAGE_SIZE);
++    gMT6582WdtBase     = ml_io_map(MT6582_WDT_BASE,      PAGE_SIZE);
++    gMT6582SysirqBase  = ml_io_map(MT6582_SYSIRQ_BASE,   PAGE_SIZE)
++                         + MT6582_SYSIRQ_INTPOL;
++    return;
++}
++
++/* ---------------- GIC-400 ---------------- */
++static void gic_dist_init(void)
++{
++    uint32_t i, num_irq, cpumask = 1;
++
++    cpumask |= cpumask << 8;
++    cpumask |= cpumask << 16;
++
++    HwReg(gMT6582GICDistBase + GIC_DIST_CTRL) = 0;
++    num_irq = HwReg(gMT6582GICDistBase + GIC_DIST_CTR) & 0x1f;
++    num_irq = (num_irq + 1) * 32;
++
++    for (i = 32; i < num_irq; i += 16)
++        HwReg(gMT6582GICDistBase + GIC_DIST_CONFIG + i * 4 / 16) = 0;
++    for (i = 32; i < num_irq; i += 4)
++        HwReg(gMT6582GICDistBase + GIC_DIST_TARGET + i * 4 / 4) = cpumask;
++    for (i = 0; i < num_irq; i += 4)
++        HwReg(gMT6582GICDistBase + GIC_DIST_PRI + i) = 0xa0a0a0a0;
++    for (i = 0; i < num_irq; i += 32)
++        HwReg(gMT6582GICDistBase + GIC_DIST_ENABLE_CLEAR + i * 4 / 32) = 0xffffffff;
++
++    HwReg(gMT6582GICDistBase + GIC_DIST_CTRL) = 0x1;
++}
++
++static void gic_cpu_init(void)
++{
++    HwReg(gMT6582GICCPUBase + GIC_CPU_PRIMASK) = 0xf0;
++    HwReg(gMT6582GICCPUBase + GIC_CPU_CTRL) = 0x1;
++}
++
++void mt6582_interrupt_init(void)
++{
++    assert(gMT6582GICDistBase && gMT6582GICCPUBase);
++    gic_dist_init();
++    gic_cpu_init();
++    return;
++}
++
++/* ---------------- Timer GPT de MediaTek ---------------- */
++uint64_t mt6582_timer_value(void);
++void mt6582_timer_enabled(int enable);
++
++/*
++ * Invierte la polaridad de un SPI en el bloque "sysirq" de MediaTek.
++ *
++ * El GIC solo entiende nivel-ALTO / flanco-ascendente, pero el GPT del MT6582
++ * es activo-BAJO: el DTS de Linux que funciona en este mismo telefono lo
++ * declara IRQ_TYPE_LEVEL_LOW.  MediaTek intercala un bloque de inversion en
++ * 0x10200100; sin programarlo el GIC NO VE NUNCA el tick del timer, y
++ * mt6582_timebase_init se queda esperando para siempre.
++ *
++ * Replica exacta de drivers/irqchip/irq-mtk-sysirq.c: bit (spi & 31) de la
++ * palabra (spi >> 5).  Para el timer, SPI 112 -> bit 16 de la palabra 3.
++ */
++static void mt6582_sysirq_set_low(uint32_t spi)
++{
++    uint32_t word = spi >> 5;
++    uint32_t bit = 1u << (spi & 0x1f);
++
++    if (!gMT6582SysirqBase)
++        return;
++    HwReg(gMT6582SysirqBase + word * 4) |= bit;
++}
++
++void mt6582_timebase_init(void)
++{
++    uint32_t reg, bit;
++
++    PE_early_puts("TB entrada\n");
++
++    /*
++     * El GPT es un bloque COMPARTIDO: los 6 timers cuelgan de una sola linea
++     * de interrupcion.  Si el LK dejo cualquiera de ellos con su IRQ
++     * habilitada y el estado pendiente, la linea queda asserted; al habilitar
++     * interrupciones entra de inmediato y, al ser de NIVEL, se re-dispara para
++     * siempre.  Nadie limpiaba esto: enmascaramos los 6 y reconocemos todo lo
++     * pendiente antes de configurar los nuestros.
++     */
++    HwReg(gMT6582TimerBase + GPT_IRQ_EN_REG) = 0;
++    HwReg(gMT6582TimerBase + GPT_IRQ_ACK_REG) = 0x3f;
++
++    timer_configure();
++    mt6582_timer_enabled(FALSE);
++
++    /* GPT2 en free-run como fuente del timebase */
++    HwReg(gMT6582TimerBase + GPT_CTRL_REG(MT6582_TIMER_CLK_SRC)) = GPT_CTRL_CLEAR;
++    HwReg(gMT6582TimerBase + GPT_CLK_REG(MT6582_TIMER_CLK_SRC))  =
++        GPT_CLK_SRC_SYS13M | GPT_CLK_DIV1;
++    HwReg(gMT6582TimerBase + GPT_CTRL_REG(MT6582_TIMER_CLK_SRC)) =
++        GPT_CTRL_OP(GPT_CTRL_OP_FREERUN) | GPT_CTRL_ENABLE;
++
++    PE_early_puts("TB gpt2 freerun\n");
++
++    /* polaridad ANTES de habilitarlo en el GIC */
++    mt6582_sysirq_set_low(MT6582_INT_TIMER - 32);
++    PE_early_puts("TB sysirq pol ok\n");
++
++    /* habilitar el IRQ del timer en el GIC */
++    reg = GIC_DIST_ENABLE_SET + (MT6582_INT_TIMER / 32) * 4;
++    bit = 1 << (MT6582_INT_TIMER & 31);
++    HwReg(gMT6582GICDistBase + reg) = bit;
++    PE_early_puts("TB gic enable ok\n");
++
++    ml_set_interrupts_enabled(TRUE);
++    PE_early_puts("TB irq on\n");
++
++    mt6582_timer_enabled(TRUE);
++    PE_early_puts("TB timer on\n");
++
++    clock_initialized = TRUE;
++    PE_early_puts("TB esperando IRQ\n");
++
++    /*
++     * Espera ACOTADA.  Antes era un while(!clock_had_irq) infinito: si el tick
++     * no llega, el arranque se cuelga sin decir nada.  Es la misma familia de
++     * bug que el putc del UART.  Acotada, un timer que no responde es un
++     * diagnostico, no un cuelgue mudo.
++     */
++    {
++        unsigned int spin;
++
++        for (spin = 0; spin < 20000000 && !clock_had_irq; spin++)
++            barrier();
++
++        if (clock_had_irq)
++            PE_early_puts("TB IRQ TIMER OK\n");
++        else
++            PE_early_puts("TB SIN IRQ - sigo sin timer\n");
++    }
++
++    return;
++}
++
++void mt6582_handle_interrupt(void *context)
++{
++    uint32_t irq_no = HwReg(gMT6582GICCPUBase + GIC_CPU_INTACK);
++
++    /* Sondas de UN SOLO disparo: el kprintf esta silenciado, y ademas imprimir
++     * en cada interrupcion inundaria la pantalla. */
++    static int seen_any = 0, seen_spur = 0, seen_timer = 0, seen_other = 0;
++
++    if (!seen_any) {
++        seen_any = 1;
++        PE_early_puts("IRQ: manejador entrado\n");
++    }
++
++    if (irq_no >= NR_IRQS) {
++        if (!seen_spur) {
++            seen_spur = 1;
++            PE_early_puts("IRQ: espuria\n");
++        }
++        return;
++    }
++
++    if (irq_no != MT6582_INT_TIMER && !seen_other) {
++        seen_other = 1;
++        PE_early_puts("IRQ: NO es la del timer\n");
++    }
++    if (irq_no == MT6582_INT_TIMER && !seen_timer) {
++        seen_timer = 1;
++        PE_early_puts("IRQ: es la del TIMER\n");
++    }
++
++    if (irq_no == MT6582_INT_TIMER) {
++        HwReg(gMT6582TimerBase + GPT_IRQ_ACK_REG) = GPT_IRQ_ACK(MT6582_TIMER_CLK_EVT);
++        mt6582_timer_enabled(FALSE);
++        clock_absolute_time += (clock_decrementer - (int64_t) mt6582_timer_value());
++        rtclock_intr((arm_saved_state_t *) context);
++        mt6582_timer_enabled(TRUE);
++        clock_had_irq = TRUE;
++    } else {
++        irq_iokit_dispatch(irq_no);
++    }
++
++    HwReg(gMT6582GICCPUBase + GIC_CPU_EOI) = irq_no;
++    return;
++}
++
++uint64_t mt6582_get_timebase(void)
++{
++    static uint32_t tb_last = 0;
++    static uint64_t tb_high = 0;
++    uint32_t now;
++
++    if (!gMT6582TimerBase)
++        return 0;
++
++    /*
++     * La base de tiempo se lee del contador LIBRE (GPT2), que esta en
++     * free-run precisamente para esto y es monotono por construccion.
++     *
++     * Antes se reconstruia a partir de GPT1 — el one-shot del planificador —
++     * con clock_absolute_time + (decrementer - contador).  Como GPT1 cuenta
++     * hacia arriba dentro de cada tick, esa resta hacia que el tiempo fuera
++     * HACIA ATRAS entre interrupciones: la base no era monotona, microuptime()
++     * no progresaba, y el "System uptime in nanoseconds: 0" del informe de
++     * panico era exactamente ese sintoma.  Con el reloj parado,
++     * prngForceReseed() (random_init -> PreliminarySetup) gira para siempre
++     * esperando a que pasen sus ticks, y el arranque muere en PS6.
++     *
++     * GPT2 es de 32 bits y a 13 MHz da la vuelta cada ~5.5 min, asi que
++     * llevamos la parte alta a mano.
++     */
++    now = HwReg(gMT6582TimerBase + GPT_CNT_REG(MT6582_TIMER_CLK_SRC));
++    if (now < tb_last)
++        tb_high += 0x100000000ULL;
++    tb_last = now;
++
++    return tb_high + (uint64_t) now;
++}
++
++uint64_t mt6582_timer_value(void)
++{
++    if (!gMT6582TimerBase)
++        return 0;
++    return (uint64_t) HwReg(gMT6582TimerBase + GPT_CNT_REG(MT6582_TIMER_CLK_EVT));
++}
++
++void mt6582_timer_enabled(int enable)
++{
++    if (!gMT6582TimerBase)
++        return;
++
++    if (enable) {
++        HwReg(gMT6582TimerBase + GPT_CTRL_REG(MT6582_TIMER_CLK_EVT)) = GPT_CTRL_CLEAR;
++        HwReg(gMT6582TimerBase + GPT_CLK_REG(MT6582_TIMER_CLK_EVT))  =
++            GPT_CLK_SRC_SYS13M | GPT_CLK_DIV1;
++        HwReg(gMT6582TimerBase + GPT_CMP_REG(MT6582_TIMER_CLK_EVT))  =
++            (uint32_t) clock_decrementer;
++        HwReg(gMT6582TimerBase + GPT_IRQ_EN_REG) |= GPT_IRQ_ENABLE(MT6582_TIMER_CLK_EVT);
++        HwReg(gMT6582TimerBase + GPT_CTRL_REG(MT6582_TIMER_CLK_EVT)) =
++            GPT_CTRL_OP(GPT_CTRL_OP_ONESHOT) | GPT_CTRL_ENABLE;
++    } else {
++        HwReg(gMT6582TimerBase + GPT_IRQ_EN_REG) &= ~GPT_IRQ_ENABLE(MT6582_TIMER_CLK_EVT);
++        HwReg(gMT6582TimerBase + GPT_CTRL_REG(MT6582_TIMER_CLK_EVT)) = 0;
++        barrier();
++        HwReg(gMT6582TimerBase + GPT_IRQ_ACK_REG) = GPT_IRQ_ACK(MT6582_TIMER_CLK_EVT);
++        barrier();
++    }
++    return;
++}
++
++/* ---------------- Framebuffer (el que deja el LK; validado en M1) ---------------- */
++/* vcputc() = consola vc_ de XNU; solo vale si initialize_screen() corrio
++ * (boot-arg -xnu-vc).  Por defecto usamos la consola del pexpert. */
++void vcputc(__unused int l, __unused int u, int c);
++
++static void _fb_putc(int c)
++{
++    PE_fb_putc((char) c);
++}
++
++void mt6582_framebuffer_init(void)
++{
++    char tempbuf[16];
++
++    PE_early_puts("FB0 fb_init entrada\n");
++
++    PE_state.video.v_baseAddr = (unsigned long) MT6582_FB_BASE;
++    PE_state.video.v_rowBytes = MT6582_FB_STRIDE;   /* 2176, NO width*4 */
++    PE_state.video.v_width    = MT6582_FB_WIDTH;
++    PE_state.video.v_height   = MT6582_FB_HEIGHT;
++    PE_state.video.v_depth    = MT6582_FB_DEPTH;
++
++    PE_early_puts("FB0b video struct ok\n");
++
++    if (PE_parse_boot_argn("-xnu-verbose", tempbuf, sizeof(tempbuf)))
++        PE_fb_verbose();          /* recupera el kprintf completo de XNU */
++
++    PE_early_puts("FB1 video set\n");
++    PE_early_puts("FB2 pre kprintf\n");
++    kprintf(KPRINTF_PREFIX "framebuffer %ux%u stride %u @ 0x%08x\n",
++            MT6582_FB_WIDTH, MT6582_FB_HEIGHT, MT6582_FB_STRIDE, MT6582_FB_BASE);
++    PE_early_puts("FB3 post kprintf\n");
++
++    if (PE_parse_boot_argn("-early-fb-debug", tempbuf, sizeof(tempbuf)))
++        initialize_screen((void *) &PE_state.video, kPEAcquireScreen);
++
++    /*
++     * initialize_screen() arranca la consola vc_ de XNU sobre ESTE MISMO
++     * framebuffer, con su propia fuente y su propio cursor en (0,0): pinta
++     * encima de la traza del pexpert = texto solapado e ilegible.  Durante el
++     * bring-up la pantalla es del pexpert; se cede a vc_ con -xnu-vc.
++     */
++    if (PE_parse_boot_argn("-xnu-vc", tempbuf, sizeof(tempbuf))) {
++        PE_early_puts("FB4 vc on\n");
++        if (PE_parse_boot_argn("-graphics-mode", tempbuf, sizeof(tempbuf)))
++            initialize_screen((void *) &PE_state.video, kPEGraphicsMode);
++        else
++            initialize_screen((void *) &PE_state.video, kPETextMode);
++        PE_early_puts("FB5 vc done\n");
++    } else {
++        PE_early_puts("FB4 sin vc\n");
++    }
++
++    return;
++}
++
++/* ---------------- Halt / restart (watchdog TOPRGU, validado en M1) ---------------- */
++int mt6582_halt_restart(int type)
++{
++    if (!gMT6582WdtBase)
++        return -1;
++
++    if (type == kPERestartCPU) {
++        /* watchdog armado con reset externo -> reinicia el SoC */
++        HwReg(gMT6582WdtBase + MT6582_WDT_MODE) =
++            MT6582_WDT_MODE_KEY | MT6582_WDT_MODE_ENABLE | MT6582_WDT_MODE_EXTEN;
++        HwReg(gMT6582WdtBase + MT6582_WDT_RESTART) = MT6582_WDT_RESTART_KEY;
++        while (1)
++            barrier();
++    }
++
++    /* halt: desarmar el watchdog (si no, resetea a los segundos) y parar */
++    HwReg(gMT6582WdtBase + MT6582_WDT_MODE) = MT6582_WDT_MODE_KEY;
++    while (1)
++        barrier();
++
++    return 0;
++}
++
++void PE_init_SocSupport_mt6582(void)
++{
++    gPESocDispatch.uart_getc        = mt6582_getc;
++    gPESocDispatch.uart_putc        = mt6582_putc;
++    gPESocDispatch.uart_init        = mt6582_uart_init;
++    gPESocDispatch.interrupt_init   = mt6582_interrupt_init;
++    gPESocDispatch.timebase_init    = mt6582_timebase_init;
++    gPESocDispatch.get_timebase     = mt6582_get_timebase;
++    gPESocDispatch.handle_interrupt = mt6582_handle_interrupt;
++    gPESocDispatch.timer_value      = mt6582_timer_value;
++    gPESocDispatch.timer_enabled    = mt6582_timer_enabled;
++    gPESocDispatch.framebuffer_init = mt6582_framebuffer_init;
++
++    PE_early_puts("SOC1 pre io_map\n");
++    mt6582_uart_init();          /* mapea los MMIO ANTES de tocar el fb */
++    PE_early_puts("SOC2 io_map ok\n");
++    mt6582_framebuffer_init();
++    PE_early_puts("SOC3 soc done\n");
++
++    PE_halt_restart = mt6582_halt_restart;
++}
++
++void PE_init_SocSupport_stub(void)
++{
++    PE_early_puts("SoC MT6582 krillin\n");
++    PE_init_SocSupport_mt6582();
++}
++
++#endif /* !BOARD_CONFIG_MT6582 */
+diff --git a/pexpert/arm/pe_mt6582.h b/pexpert/arm/pe_mt6582.h
+new file mode 100644
+index 0000000..068e039
+--- /dev/null
++++ b/pexpert/arm/pe_mt6582.h
+@@ -0,0 +1,93 @@
++/*
++ * pexpert/arm/pe_mt6582.h — MediaTek MT6582 (BQ Aquaris E4.5 "krillin")
++ * Cortex-A7 quad, GIC-400. Direcciones tomadas del port de Linux mainline
++ * del krillin; el framebuffer y el watchdog estan VALIDADOS EN HARDWARE
++ * (GenericBooter M1 pinta en pantalla y el WDT reinicia si no se desarma).
++ */
++#ifndef _PEXPERT_MT6582_H_
++#define _PEXPERT_MT6582_H_
++
++/* ---- GIC-400 (offsets estandar ARM; solo cambian las bases) ---- */
++#define MT6582_SYSIRQ_BASE       0x10200000   /* pagina del bloque sysirq */
++#define MT6582_SYSIRQ_INTPOL     0x100        /* registros de polaridad: 0x10200100 */
++#define MT6582_GIC_DIST_BASE     0x10211000
++#define MT6582_GIC_CPU_BASE      0x10212000
++#define GIC_CPU_REG(off)         ((off))
++#define GIC_DIST_REG(off)        ((off))
++#define GIC_CPU_CTRL             GIC_CPU_REG(0x00)
++#define GIC_CPU_PRIMASK          GIC_CPU_REG(0x04)
++#define GIC_CPU_BINPOINT         GIC_CPU_REG(0x08)
++#define GIC_CPU_INTACK           GIC_CPU_REG(0x0c)
++#define GIC_CPU_EOI              GIC_CPU_REG(0x10)
++#define GIC_CPU_RUNNINGPRI       GIC_CPU_REG(0x14)
++#define GIC_CPU_HIGHPRI          GIC_CPU_REG(0x18)
++#define GIC_DIST_CTRL            GIC_DIST_REG(0x000)
++#define GIC_DIST_CTR             GIC_DIST_REG(0x004)
++#define GIC_DIST_ENABLE_SET      GIC_DIST_REG(0x100)
++#define GIC_DIST_ENABLE_CLEAR    GIC_DIST_REG(0x180)
++#define GIC_DIST_PRI             GIC_DIST_REG(0x400)
++#define GIC_DIST_TARGET          GIC_DIST_REG(0x800)
++#define GIC_DIST_CONFIG          GIC_DIST_REG(0xc00)
++
++/* ---- Timer GPT de MediaTek (drivers/clocksource/timer-mediatek.c) ---- */
++#define MT6582_TIMER_BASE        0x10008000
++#define GPT_IRQ_EN_REG           0x00
++#define GPT_IRQ_ACK_REG          0x08
++#define GPT_IRQ_ENABLE(n)        (1 << ((n) - 1))
++#define GPT_IRQ_ACK(n)           (1 << ((n) - 1))
++#define GPT_CTRL_REG(n)          (0x10 * (n))
++#define GPT_CLK_REG(n)           (0x04 + (0x10 * (n)))
++#define GPT_CNT_REG(n)           (0x08 + (0x10 * (n)))
++#define GPT_CMP_REG(n)           (0x0C + (0x10 * (n)))
++#define GPT_CTRL_OP(v)           (((v) & 0x3) << 4)
++#define GPT_CTRL_OP_ONESHOT      (0)
++#define GPT_CTRL_OP_FREERUN      (3)
++#define GPT_CTRL_CLEAR           (2)
++#define GPT_CTRL_ENABLE          (1)
++#define GPT_CLK_SRC_SYS13M       (0)
++#define GPT_CLK_DIV1             (0x0)
++#define MT6582_TIMER_CLK_EVT     (1)    /* GPT1: tick del scheduler (one-shot) */
++#define MT6582_TIMER_CLK_SRC     (2)    /* GPT2: timebase (free-run) */
++#define MT6582_TIMER_RATE        13000000   /* system_clk = 13MHz */
++
++/* IRQ del timer: DTS dice GIC_SPI 112 -> numero GIC = 32 + 112 */
++#define MT6582_INT_TIMER         (32 + 112)
++#define NR_IRQS                  (32 + 224)
++
++/* ---- UART0 (8250, reg-shift 2). Sin acceso fisico al UART en el krillin:
++ *      la consola util es el framebuffer. ---- */
++#define MT6582_UART0_BASE        0x11002000
++#define UART_RBR                 0x00
++#define UART_THR                 0x00
++#define UART_LSR                 0x14
++#define UART_LSR_DR              0x01
++#define UART_LSR_THRE            0x20
++
++/* ---- Framebuffer que deja el LK (VALIDADO en HW por GenericBooter M1):
++ *      panel Himax hx8389 qHD, DSI modo video (se auto-refresca). ---- */
++#define MT6582_FB_BASE           0xBF400000
++#define MT6582_FB_WIDTH          540
++#define MT6582_FB_HEIGHT         960
++#define MT6582_FB_STRIDE         2176   /* lo que se le DICE a XNU (ver nota) */
++#define MT6582_FB_DEPTH          32     /* lo que se le DICE a XNU (ver nota) */
++
++/*
++ * NOTA: el panel es RGB565 de 16 bits, stride 1088 (medido con un patron de
++ * calibracion).  Nuestra consola pinta asi.  Pero estos dos valores son solo
++ * lo que se copia a PE_state.video, o sea lo que XNU CREE.  Poniendolos a
++ * 16/1088 el arranque se muere y la pantalla queda roja; con 32/2176 llegaba
++ * mucho mas lejos.  Como toda la salida de video propia de XNU esta
++ * desactivada, declararlo como 32bpp es inocuo y evita ese camino.
++ */
++
++/* ---- Watchdog TOPRGU (VALIDADO en HW: sin desarmarlo, reset a los segundos) ---- */
++#define MT6582_WDT_BASE          0x10007000
++#define MT6582_WDT_MODE          0x00
++#define MT6582_WDT_RESTART       0x08
++#define MT6582_WDT_MODE_KEY      0x22000000
++#define MT6582_WDT_RESTART_KEY   0x1971
++#define MT6582_WDT_MODE_ENABLE   0x0001
++#define MT6582_WDT_MODE_EXTPOL   0x0004
++#define MT6582_WDT_MODE_EXTEN    0x0008
++
++#endif /* _PEXPERT_MT6582_H_ */
+diff --git a/pexpert/conf/files.arm b/pexpert/conf/files.arm
+index 6918d22..9ebd116 100644
+--- a/pexpert/conf/files.arm
++++ b/pexpert/conf/files.arm
+@@ -18,4 +18,5 @@ pexpert/arm/pe_s5l8720x.c		standard
+ pexpert/arm/pe_s5l8900x.c		standard
+ pexpert/arm/pe_s5l8930x.c		standard
+ pexpert/arm/pe_apq8060.c		standard
++pexpert/arm/pe_mt6582.c		standard
+ pexpert/arm/pe_imx53.c			standard
+diff --git a/tools/gen_assym.py b/tools/gen_assym.py
+new file mode 100644
+index 0000000..aea77c4
+--- /dev/null
++++ b/tools/gen_assym.py
+@@ -0,0 +1,16 @@
++#!/usr/bin/env python3
++# Convierte genassym.o (con marcadores @DEFINITION# de clang/ARM) en assym.s
++import sys, re
++for line in open(sys.argv[1], errors="replace"):
++    if "DEFINITION#" not in line:
++        continue
++    body = line.split("DEFINITION#", 1)[1].rstrip("\n")
++    # body: "#define NAME \t#VALUE"  (o con $VALUE)
++    body = body.replace("$", "")
++    m = re.match(r"(#define\s+\w+)\s+#?(\S+)", body)
++    if not m:
++        continue
++    name_def, val = m.group(1), m.group(2)
++    print(f"{name_def}\t{val}")                       # #define NAME  VALUE
++    nm = name_def.split()[1]
++    print(f"#define {nm}_NUM\t{val}")                 # #define NAME_NUM VALUE
