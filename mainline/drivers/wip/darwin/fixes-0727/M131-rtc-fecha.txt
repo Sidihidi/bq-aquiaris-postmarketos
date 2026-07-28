@@ -1,0 +1,12 @@
+	 * M131 (krillin): el krillin no tiene RTC cableado en este port, asi que
+	 * AppleARMPE se queda con IOPlatformExpert::getGMTTimeOfDay() = 0.  Con eso
+	 * clock_initialize_calendar() hace epoch = 0 - uptime (TIME_SUB), o sea un
+	 * time_t NEGATIVO, y las conversiones de fecha de libc se vuelven locas:
+	 * M130 pillo a launchd girando en _tmcomp/_time2sub (el bucle de mktime).
+	 * Damos una fecha fija sensata para que converjan.  Cuando se porte el RTC
+	 * del MT6583 (mt6323 rtc), esto sobra.
+	 */
+	if (result == 0)
+		result = 1785110400L;	/* 2026-07-27 00:00:00 UTC */
+
+	return (result);
