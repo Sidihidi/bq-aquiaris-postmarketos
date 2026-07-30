@@ -2617,7 +2617,7 @@ static int spm_tty_ring_write(struct mt6582_spm *s, const u8 *buf, size_t n)
 static void spm_tty_rx(struct mt6582_spm *s, void __iomem *ccif)
 {
 	void __iomem *t = spm_tty_ring;		/* H13e: mapeado al registrar */
-	u32 rr, rw, rl, i, n;
+	u32 rr, rw, rl, i, n, entregados;
 
 	if (!t)
 		return;
@@ -2646,37 +2646,47 @@ static void spm_tty_rx(struct mt6582_spm *s, void __iomem *ccif)
 	if (n > CCCI_TTY_BUF_SIZE)		/* H13n: cinturon y tirantes */
 		return;
 	/*
-	 * H13b: el tty_port puede no existir todavia (el MD empieza a emitir en
-	 * cuanto arranca).  Se drena y se ACKea igual —que es lo que evita que el
-	 * MD se atasque— y solo se empuja si hay tty.
+	 * H13q: patron canonico de recepcion, calcado de hvc_console.c — el driver
+	 * del arbol que empuja al tty_port desde un kthread, igual que aqui.
+	 * Faltaban cuatro pasos, y el segundo es el que explica el desastre:
 	 *
-	 * H13g: con tty_insert_flip_string, que ademas dice cuantos bytes acepto
-	 * la capa de linea.  Si acepta menos de los que sacamos del anillo, la
-	 * diferencia se perderia en silencio.
+	 *   1) tty_port_tty_get()        referencia al tty; sin tty no se empuja
+	 *   2) tty_buffer_request_room() CUANTO cabe -- insertabamos a ciegas
+	 *                                hasta 16 KB sin preguntarlo nunca
+	 *   3) tty_throttled()           respetar el freno de la capa de linea
+	 *   4) tty_kref_put()
+	 *
+	 * Ademas se consume del anillo SOLO lo entregado: si la capa de linea no
+	 * acepta todo, el resto se queda para el proximo timbre en vez de perderse.
 	 */
-	/*
-	 * H13p: empujar SOLO si alguien tiene el nodo abierto.  El hilo arranca al
-	 * terminar el ciclo y lo primero que hace es empujar lo que el MD dejo en
-	 * el anillo, cuando aun no hay lector — y ahi es donde el sistema se caia
-	 * (medido: push=0 sobrevive, push=1 reinicia).  Sin lector se drena y se
-	 * ACKea igual, que es lo que evita que el MD se atasque.
-	 */
-	if (spm_tty_ready && spm_tty_push && atomic_read(&spm_tty_abierto) > 0) {
-		/*
-		 * H13i: empuje caracter a caracter, como en el #91, que era el que
-		 * sobrevivia al ciclo.  La version por trozos con buffer en pila
-		 * (H13g) reiniciaba el movil DURANTE la cascada y sin dejar rastro
-		 * -- queda anotada como sospechosa para cuando se retome.
-		 */
-		for (i = 0; i < n; i++)
-			tty_insert_flip_char(&spm_tty_p,
-					     readb(t + 0x18 + rr + i), TTY_NORMAL);
-		tty_flip_buffer_push(&spm_tty_p);
-		if (spm_tty_debug)
-			dev_info(s->dev, "H13i rx: empujados %u\n", n);
-	}
+	entregados = n;			/* sin lector se descarta: el MD no debe atascarse */
+	if (spm_tty_ready && spm_tty_push) {
+		struct tty_struct *tty = tty_port_tty_get(&spm_tty_p);
 
-	writel((rr + n) % rl, t + 0x00);
+		if (tty) {
+			entregados = 0;
+			if (!tty_throttled(tty)) {
+				int sitio = tty_buffer_request_room(&spm_tty_p, n);
+
+				if (sitio > 0) {
+					for (i = 0; i < (u32)sitio; i++)
+						tty_insert_flip_char(&spm_tty_p,
+								     readb(t + 0x18 + rr + i),
+								     TTY_NORMAL);
+					tty_flip_buffer_push(&spm_tty_p);
+					entregados = sitio;
+				}
+			}
+			tty_kref_put(tty);
+			if (spm_tty_debug)
+				dev_info(s->dev, "H13q rx: %u pendientes -> %u entregados\n",
+					 n, entregados);
+		}
+	}
+	if (!entregados)		/* nada entregado: se reintenta al proximo timbre */
+		return;
+
+	writel((rr + entregados) % rl, t + 0x00);
 	wmb();
 	if (spm_tty_ack) {
 		mutex_lock(&spm_ccif_tx);
@@ -2684,8 +2694,8 @@ static void spm_tty_rx(struct mt6582_spm *s, void __iomem *ccif)
 		mutex_unlock(&spm_ccif_tx);
 	}
 	if (spm_tty_debug)
-		dev_info(s->dev, "H13g rx: fin, read %u -> %u, ACK enviado\n",
-			 rr, (rr + n) % rl);
+		dev_info(s->dev, "H13q rx: fin, read %u -> %u, ACK enviado\n",
+			 rr, (rr + entregados) % rl);
 }
 
 static int spm_tty_op_open(struct tty_struct *tty, struct file *f)
