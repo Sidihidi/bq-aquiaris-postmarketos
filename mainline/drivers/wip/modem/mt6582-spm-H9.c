@@ -32,6 +32,11 @@
 #include <linux/firmware.h>
 #include <linux/fs.h>
 #include <linux/namei.h>
+#include <linux/kthread.h>
+#include <linux/tty.h>
+#include <linux/tty_driver.h>
+#include <linux/tty_flip.h>
+#include <linux/tty_port.h>
 
 #define SPM_POWERON_CONFIG_SET		0x0000
 #define SPM_POWER_ON_VAL0		0x0010
@@ -1185,6 +1190,10 @@ static int spm_tty_at_set(const char *val, const struct kernel_param *kp)
 static const struct kernel_param_ops spm_tty_at_ops = { .set = spm_tty_at_set };
 module_param_cb(spm_tty_at, &spm_tty_at_ops, NULL, 0200);
 MODULE_PARM_DESC(spm_tty_at, "H12: manda una linea por el canal AT del modem (UART2)");
+
+static uint spm_tty_enable = 1;
+module_param(spm_tty_enable, uint, 0644);
+MODULE_PARM_DESC(spm_tty_enable, "H13: registrar /dev/ttyCCCI0 y el hilo de servicio tras el HS2");
 
 
 #define KERN_EMI_BASE	0x80000000
@@ -2371,6 +2380,320 @@ static u32 spm_fs_serve(struct mt6582_spm *s, void __iomem *fs, u32 idx)
 	return length;
 }
 
+static void spm_tty_rx(struct mt6582_spm *s, void __iomem *ccif);
+
+/*
+ * H13: UNA pasada de servicio del CCCI (leer RCHNUM, despachar y ACKear).
+ *
+ * Extraido del bucle de spm_md_hs2 sin tocar su contenido, para que lo usen
+ * los dos: el bucle de arranque y el hilo que mantiene vivo el tty.  Devuelve
+ * 1 si en esta pasada ha llegado el boot-ready.
+ */
+static int spm_ccci_pass(struct mt6582_spm *s, void __iomem *ccif,
+			 void __iomem *fs, int *done)
+{
+	u32 rch;
+	int k, hs2_ahora = 0;
+
+	rch = readl(ccif + 0x10);
+	for (k = 0; k < 8 && rch; k++) {
+		u32 d0, d1, lch, rsv;
+
+		if (!(rch & (1 << k)))
+			continue;
+		d0  = readl(ccif + 0x180 + k * 16);
+		d1  = readl(ccif + 0x184 + k * 16);
+		lch = readl(ccif + 0x188 + k * 16);
+		rsv = readl(ccif + 0x18c + k * 16);
+		fs_dbg(s->dev, "CCCI RX ch%d: d0=%08x id=%08x lch=%08x rsv=%08x\n",
+			 k, d0, d1, lch, rsv);
+		/* H7i: los canales que NO son el FS(14) son raros y CLAVE
+		 * (control, IPC, excepciones): siempre visibles, aunque
+		 * spm_fs_quiet silencie la cascada de ficheros. */
+		if (lch != 0x0e)
+			dev_info(s->dev, "CCCI RX no-FS ch%d: d0=%08x id=%08x lch=%08x rsv=%08x\n",
+				 k, d0, d1, lch, rsv);
+		/* boot-ready HS2: canal de control (lch=0) + id=NORMAL_BOOT_ID(0),
+		 * distinto del HS1 (que trae rsv=MD_INIT_CHK_ID=0x5555FFFF). */
+		if (lch == 0 && d1 == 0 && rsv != 0x5555FFFF) {
+			if (!*done) {
+				dev_info(s->dev, "*** HS2 LOGRADO: NORMAL_BOOT_ID (stage 2 = M1 COMPLETO) ***\n");
+				hs2_ahora = 1;	/* H9a: desde aqui cuentan las post-HS2 */
+			}
+			*done = 1;
+		}
+		/* H6 PROXY FS: el MD manda su peticion de EFS/NVRAM por CCCI_FS_RX(14).
+		 * fs_stream_buffer_t = {u32 fs_ops; u8 buf[16384]} (16388B), buffer idx
+		 * = rsv. Volcamos la peticion (op + path) y respondemos por CCCI_FS_TX(15)
+		 * con {data0=MD-view del buffer, data1=len+4, rsv=idx} (ccci_fs_send).
+		 * NOTA: el CONTENIDO de la respuesta (resultado del fs_op) lo define
+		 * ccci_fsd userspace -> HIPOTESIS aqui (result=0); ground-truth pendiente
+		 * de la snoop de LineageOS (fs_rx/tx_debug_enable). */
+		if (lch == 10)		/* H13: CCCI_UART2_RX -> el tty */
+			spm_tty_rx(s, ccif);
+		if (lch == 14) {
+			u32 idx = rsv & 0xff;
+			/* stride = sizeof(fs_stream_buffer_t) = {u32 fs_ops; u8 buf[16384]}
+			 * = 16388 = 0x4004 (ccci_fs.h). El 0x14014 era el TOTAL de los 5
+			 * buffers (bug: fuera de region para idx>0). */
+			u32 boff = idx * 0x4004;
+			u32 fs_ops, fs_len;
+			int tch;
+			u32 busy;
+
+			fs_ops = readl(fs + boff + 0);
+			fs_dbg(s->dev, "H6 FS REQ idx=%u op=%08x [%08x %08x] path=[%08x %08x %08x]\n",
+				 idx, fs_ops, readl(fs + boff + 4),
+				 readl(fs + boff + 8), readl(fs + boff + 12),
+				 readl(fs + boff + 16), readl(fs + boff + 20));
+			/*
+			 * H8h: volcado COMPLETO de la peticion del OPEN.
+			 * El handler leia los flags de +4, que es el CONTADOR DE
+			 * CAMPOS (vale 2) -> nunca activaba O_CREAT.  Los flags
+			 * deben venir en el 2o campo, detras del path:
+			 *   +8 = len_0 | +0xc = path | +0xc+align4(len_0) = len_1
+			 * Se volcan 14 palabras para localizarlo con datos, no
+			 * por deduccion.
+			 */
+			if ((fs_ops & 0xffff) == 0x1001 && !spm_fs_quiet) {
+				char rb[200];
+				int rn = 0, rw;
+
+				for (rw = 0; rw < 14 && rn < 190; rw++)
+					rn += scnprintf(rb + rn, 200 - rn, "%08x ",
+							readl(fs + boff + rw * 4));
+				rb[rn] = 0;
+				dev_info(s->dev, "H8h OPEN req: %s\n", rb);
+			}
+			/* servidor FS: file-op sobre /data/nvram/md + respuesta en el buffer;
+			 * devuelve la length del payload (spm_fs_serve, H6f). */
+			fs_len = spm_fs_serve(s, fs, idx);
+			wmb();
+			if (fs_len == SPM_FS_NOREPLY) {	/* H6o: control, no se contesta */
+				dev_info(s->dev, "H6 FS: control -> NO se envia FS_TX\n");
+				goto fs_noreply;
+			}
+			busy = readl(ccif + 0x04) & 0xff;
+			for (tch = 0; tch < 8; tch++)
+				if (!(busy & (1 << tch)))
+					break;
+			if (tch < 8) {
+				writel(1 << tch, ccif + 0x04);	/* ocupar canal fisico TX */
+				writel((MD_SMEM_PHYS + 0xE000) - MD_AP_OFF + boff,
+				       ccif + 0x100 + tch * 16 + 0);	/* data0 = MD-view buffer */
+				writel(fs_len + 4, ccif + 0x100 + tch * 16 + 4); /* data1 = length+4 */
+				writel(15, ccif + 0x100 + tch * 16 + 8);	/* channel = CCCI_FS_TX */
+				writel(idx, ccif + 0x100 + tch * 16 + 12);	/* reserved = idx */
+				wmb();
+				writel(tch, ccif + 0x0c);	/* TCHNUM -> dispara */
+				fs_dbg(s->dev, "H6 FS RESP idx=%u -> FS_TX ch%d data0=%08x\n",
+					 idx, tch, (MD_SMEM_PHYS + 0xE000) - MD_AP_OFF + boff);
+				/*
+				 * H7n: volcado literal de la respuesta.  Hay que diffear palabra a
+				 * palabra contra el ground-truth (gd-boot-full.out linea 12) en vez
+				 * de deducir el formato: es lo unico que distingue "casi igual" de
+				 * "igual".  Se imprimen 20 palabras desde +0 del buffer.
+				 */
+				if (spm_fs_dumpresp) {
+					char db[220];
+					int dn = 0, dw;
+
+					for (dw = 0; dw < 20; dw++)
+						dn += scnprintf(db + dn, sizeof(db) - dn, "%08x ",
+								readl(fs + boff + dw * 4));
+					dev_info(s->dev, "H7n RESP len=%u | %s\n", fs_len, db);
+				}
+			} else {
+				dev_warn(s->dev, "H6 FS: sin canal TX libre (BUSY=%02x)\n", busy);
+			}
+		}
+fs_noreply:
+		writel(1 << k, ccif + 0x14);	/* ACK canal k -> libera el TX del MD */
+	}
+
+	return hs2_ahora;
+}
+
+/* ===================== H13: /dev/ttyCCCI0 ===================== */
+
+#define TTY_MODEM_PORT	1		/* puerto TTY del canal AT (UART2) */
+
+static struct tty_driver *spm_tty_drv;
+static bool spm_tty_ready;	/* H13b: el tty_port ya existe */
+static struct tty_port spm_tty_p;
+static DEFINE_MUTEX(spm_ccif_tx);	/* el CCIF lo tocan el hilo y el write */
+static struct task_struct *spm_ccci_task;
+
+/* Copia al tx_buffer del puerto y toca el timbre.  Devuelve los bytes puestos. */
+static int spm_tty_ring_write(struct mt6582_spm *s, const u8 *buf, size_t n)
+{
+	u32 base = MD_SMEM_PHYS + CCCI_TTY_BASE + TTY_MODEM_PORT * CCCI_TTY_STRIDE;
+	void __iomem *t, *ccif;
+	u32 tw, tl, i;
+	int ret;
+
+	if (!n)
+		return 0;
+	t = ioremap(base, CCCI_TTY_SMEM_SIZE);
+	ccif = ioremap(0x1020A000, 0x200);
+	if (!t || !ccif) {
+		if (t) iounmap(t);
+		if (ccif) iounmap(ccif);
+		return -ENOMEM;
+	}
+	mutex_lock(&spm_ccif_tx);
+	tw = readl(t + 0x10);
+	tl = readl(t + 0x14);
+	if (!tl) {
+		mutex_unlock(&spm_ccif_tx);
+		iounmap(ccif); iounmap(t);
+		return -EIO;
+	}
+	if (n > tl / 2)
+		n = tl / 2;
+	for (i = 0; i < n; i++)
+		writeb(buf[i], t + 0x4018 + ((tw + i) % tl));
+	writel((tw + n) % tl, t + 0x10);
+	wmb();
+	ret = spm_ccci_send(s, ccif, 0, n, 12, 0);	/* CCCI_UART2_TX */
+	mutex_unlock(&spm_ccif_tx);
+	iounmap(ccif);
+	iounmap(t);
+	return ret ? ret : (int)n;
+}
+
+/*
+ * Llega el timbre del MD por lch 10: vaciar el anillo de RX hacia el tty y
+ * ACKear (mailbox con id=1 por CCCI_UART2_RX_ACK=11).  Si no se consume, el
+ * anillo se llena y el MD deja de emitir.
+ */
+static void spm_tty_rx(struct mt6582_spm *s, void __iomem *ccif)
+{
+	u32 base = MD_SMEM_PHYS + CCCI_TTY_BASE + TTY_MODEM_PORT * CCCI_TTY_STRIDE;
+	void __iomem *t = ioremap(base, CCCI_TTY_SMEM_SIZE);
+	u32 rr, rw, rl, i, n;
+
+	if (!t)
+		return;
+	rr = readl(t + 0x00);
+	rw = readl(t + 0x04);
+	rl = readl(t + 0x08);
+	if (!rl || rr == rw)
+		goto fuera;
+
+	n = (rw > rr) ? rw - rr : rl - rr;	/* hasta el final; la vuelta, al proximo timbre */
+	/*
+	 * H13b: el tty_port puede no existir todavia (el MD empieza a emitir en
+	 * cuanto arranca).  Se drena y se ACKea igual —que es lo que evita que el
+	 * MD se atasque— y solo se empuja si hay tty.
+	 */
+	if (spm_tty_ready) {
+		for (i = 0; i < n; i++)
+			tty_insert_flip_char(&spm_tty_p,
+					     readb(t + 0x18 + rr + i), TTY_NORMAL);
+		tty_flip_buffer_push(&spm_tty_p);
+	}
+
+	writel((rr + n) % rl, t + 0x00);
+	wmb();
+	mutex_lock(&spm_ccif_tx);
+	spm_ccci_send(s, ccif, 0xffffffff, 1, 11, 0);	/* CCCI_UART2_RX_ACK */
+	mutex_unlock(&spm_ccif_tx);
+	fs_dbg(s->dev, "H13 tty RX %u B (read %u -> %u)\n", n, rr, (rr + n) % rl);
+fuera:
+	iounmap(t);
+}
+
+static int spm_tty_op_open(struct tty_struct *tty, struct file *f)
+{
+	return tty_port_open(&spm_tty_p, tty, f);
+}
+
+static void spm_tty_op_close(struct tty_struct *tty, struct file *f)
+{
+	tty_port_close(&spm_tty_p, tty, f);
+}
+
+static ssize_t spm_tty_op_write(struct tty_struct *tty, const u8 *buf, size_t n)
+{
+	if (!gspm)
+		return -ENODEV;
+	return spm_tty_ring_write(gspm, buf, n);
+}
+
+static unsigned int spm_tty_op_write_room(struct tty_struct *tty)
+{
+	return CCCI_TTY_BUF_SIZE / 2;
+}
+
+static const struct tty_operations spm_tty_ops = {
+	.open       = spm_tty_op_open,
+	.close      = spm_tty_op_close,
+	.write      = spm_tty_op_write,
+	.write_room = spm_tty_op_write_room,
+};
+
+static int spm_tty_register(struct mt6582_spm *s)
+{
+	int ret;
+
+	if (spm_tty_drv)
+		return 0;
+	spm_tty_drv = tty_alloc_driver(1, TTY_DRIVER_REAL_RAW |
+					  TTY_DRIVER_DYNAMIC_DEV);
+	if (IS_ERR(spm_tty_drv))
+		return PTR_ERR(spm_tty_drv);
+
+	spm_tty_drv->driver_name = "mt6582-ccci";
+	spm_tty_drv->name        = "ttyCCCI";
+	spm_tty_drv->major       = 0;		/* dinamico */
+	spm_tty_drv->type        = TTY_DRIVER_TYPE_SERIAL;
+	spm_tty_drv->subtype     = SERIAL_TYPE_NORMAL;
+	spm_tty_drv->init_termios = tty_std_termios;
+	spm_tty_drv->init_termios.c_cflag = B115200 | CS8 | CREAD | CLOCAL;
+	tty_set_operations(spm_tty_drv, &spm_tty_ops);
+
+	tty_port_init(&spm_tty_p);
+	ret = tty_register_driver(spm_tty_drv);
+	if (ret) {
+		tty_port_destroy(&spm_tty_p);
+		tty_driver_kref_put(spm_tty_drv);
+		spm_tty_drv = NULL;
+		return ret;
+	}
+	tty_port_register_device(&spm_tty_p, spm_tty_drv, 0, NULL);
+	spm_tty_ready = true;
+	dev_info(s->dev, "H13: /dev/ttyCCCI0 registrado (canal AT del modem)\n");
+	return 0;
+}
+
+/*
+ * El hilo de servicio: mantiene el CCCI atendido cuando el bucle de arranque ya
+ * ha terminado.  Sin esto el tty solo funcionaria mientras alguien tuviera vivo
+ * el bucle sincrono de spm_md_hs2.
+ */
+static int spm_ccci_fn(void *arg)
+{
+	struct mt6582_spm *s = arg;
+	void __iomem *ccif = ioremap(0x1020A000, 0x200);
+	void __iomem *fs   = ioremap(MD_SMEM_PHYS + 0xE000, 0x15000);
+	int done = 1;			/* el HS2 ya paso: solo servir */
+
+	if (!ccif || !fs) {
+		if (ccif) iounmap(ccif);
+		if (fs) iounmap(fs);
+		return -ENOMEM;
+	}
+	dev_info(s->dev, "H13: hilo de servicio CCCI en marcha\n");
+	while (!kthread_should_stop()) {
+		spm_ccci_pass(s, ccif, fs, &done);
+		msleep(20);
+	}
+	iounmap(fs);
+	iounmap(ccif);
+	return 0;
+}
+
 static int spm_md_hs2(struct mt6582_spm *s)
 {
 	void __iomem *smem, *ccif, *fs;
@@ -2557,124 +2880,20 @@ static int spm_md_hs2(struct mt6582_spm *s)
 	 * del boot-ready. Aqui: leer cada canal con dato (RCHNUM), loguearlo, ACKear, y
 	 * buscar el boot-ready = mensaje de control (lch=0) con id=NORMAL_BOOT_ID(0) que
 	 * NO sea el HS1 (rsv!=MD_INIT_CHK_ID). */
+	/*
+	 * H13b: el tty se registra ANTES de servir, porque el MD empieza a emitir
+	 * por el lch 10 en cuanto arranca y el RX se empuja desde el propio bucle.
+	 */
+	if (spm_tty_enable)
+		spm_tty_register(s);
+
 	{
-		int done = 0, k, hs2_i = -1;
+		int done = 0, hs2_i = -1;
 
 		for (i = 0; i < (int)(spm_fs_fastpoll_iters + spm_fs_slow_iters) &&
 			    (!done || i - hs2_i < (int)spm_fs_post_hs2_iters); i++) {	/* fase rapida + 8s */
-			rch = readl(ccif + 0x10);
-			for (k = 0; k < 8 && rch; k++) {
-				u32 d0, d1, lch, rsv;
-
-				if (!(rch & (1 << k)))
-					continue;
-				d0  = readl(ccif + 0x180 + k * 16);
-				d1  = readl(ccif + 0x184 + k * 16);
-				lch = readl(ccif + 0x188 + k * 16);
-				rsv = readl(ccif + 0x18c + k * 16);
-				fs_dbg(s->dev, "CCCI RX ch%d: d0=%08x id=%08x lch=%08x rsv=%08x\n",
-					 k, d0, d1, lch, rsv);
-				/* H7i: los canales que NO son el FS(14) son raros y CLAVE
-				 * (control, IPC, excepciones): siempre visibles, aunque
-				 * spm_fs_quiet silencie la cascada de ficheros. */
-				if (lch != 0x0e)
-					dev_info(s->dev, "CCCI RX no-FS ch%d: d0=%08x id=%08x lch=%08x rsv=%08x\n",
-						 k, d0, d1, lch, rsv);
-				/* boot-ready HS2: canal de control (lch=0) + id=NORMAL_BOOT_ID(0),
-				 * distinto del HS1 (que trae rsv=MD_INIT_CHK_ID=0x5555FFFF). */
-				if (lch == 0 && d1 == 0 && rsv != 0x5555FFFF) {
-					if (!done) {
-						dev_info(s->dev, "*** HS2 LOGRADO: NORMAL_BOOT_ID (stage 2 = M1 COMPLETO) ***\n");
-						hs2_i = i;	/* H9a: desde aqui cuentan las post-HS2 */
-					}
-					done = 1;
-				}
-				/* H6 PROXY FS: el MD manda su peticion de EFS/NVRAM por CCCI_FS_RX(14).
-				 * fs_stream_buffer_t = {u32 fs_ops; u8 buf[16384]} (16388B), buffer idx
-				 * = rsv. Volcamos la peticion (op + path) y respondemos por CCCI_FS_TX(15)
-				 * con {data0=MD-view del buffer, data1=len+4, rsv=idx} (ccci_fs_send).
-				 * NOTA: el CONTENIDO de la respuesta (resultado del fs_op) lo define
-				 * ccci_fsd userspace -> HIPOTESIS aqui (result=0); ground-truth pendiente
-				 * de la snoop de LineageOS (fs_rx/tx_debug_enable). */
-				if (lch == 14) {
-					u32 idx = rsv & 0xff;
-					/* stride = sizeof(fs_stream_buffer_t) = {u32 fs_ops; u8 buf[16384]}
-					 * = 16388 = 0x4004 (ccci_fs.h). El 0x14014 era el TOTAL de los 5
-					 * buffers (bug: fuera de region para idx>0). */
-					u32 boff = idx * 0x4004;
-					u32 fs_ops, fs_len;
-					int tch;
-					u32 busy;
-
-					fs_ops = readl(fs + boff + 0);
-					fs_dbg(s->dev, "H6 FS REQ idx=%u op=%08x [%08x %08x] path=[%08x %08x %08x]\n",
-						 idx, fs_ops, readl(fs + boff + 4),
-						 readl(fs + boff + 8), readl(fs + boff + 12),
-						 readl(fs + boff + 16), readl(fs + boff + 20));
-					/*
-					 * H8h: volcado COMPLETO de la peticion del OPEN.
-					 * El handler leia los flags de +4, que es el CONTADOR DE
-					 * CAMPOS (vale 2) -> nunca activaba O_CREAT.  Los flags
-					 * deben venir en el 2o campo, detras del path:
-					 *   +8 = len_0 | +0xc = path | +0xc+align4(len_0) = len_1
-					 * Se volcan 14 palabras para localizarlo con datos, no
-					 * por deduccion.
-					 */
-					if ((fs_ops & 0xffff) == 0x1001 && !spm_fs_quiet) {
-						char rb[200];
-						int rn = 0, rw;
-
-						for (rw = 0; rw < 14 && rn < 190; rw++)
-							rn += scnprintf(rb + rn, 200 - rn, "%08x ",
-									readl(fs + boff + rw * 4));
-						rb[rn] = 0;
-						dev_info(s->dev, "H8h OPEN req: %s\n", rb);
-					}
-					/* servidor FS: file-op sobre /data/nvram/md + respuesta en el buffer;
-					 * devuelve la length del payload (spm_fs_serve, H6f). */
-					fs_len = spm_fs_serve(s, fs, idx);
-					wmb();
-					if (fs_len == SPM_FS_NOREPLY) {	/* H6o: control, no se contesta */
-						dev_info(s->dev, "H6 FS: control -> NO se envia FS_TX\n");
-						goto fs_noreply;
-					}
-					busy = readl(ccif + 0x04) & 0xff;
-					for (tch = 0; tch < 8; tch++)
-						if (!(busy & (1 << tch)))
-							break;
-					if (tch < 8) {
-						writel(1 << tch, ccif + 0x04);	/* ocupar canal fisico TX */
-						writel((MD_SMEM_PHYS + 0xE000) - MD_AP_OFF + boff,
-						       ccif + 0x100 + tch * 16 + 0);	/* data0 = MD-view buffer */
-						writel(fs_len + 4, ccif + 0x100 + tch * 16 + 4); /* data1 = length+4 */
-						writel(15, ccif + 0x100 + tch * 16 + 8);	/* channel = CCCI_FS_TX */
-						writel(idx, ccif + 0x100 + tch * 16 + 12);	/* reserved = idx */
-						wmb();
-						writel(tch, ccif + 0x0c);	/* TCHNUM -> dispara */
-						fs_dbg(s->dev, "H6 FS RESP idx=%u -> FS_TX ch%d data0=%08x\n",
-							 idx, tch, (MD_SMEM_PHYS + 0xE000) - MD_AP_OFF + boff);
-						/*
-						 * H7n: volcado literal de la respuesta.  Hay que diffear palabra a
-						 * palabra contra el ground-truth (gd-boot-full.out linea 12) en vez
-						 * de deducir el formato: es lo unico que distingue "casi igual" de
-						 * "igual".  Se imprimen 20 palabras desde +0 del buffer.
-						 */
-						if (spm_fs_dumpresp) {
-							char db[220];
-							int dn = 0, dw;
-
-							for (dw = 0; dw < 20; dw++)
-								dn += scnprintf(db + dn, sizeof(db) - dn, "%08x ",
-										readl(fs + boff + dw * 4));
-							dev_info(s->dev, "H7n RESP len=%u | %s\n", fs_len, db);
-						}
-					} else {
-						dev_warn(s->dev, "H6 FS: sin canal TX libre (BUSY=%02x)\n", busy);
-					}
-				}
-fs_noreply:
-				writel(1 << k, ccif + 0x14);	/* ACK canal k -> libera el TX del MD */
-			}
+			if (spm_ccci_pass(s, ccif, fs, &done))
+				hs2_i = i;
 			/* H6m: fase rapida al principio (mount FS del MD), luego relajado. */
 			if (i < (int)spm_fs_fastpoll_iters) {
 				if ((i & 0x3ff) == 0x3ff)	/* H7f: no monopolizar la CPU */
@@ -2713,6 +2932,15 @@ fs_noreply:
 			 * etapa 2 con la misma condicion que nosotros
 			 * (ccci_md_main.c:2140: msg.id == NORMAL_BOOT_ID en etapa 1),
 			 * asi que el HS2 era bueno y el que sobraba era este aviso. */
+			/*
+			 * H13: con el arranque hecho, el tty y su hilo toman el
+			 * relevo para que el canal AT siga vivo cuando este bucle
+			 * termine.  Solo si se alcanzo el HS2: sin modem no hay
+			 * nada que servir.
+			 */
+			if (done && spm_tty_enable && spm_tty_ready && !spm_ccci_task)
+				spm_ccci_task = kthread_run(spm_ccci_fn, s,
+							    "mt6582-ccci");
 			dev_info(s->dev, done
 				 ? "H4 HS2: fin del bucle (etapa 2 alcanzada). RCHNUM=%08x BUSY=%08x\n"
 				 : "H4 HS2: sin boot-ready. RCHNUM=%08x BUSY=%08x\n",
