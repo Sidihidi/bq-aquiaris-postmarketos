@@ -339,3 +339,80 @@ Los cuatro (support_mask sin declarar, regiones de red sin zerar, flags del OPEN
 disco) son **el mismo error de fondo**: código escrito con un modelo del protocolo que luego resultó
 falso, y que nadie revisó al cambiar el modelo. Todos estaban a la vista una vez conocida la
 estructura de campos.
+
+---
+
+# H8j/H8k — AUDITORÍA del driver contra el ground-truth (kernels #77-#79)
+
+Tras el patrón anterior, pasada sistemática buscando más sitios donde el driver siguiera leyendo
+campos con el modelo antiguo del protocolo. Las peticiones del `fsd` real de Lineage
+(`~/modem-fsd/gd-boot-full.out`) sirven de **ground-truth offline**, sin gastar ciclos de HW.
+
+## Los tres sospechosos: los tres CORRECTOS
+
+| Sitio | Lectura | Veredicto |
+|---|---|---|
+| `WRITE 0x1004` | `wlen = readl(+0x10)` | ✅ **correcto**. `+0x10` es `len_1`, y en el WRITE el 2º campo **son los datos**, así que su longitud *es* la longitud a escribir. Petición real: `nfields=3 \| len_0=4, handle=1 \| len_1=0x2c0, datos=0x12345678…` → 704 bytes. Los datos en `+0x14`, como hace el handler. |
+| `SEEK 0x1002` | `off = readl(+0x14)` | ✅ `data_1`. La petición real trae `nfields=3`: handle, offset, whence. |
+| `READ 0x1003` | `rlen = readl(+0x14)` | ✅ `data_1`. Petición real: `nfields=2 \| len_0=4, handle \| len_1=4, 0x62`. |
+
+**El SEEK ignora el tercer campo (`whence@+0x1c`) y no importa**: vale `1` en las **97** peticiones
+del ground-truth, y las respuestas devuelven el offset absoluto pedido (`0x5a`→`0x5a`,
+`0x870`→`0x870`) → `1` significa "desde el principio" = `SEEK_SET`. Documentado en el código para que
+nadie lo persiga otra vez.
+
+La forma de nuestras respuestas también coincide con el `fsd` real: `ffff1002` lleva **1 campo** con
+la nueva posición, que es exactamente lo que escribimos.
+
+### Un artefacto del ground-truth que engaña
+Aparecen 11 peticiones `1002` y 5 `1001` con `nfields=1` — no son variantes del protocolo: **la marca
+se escribe AL FINAL**, así que el poller capturó el buffer con los campos de la *respuesta* ya
+escritos y el `op` viejo todavía en `+0`. En el OPEN se ve claro (`nfields=1, len_0=4` es
+exactamente la forma de su respuesta: el handle).
+
+## Cuatro defectos reales encontrados
+
+### H8j — el comentario que causó el bug de H8i seguía ahí
+`u32 p0 = readl(fs + boff + 4); /* flags (OPEN) / handle */` había quedado **muerto** tras el fix, y
+el compilador ya lo estaba avisando (`unused variable 'p0'`) sin que nadie leyera los warnings.
+Eliminado, `p1` renombrado a `len0`, y la estructura de campos **documentada en el sitio donde se
+lee** — no en un doc aparte, que es lo que falló.
+
+### H8k — `if (!done)` escondía la métrica de progreso
+El volcado de la traza estaba dentro de `if (!done)`, un efecto colateral de H8g: el contador de
+operaciones **solo se imprimía cuando el arranque fallaba**. Justo cuando funciona, que es cuando
+más interesa, no había número. Ahora se imprime siempre.
+
+### H8k — el contador saturaba y la "cola" era el medio
+`spm_fslog` era lineal con `if (spm_fslog_n < 512)`: al llenarse dejaba de grabar, así que
+- el total **saturaba en 512** aunque se sirvieran ~900 → un número que parecía un dato y era un tope;
+- los "últimos 48" que imprimía H7h eran en realidad las ops **464-511**, del medio del arranque.
+
+Correcto cuando el MD moría antes de 512 ops; mentira desde que llegamos a 900. Convertido en
+**anillo real** (guarda los últimos 512) + `spm_fs_total` sin tope.
+
+### Warnings menores
+`kstrtou32` con valor de retorno ignorado (`warn_unused_result`) y un `-Wmisleading-indentation` de
+tres `if (x) iounmap(x);` en una línea. Semántica correcta en ambos, pero **tapaban los warnings
+reales** — el `p0` muerto llevaba ahí desde H8i. Ahora el fichero compila **sin un solo warning**.
+
+Comprobado que no hay fuga de `ioremap` en `spm_md_release` (los cinco se liberan también en la ruta
+de éxito), que sí importaría al usarse `spm_md_poweroff`/`poweron` en cada ciclo.
+
+## Medida final (kernel #79, defaults puros, verificado en HW)
+
+```
+*** HS2 LOGRADO: NORMAL_BOOT_ID (stage 2 = M1 COMPLETO) ***
+H6 FS: 900 ops servidos, ultimos 48: 1005 1001 1009 1002 1003 1005 1001 1004 1005 1001 1009 1002 ...
+H4 HS2: fin del bucle (etapa 2 alcanzada). RCHNUM=00000000 BUSY=00000000
+```
+
+**900 operaciones** (el `fsd` real hace 883), registro de excepción del MD limpio, cero fallos de
+OPEN. Y la cola ya es el final real del arranque: ciclos `OPEN·GetSize·seek·READ·CLOSE` con
+escrituras, el MD trabajando su NVRAM.
+
+## Lección de método
+Los cuatro bugs del día anterior venían de comentarios obsoletos; **dos de los cuatro defectos de
+esta auditoría los estaba señalando el compilador desde el principio**. Leer los warnings del build
+es más barato que cualquier RE. Y el ground-truth del `fsd` permitió validar tres handlers
+**sin gastar un ciclo de hardware**.

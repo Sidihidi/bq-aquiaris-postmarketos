@@ -8,3 +8,15 @@
 
 Se aplican sobre `~/mainline/linux-7.0.12/drivers/soc/mediatek/mt6582-spm.c` (árbol de la Pi `.123`,
 que no es git → esto es la foto de los cambios).
+
+## Auditoría (kernels #77-#79)
+
+| Fichero | Qué es |
+|---|---|
+| `patch_audit.py` | **H8j** — elimina el `p0` muerto (el comentario obsoleto que causó H8i), renombra `p1`→`len0`, documenta la estructura de campos en el sitio donde se lee, documenta el `whence` del SEEK y arregla el `kstrtou32`. |
+| `patch_indent.py` | `-Wmisleading-indentation` en el `iounmap` de `spm_md_release`. Cosmético, pero tapaba warnings reales. |
+| `patch_trace.py` | **H8k** — saca el volcado de la traza del `if (!done)`: el contador de ops solo se imprimía al fallar. |
+| `patch_ring.py` | **H8k** — `spm_fslog` pasa a anillo real + `spm_fs_total` sin tope. Antes saturaba en 512 y los "últimos 48" eran del medio del arranque. |
+
+Resultado: el fichero compila **sin warnings** y la medida con defaults puros es
+**900 ops FS + `NORMAL_BOOT_ID`** (kernel #79).
