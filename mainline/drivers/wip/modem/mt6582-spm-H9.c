@@ -760,6 +760,17 @@ module_param_cb(spm_md_dump, &spm_md_dump_ops, NULL, 0200);
 #define MD_SMEM_PHYS	0xb9600000	/* SMEM (base+22MB): BANK4 = MD 0x40000000 -> aqui */
 #define MD_SMEM_SIZE	0x1800000	/* mapa de carga: 24MB (todo el carveout) */
 
+/* H7r: buffers TTY del CCCI (shared_mem_tty_t de ccci_tty.h del bq-src) */
+#define CCCI_TTY_BUF_SIZE	(16 * 1024)	/* rx_buffer = tx_buffer */
+#define CCCI_TTY_SMEM_SIZE	(2 * 12 + 2 * CCCI_TTY_BUF_SIZE)	/* = 0x8018 */
+/* H8d: el runtime declara UartShareMemBase[8] ("Current UART_MAX_PORT_NUM is 8"
+ * en ccci_md.h), no 6.  El assert de UPS (ccci_uart_drv.c:2594) indexa los
+ * puertos como (canal_CCCI - 37), asi que puede haber mas de 6.  Se sube el tope
+ * a 8 y el numero declarado se barre con spm_md_uart_ports. */
+#define CCCI_TTY_PORTS		8
+#define CCCI_TTY_BASE		0x180000	/* tras las regiones de red */
+#define CCCI_TTY_STRIDE		0x9000		/* > 0x8018, alineado */
+
 /*
  * H6p: volcado de la MEMORIA COMPARTIDA del MD, buscando texto.
  *
@@ -839,6 +850,65 @@ static const char *spm_ex_name(u8 t)
 	case 99: return "EMI CHECK";
 	default: return "?";
 	}
+}
+
+/*
+ * H11: volcado de los anillos TTY del CCCI.
+ *
+ * Los canales TTY (lch 6/10/38 y sus ACK) no llevan datos en el mensaje: son un
+ * timbre, y el contenido esta en la memoria compartida que anunciamos en el
+ * runtime.  Puertos del stock: 0 = UART1 (meta), 1 = UART2 (modem, comandos AT),
+ * 5 = IPC_UART.
+ */
+static uint spm_md_uart_ports;	/* H8c, definido con valor mas abajo */
+
+static int spm_tty_dump_read(struct mt6582_spm *s)
+{
+	static const char * const nombre[CCCI_TTY_PORTS] = {
+		"UART1/meta", "UART2/modem-AT", "?", "?", "?", "IPC_UART", "?", "?"
+	};
+	int i, n = min_t(int, spm_md_uart_ports, CCCI_TTY_PORTS);
+
+	/* H11c: solo los puertos DECLARADOS.  CCCI_TTY_PORTS es el tope del array
+	 * del runtime (8); del 6 en adelante no se inicializan y salia basura. */
+	for (i = 0; i < n; i++) {
+		u32 base = MD_SMEM_PHYS + CCCI_TTY_BASE + i * CCCI_TTY_STRIDE;
+		void __iomem *t = ioremap(base, CCCI_TTY_SMEM_SIZE);
+		u32 rr, rw, rl, tr, tw, tl, n, off;
+		char hx[100], as[40];
+
+		if (!t)
+			continue;
+		rr = readl(t + 0x00); rw = readl(t + 0x04); rl = readl(t + 0x08);
+		tr = readl(t + 0x0c); tw = readl(t + 0x10); tl = readl(t + 0x14);
+		dev_info(s->dev, "H11 TTY%d %-14s rx[r=%u w=%u len=%u] tx[r=%u w=%u len=%u]\n",
+			 i, nombre[i], rr, rw, rl, tr, tw, tl);
+
+		/* datos pendientes del MD: de rx.read a rx.write (sin dar la vuelta) */
+		if (rw == rr || rw > CCCI_TTY_BUF_SIZE) {
+			iounmap(t);
+			continue;
+		}
+		n = (rw > rr) ? rw - rr : rl - rr;
+		if (n > 256)
+			n = 256;
+		for (off = 0; off < n; off += 16) {
+			u32 k, m = min_t(u32, 16, n - off);
+			int hn = 0, an = 0;
+
+			for (k = 0; k < m; k++) {
+				u8 c = readb(t + 0x18 + rr + off + k);
+
+				hn += scnprintf(hx + hn, sizeof(hx) - hn, "%02x ", c);
+				an += scnprintf(as + an, sizeof(as) - an, "%c",
+						(c >= 32 && c < 127) ? c : '.');
+			}
+			hx[hn] = 0; as[an] = 0;
+			dev_info(s->dev, "H11   +%04x: %-48s |%s|\n", rr + off, hx, as);
+		}
+		iounmap(t);
+	}
+	return 0;
 }
 
 static int spm_md_ex_read(struct mt6582_spm *s)
@@ -1000,6 +1070,16 @@ static int spm_md_ex_set(const char *val, const struct kernel_param *kp)
 static const struct kernel_param_ops spm_md_ex_ops = { .set = spm_md_ex_set };
 module_param_cb(spm_md_ex, &spm_md_ex_ops, NULL, 0200);
 MODULE_PARM_DESC(spm_md_ex, "H7p: lee y decodifica el registro de excepcion del MD");
+
+static int spm_tty_dump_set(const char *val, const struct kernel_param *kp)
+{
+	if (!gspm)
+		return -ENODEV;
+	return spm_tty_dump_read(gspm);
+}
+static const struct kernel_param_ops spm_tty_dump_ops = { .set = spm_tty_dump_set };
+module_param_cb(spm_tty_dump, &spm_tty_dump_ops, NULL, 0200);
+MODULE_PARM_DESC(spm_tty_dump, "H11: vuelca los anillos TTY del CCCI (lo que el MD ha escrito)");
 
 
 #define KERN_EMI_BASE	0x80000000
@@ -1163,16 +1243,6 @@ static int spm_md_release(struct mt6582_spm *s)
 #define MD_AP_OFF	0x78000000	/* md_2_ap_phy_addr_offset_fixed = (smem&0xFE000000)-0x40000000 */
 #define RT_NINTS	70		/* sizeof(modem_runtime_t)/4 */
 
-/* H7r: buffers TTY del CCCI (shared_mem_tty_t de ccci_tty.h del bq-src) */
-#define CCCI_TTY_BUF_SIZE	(16 * 1024)	/* rx_buffer = tx_buffer */
-#define CCCI_TTY_SMEM_SIZE	(2 * 12 + 2 * CCCI_TTY_BUF_SIZE)	/* = 0x8018 */
-/* H8d: el runtime declara UartShareMemBase[8] ("Current UART_MAX_PORT_NUM is 8"
- * en ccci_md.h), no 6.  El assert de UPS (ccci_uart_drv.c:2594) indexa los
- * puertos como (canal_CCCI - 37), asi que puede haber mas de 6.  Se sube el tope
- * a 8 y el numero declarado se barre con spm_md_uart_ports. */
-#define CCCI_TTY_PORTS		8
-#define CCCI_TTY_BASE		0x180000	/* tras las regiones de red */
-#define CCCI_TTY_STRIDE		0x9000		/* > 0x8018, alineado */
 /* ===== H6 PROXY FS: servidor mínimo (kernel) que sirve la NVRAM del MD =====
  * Protocolo (RE del ccci_fsd stock, docs H6b..H6f): el MD escribe una peticion en
  * fs_buffer[idx] = {u32 fs_ops; u8 buf[16384]}; nosotros hacemos el file-op sobre
