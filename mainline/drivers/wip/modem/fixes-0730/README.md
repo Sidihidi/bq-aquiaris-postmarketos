@@ -20,3 +20,11 @@ que no es git → esto es la foto de los cambios).
 
 Resultado: el fichero compila **sin warnings** y la medida con defaults puros es
 **900 ops FS + `NORMAL_BOOT_ID`** (kernel #79).
+
+## Frente siguiente (kernels #80-#81)
+
+| Fichero | Qué es |
+|---|---|
+| `patch_posths2.py` | **H9a — `spm_fs_post_hs2_iters`.** El bucle de servicio salía en cuanto detectaba `NORMAL_BOOT_ID`, así que el MD se quedaba sin FS justo al continuar el arranque y su registro de excepción salía limpio por falta de tiempo, no por estar bien. Con el parámetro: **de 900 a 1626 ops** y aparece el bloqueo real (`tarea='L4'`, `nvram_io.c:1202`). `0` = comportamiento histórico, la medida de M1 queda intacta. |
+
+Ver `PROXIMO-FRENTE-L4-Y-CANALES-0730.md` para el estado y el siguiente paso.
