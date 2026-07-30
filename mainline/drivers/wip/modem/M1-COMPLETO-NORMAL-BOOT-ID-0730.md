@@ -45,8 +45,25 @@ echo 1 > $S/spm_md_poweroff; sleep 1; echo 1 > $S/spm_md_poweron; sleep 1
 for p in spm_md_load spm_md_remap spm_md_release spm_md_hs2; do echo 1 > $S/$p; done
 ```
 
-**Conviene poner `spm_fs_1010_mode = 9` como valor por defecto en el driver**, porque con el default
-actual (0) el arranque se queda en 2 operaciones.
+### ✅ Ya es el comportamiento por defecto (kernel #67)
+`spm_fs_1010_mode = 9` está fijado en el driver. **El MD arranca sin tocar ningún parámetro**:
+```
+kernel #67 — defaults puros
+  spm_fs_1010_mode=9  spm_fs_1010_val=0  spm_fs_enum=1
+  respuestas FS: 894   HS2: 1
+  *** HS2 LOGRADO: NORMAL_BOOT_ID (stage 2 = M1 COMPLETO) ***
+```
+
+### El `val` por defecto (0) es además el CORRECTO
+| `spm_fs_1010_val` | HS2 | Peticiones FS |
+|---|---|---|
+| **0** (default) | ✅ | **894** |
+| `0xffffffff` | ✅ | 476 |
+
+El `ccci_fsd` real hace **883** peticiones → con `val=0` hacemos 894, prácticamente el mismo mount.
+Con `0xffffffff` se alcanza HS2 igual pero **con la mitad de operaciones**: el MD llega al hito con
+parte de su NVRAM sin leer. O sea que el default no solo arranca, **reproduce el arranque de
+fábrica**. Solo hubo que cambiar el modo.
 
 ---
 
