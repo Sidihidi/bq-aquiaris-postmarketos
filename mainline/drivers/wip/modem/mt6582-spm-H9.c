@@ -2558,6 +2558,7 @@ fs_noreply:
 
 static struct tty_driver *spm_tty_drv;
 static bool spm_tty_ready;	/* H13b: el tty_port ya existe */
+static atomic_t spm_tty_abierto = ATOMIC_INIT(0);	/* H13p: aperturas del nodo */
 
 /*
  * H13h: los logs del camino de RX, apagados por defecto.  Cada dev_info cuesta
@@ -2653,7 +2654,14 @@ static void spm_tty_rx(struct mt6582_spm *s, void __iomem *ccif)
 	 * la capa de linea.  Si acepta menos de los que sacamos del anillo, la
 	 * diferencia se perderia en silencio.
 	 */
-	if (spm_tty_ready && spm_tty_push) {
+	/*
+	 * H13p: empujar SOLO si alguien tiene el nodo abierto.  El hilo arranca al
+	 * terminar el ciclo y lo primero que hace es empujar lo que el MD dejo en
+	 * el anillo, cuando aun no hay lector — y ahi es donde el sistema se caia
+	 * (medido: push=0 sobrevive, push=1 reinicia).  Sin lector se drena y se
+	 * ACKea igual, que es lo que evita que el MD se atasque.
+	 */
+	if (spm_tty_ready && spm_tty_push && atomic_read(&spm_tty_abierto) > 0) {
 		/*
 		 * H13i: empuje caracter a caracter, como en el #91, que era el que
 		 * sobrevivia al ciclo.  La version por trozos con buffer en pila
@@ -2688,6 +2696,8 @@ static int spm_tty_op_open(struct tty_struct *tty, struct file *f)
 		if (spm_tty_debug)
 			dev_info(gspm->dev, "H13f open: entrando\n");
 	r = tty_port_open(&spm_tty_p, tty, f);
+	if (!r)
+		atomic_inc(&spm_tty_abierto);	/* H13p */
 	if (gspm)
 		if (spm_tty_debug)
 			dev_info(gspm->dev, "H13f open: -> %d\n", r);
@@ -2696,6 +2706,8 @@ static int spm_tty_op_open(struct tty_struct *tty, struct file *f)
 
 static void spm_tty_op_close(struct tty_struct *tty, struct file *f)
 {
+	if (atomic_read(&spm_tty_abierto) > 0)	/* H13p */
+		atomic_dec(&spm_tty_abierto);
 	tty_port_close(&spm_tty_p, tty, f);
 }
 
