@@ -1191,9 +1191,16 @@ static const struct kernel_param_ops spm_tty_at_ops = { .set = spm_tty_at_set };
 module_param_cb(spm_tty_at, &spm_tty_at_ops, NULL, 0200);
 MODULE_PARM_DESC(spm_tty_at, "H12: manda una linea por el canal AT del modem (UART2)");
 
-static uint spm_tty_enable = 1;
+/*
+ * H13d: POR DEFECTO DESACTIVADO.  El tty cuelga el sistema al usarlo (cuelgue
+ * duro, sin oops ni registro en pstore => watchdog) y todavia no se ha
+ * localizado.  El arranque del modem y el canal AT por sysfs (spm_tty_at) SI
+ * funcionan, asi que no deben quedar a merced de una pieza sin verificar:
+ *   echo 1 > .../spm_tty_enable   ANTES del ciclo, para experimentar con el tty.
+ */
+static uint spm_tty_enable;
 module_param(spm_tty_enable, uint, 0644);
-MODULE_PARM_DESC(spm_tty_enable, "H13: registrar /dev/ttyCCCI0 y el hilo de servicio tras el HS2");
+MODULE_PARM_DESC(spm_tty_enable, "H13: registrar /dev/ttyCCCI0 y el hilo de servicio (0 = no, defecto)");
 
 
 #define KERN_EMI_BASE	0x80000000
@@ -2626,6 +2633,14 @@ static unsigned int spm_tty_op_write_room(struct tty_struct *tty)
 	return CCCI_TTY_BUF_SIZE / 2;
 }
 
+/*
+ * H13c: el tty_port NECESITA su ops.  tty_port_init() lo deja a NULL de un
+ * memset y tty_port_open() hace port->ops->activate sin comprobarlo -> oops al
+ * abrir el nodo.  Vacio es suficiente: no hay init especifica ni lineas de
+ * modem reales, y sin ->carrier_raised se considera que siempre hay portadora.
+ */
+static const struct tty_port_operations spm_tty_port_ops = { };
+
 static const struct tty_operations spm_tty_ops = {
 	.open       = spm_tty_op_open,
 	.close      = spm_tty_op_close,
@@ -2654,6 +2669,7 @@ static int spm_tty_register(struct mt6582_spm *s)
 	tty_set_operations(spm_tty_drv, &spm_tty_ops);
 
 	tty_port_init(&spm_tty_p);
+	spm_tty_p.ops = &spm_tty_port_ops;	/* H13c: imprescindible */
 	ret = tty_register_driver(spm_tty_drv);
 	if (ret) {
 		tty_port_destroy(&spm_tty_p);
