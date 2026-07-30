@@ -2968,13 +2968,6 @@ static int spm_md_hs2(struct mt6582_spm *s)
 	 * del boot-ready. Aqui: leer cada canal con dato (RCHNUM), loguearlo, ACKear, y
 	 * buscar el boot-ready = mensaje de control (lch=0) con id=NORMAL_BOOT_ID(0) que
 	 * NO sea el HS1 (rsv!=MD_INIT_CHK_ID). */
-	/*
-	 * H13b: el tty se registra ANTES de servir, porque el MD empieza a emitir
-	 * por el lch 10 en cuanto arranca y el RX se empuja desde el propio bucle.
-	 */
-	if (spm_tty_enable)
-		spm_tty_register(s);
-
 	{
 		int done = 0, hs2_i = -1;
 
@@ -3104,6 +3097,16 @@ static int mt6582_spm_probe(struct platform_device *pdev)
 	spm_hw_init(s);
 	gspm = s;
 	suspend_set_ops(&mt6582_spm_suspend_ops);
+
+	/*
+	 * H13l: el tty se registra AQUI, no dentro del manejador de sysfs del
+	 * arranque del modem.  Registrarlo alli creaba el dispositivo y disparaba
+	 * uevents en mitad de la cascada, y era lo unico que quedaba por descartar
+	 * cuando spm_tty_enable=1 reiniciaba el movil (con 0 el ciclo completaba).
+	 * Aqui no hay trafico CCCI ni modem, y un fallo se ve al arrancar.
+	 * El nodo existe siempre; el SERVICIO sigue detras de spm_tty_enable.
+	 */
+	spm_tty_register(s);
 
 	dev_info(&pdev->dev,
 		 "SPM listo (PCM v35rc1 %u palabras @%pad) — 'mem' = SPM suspend (hito 1: WFI plano)\n",
