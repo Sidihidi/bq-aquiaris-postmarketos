@@ -1185,6 +1185,17 @@ static int spm_md_release(struct mt6582_spm *s)
 #define FS_NR_HANDLES	16
 static struct file *g_fs_h[FS_NR_HANDLES];
 
+/*
+ * H10a: traza dirigida a UN fichero.  Se sigue el handle que devuelve el OPEN
+ * cuyo path contenga esta subcadena, y se loguean sus ops (siempre visibles,
+ * aunque spm_fs_quiet silencie la cascada).  Vacio o "" = traza desactivada.
+ */
+static char *spm_fs_trace = "MP0B";
+module_param(spm_fs_trace, charp, 0644);
+MODULE_PARM_DESC(spm_fs_trace, "H10a: subcadena del path a trazar op a op (por defecto MP0B)");
+
+static int g_fs_trace_h = -1;
+
 /* convierte "Z:\NVRAM\NVD_DATA\MT48_001" (UTF-16LE en el buffer) a
  * "/data/nvram/md/NVRAM/NVD_DATA/MT48_001" (ASCII). plen = bytes UTF-16. */
 static void spm_fs_p0(void __iomem *fs, u32 boff, u32 val);	/* H7j: se usa antes de su definicion */
@@ -1673,6 +1684,10 @@ static u32 spm_fs_serve(struct mt6582_spm *s, void __iomem *fs, u32 idx)
 			 * del registro: esperado ffff1001, recibido 80001001).  El error se
 			 * senaliza en el PAYLOAD, no en la marca.
 			 */
+			if (spm_fs_trace && spm_fs_trace[0] && strstr(path, spm_fs_trace))
+				dev_info(s->dev, "H10a OPEN '%s' fl=%08x oflag=%x -> FALLO %ld\n",
+					 path, fl, oflag,
+					 IS_ERR(f) ? PTR_ERR(f) : 0L);
 			dev_warn(s->dev, "H6 FS OPEN %s fallo (err en payload)\n", path);
 			spm_fs_p0(fs, boff, 1);			/* H6x: 1 campo */
 			writel(4, fs + boff + 8);
@@ -1681,6 +1696,11 @@ static u32 spm_fs_serve(struct mt6582_spm *s, void __iomem *fs, u32 idx)
 			break;
 		}
 		g_fs_h[h] = f;
+		if (spm_fs_trace && spm_fs_trace[0] && strstr(path, spm_fs_trace)) {
+			g_fs_trace_h = h;
+			dev_info(s->dev, "H10a OPEN '%s' fl=%08x oflag=%x -> h=%d\n",
+				 path, fl, oflag, h);
+		}
 		/* ground-truth: resp = [count=1][len=4][handle] en +4/+8/+0xc (NO handle en +4) */
 		spm_fs_p0(fs, boff, 1);	/* H6w FIX C: +4 = numero de campos */
 		writel(4, fs + boff + 8);
@@ -1713,6 +1733,8 @@ static u32 spm_fs_serve(struct mt6582_spm *s, void __iomem *fs, u32 idx)
 		writel(4, fs + boff + 0x10);		/* len_1 = 4 */
 		writel((u32)sz, fs + boff + 0x14);	/* tamaño (32b) */
 		length = 0x14;
+		if (g_fs_trace_h >= 0 && hnd == (u32)g_fs_trace_h)
+			dev_info(s->dev, "H10a STAT h=%u -> size=%llu\n", hnd, sz);
 		fs_dbg(s->dev, "H6 FS STAT h=%u -> size=%llu\n", hnd, sz);
 		break;
 	}
@@ -1732,6 +1754,9 @@ static u32 spm_fs_serve(struct mt6582_spm *s, void __iomem *fs, u32 idx)
 		spm_fs_p0(fs, boff, 1);	/* H6w FIX C: +4 = numero de campos */
 		writel(4, fs + boff + 8);
 		writel((u32)np, fs + boff + 0xc);	/* nueva posicion */
+		if (g_fs_trace_h >= 0 && hnd == (u32)g_fs_trace_h)
+			dev_info(s->dev, "H10a SEEK h=%u off=%u -> pos=%lld\n",
+				 hnd, off, (long long)np);
 		length = 0x1c;
 		break;
 	}
@@ -1744,8 +1769,31 @@ static u32 spm_fs_serve(struct mt6582_spm *s, void __iomem *fs, u32 idx)
 			u8 *tmp = kmalloc(rlen, GFP_KERNEL);	/* NO en el stack (8KB) */
 			if (tmp) {
 				nread = kernel_read(g_fs_h[hnd], tmp, rlen, &g_fs_h[hnd]->f_pos);
+				/*
+				 * H10b: los datos van en +0x1c, NO en +0x20.  El 3er campo
+				 * tiene su longitud en +0x18, asi que el MD empieza a leer
+				 * en +0x1c (camina con align4(len)+4).  Ground-truth:
+				 *   ffff1003 | 3 | 4,0 | 4,0x35a | 0x35a, 1234abcd...
+				 *                                          ^ datos en +0x1c
+				 * Con el desplazamiento el MD leia 4 ceros delante y perdia
+				 * los ultimos 4 bytes.  Casi nada del arranque comprueba el
+				 * contenido, por eso la cascada funcionaba igual; lo destapa
+				 * la validacion de L4 (nvram_io.c:1202, error 10).
+				 */
 				if (nread > 0)
-					memcpy_toio(fs + boff + 0x20, tmp, nread);
+					memcpy_toio(fs + boff + 0x1c, tmp, nread);
+				if (g_fs_trace_h >= 0 && hnd == (u32)g_fs_trace_h) {
+					char hx[64];
+					int q, hn = 0;
+
+					for (q = 0; q < nread && q < 12; q++)
+						hn += scnprintf(hx + hn, sizeof(hx) - hn,
+								"%02x ", tmp[q]);
+					hx[hn] = 0;
+					dev_info(s->dev, "H10a READ h=%u len=%u pos=%lld -> %d [%s]\n",
+						 hnd, rlen,
+						 (long long)g_fs_h[hnd]->f_pos, nread, hx);
+				}
 				kfree(tmp);
 			}
 		}
@@ -1755,8 +1803,7 @@ static u32 spm_fs_serve(struct mt6582_spm *s, void __iomem *fs, u32 idx)
 		writel(0, fs + boff + 0xc);		/* result OK */
 		writel(4, fs + boff + 0x10);
 		writel(nread, fs + boff + 0x14);
-		writel(nread, fs + boff + 0x18);
-		writel(0, fs + boff + 0x1c);
+		writel(nread, fs + boff + 0x18);	/* len_2 -> datos en +0x1c (H10b) */
 		length = 0x1c + nread;			/* cabecera 0x1c + datos */
 		fs_dbg(s->dev, "H6 FS READ h=%u len=%u -> %d\n", hnd, rlen, nread);
 		break;
@@ -1795,6 +1842,10 @@ static u32 spm_fs_serve(struct mt6582_spm *s, void __iomem *fs, u32 idx)
 	}
 	case 0x1005: {				/* CLOSE: handle@+0xc */
 		u32 hnd = readl(fs + boff + 0xc);
+		if (g_fs_trace_h >= 0 && hnd == (u32)g_fs_trace_h) {
+			dev_info(s->dev, "H10a CLOSE h=%u\n", hnd);
+			g_fs_trace_h = -1;
+		}
 		if (hnd < FS_NR_HANDLES && g_fs_h[hnd]) {
 			filp_close(g_fs_h[hnd], NULL);
 			g_fs_h[hnd] = NULL;
