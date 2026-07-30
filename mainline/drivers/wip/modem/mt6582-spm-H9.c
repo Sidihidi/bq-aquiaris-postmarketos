@@ -2392,6 +2392,15 @@ static void spm_tty_rx(struct mt6582_spm *s, void __iomem *ccif);
 static bool spm_tty_serve;	/* H13j: solo el hilo atiende el TTY */
 
 /*
+ * H13m: discriminador.  Permite arrancar el hilo sin que atienda el TTY, para
+ * separar "el hilo" de "el empuje al tty_port + el ACK", que hasta ahora se
+ * probaban juntos.
+ */
+static uint spm_tty_rx_on = 1;
+module_param(spm_tty_rx_on, uint, 0644);
+MODULE_PARM_DESC(spm_tty_rx_on, "H13m: 0 = el hilo corre pero NO atiende el TTY");
+
+/*
  * H13: UNA pasada de servicio del CCCI (leer RCHNUM, despachar y ACKear).
  *
  * Extraido del bucle de spm_md_hs2 sin tocar su contenido, para que lo usen
@@ -2446,7 +2455,7 @@ static int spm_ccci_pass(struct mt6582_spm *s, void __iomem *ccif,
 		 * tty_port mas un ACK por evento.  El canal AT solo importa tras el
 		 * HS2, que es cuando arranca el hilo.
 		 */
-		if (lch == 10 && spm_tty_serve)
+		if (lch == 10 && spm_tty_serve && spm_tty_rx_on)
 			spm_tty_rx(s, ccif);
 		if (lch == 14) {
 			u32 idx = rsv & 0xff;
@@ -2602,13 +2611,27 @@ static void spm_tty_rx(struct mt6582_spm *s, void __iomem *ccif)
 	rr = readl(t + 0x00);
 	rw = readl(t + 0x04);
 	rl = readl(t + 0x08);
-	if (!rl || rr == rw)
+	/*
+	 * H13n: los tres punteros los escribe el MD en memoria compartida, asi
+	 * que no se pueden dar por buenos.  Sin esta comprobacion, un rr mayor
+	 * que rl hace que "rl - rr" desborde (son u32) y n quede en miles de
+	 * millones: el bucle de abajo se sale del mapeo leyendo con readb.
+	 */
+	if (!rl || rl > CCCI_TTY_BUF_SIZE || rr >= rl || rw >= rl) {
+		if (spm_tty_debug)
+			dev_info(s->dev, "H13n rx: punteros invalidos rr=%u rw=%u rl=%u\n",
+				 rr, rw, rl);
+		return;
+	}
+	if (rr == rw)
 		return;
 	if (spm_tty_debug)
 		dev_info(s->dev, "H13g rx: timbre  rr=%u rw=%u rl=%u tty=%d\n",
 			 rr, rw, rl, spm_tty_ready);
 
 	n = (rw > rr) ? rw - rr : rl - rr;	/* hasta el final; la vuelta, al proximo timbre */
+	if (n > CCCI_TTY_BUF_SIZE)		/* H13n: cinturon y tirantes */
+		return;
 	/*
 	 * H13b: el tty_port puede no existir todavia (el MD empieza a emitir en
 	 * cuanto arranca).  Se drena y se ACKea igual —que es lo que evita que el
