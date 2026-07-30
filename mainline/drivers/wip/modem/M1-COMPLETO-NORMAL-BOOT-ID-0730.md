@@ -221,3 +221,58 @@ durante el arranque. Con eso se sabrá qué dato del runtime alimenta ese descri
 **Nota de método**: se llegó al fix de L1 tras dos interpretaciones equivocadas —primero se supuso que
 L1 implicaba entrar en RF, y luego que faltaba una región entera sin su `'CCIF'`—. Leer la función
 **hasta el retorno** (no solo las diez primeras instrucciones) fue lo que lo aclaró.
+
+---
+
+# ✅ ACTUALIZACIÓN 2 — UPS SUPERADO, el MD ya no excepciona (kernel #72)
+
+## El A/B
+
+| `spm_md_zero_net` | Zerado | HS2 | Excepción |
+|---|---|---|---|
+| 0 | no | ✅ | `tarea='UPS'` · `ccci_uart_drv.c:2594` |
+| **1** | sí | ✅ | **`tarea=''` · `boot_mode=0`** ← registro VACÍO |
+
+Con las regiones de red zeradas **el registro de excepción queda en blanco**: sin tarea, sin fichero,
+sin línea. Ya no hay assert.
+
+## Qué era (y el nombre que despistaba)
+
+El fichero se llama `ccci_uart_drv.c` pero es el **driver GENÉRICO de puertos del CCCI**, y la tabla
+que valida es de **RED**, no de UART. Se localizó el inicializador en `0x225a` del firmware:
+
+```asm
+221c:  ldr   r2, [pc,#156]  ; r2 = 0xf0873eb8 = la copia interna del runtime
+                            ;      (la MISMA estructura que consultaba L1)
+224e:  ldr   r3, [pc,#124]  ; r3 = 0xf08748c8 = tabla de puertos (stride 88)
+2252:  ldr.w r0, [r2, #184] ; 0xb8 = NetULCtrlShareMemBase[0]   (offset 184)
+2256:  ldr.w r6, [r2, #216] ; 0xd8 = NetDLCtrlShareMemBase[0]   (offset 216)
+225a:  str   r0, [r3, #4]   ; ← tabla[puerto].campo_4 = NetULCtrlBase
+225e:  str   r6, [r3, #0]   ;   tabla[puerto].campo_0 = NetDLCtrlBase
+```
+
+Y el assert exige que `*(campo_4 + 0)` y `*(campo_4 + 8)` sean **cero** para un canal no activo.
+Declarábamos las 6 regiones (índices 46-48 y 54-56 del runtime) pero **nunca las zerábamos** → basura
+del carveout → assert.
+
+**Fix (H8e)**: zerar las 6 regiones `NetUL/DLCtrl` (`+0x120000`…`+0x170000`, 32 KB cada una) antes de
+soltar el MD. Parámetro `spm_md_zero_net`, default 1.
+
+Es el mismo patrón que el `misc_info`, cuya lección ya estaba escrita en el propio driver
+(*"el stock hace memset(0) primero — sin él… el MD puede leer un puntero basura"*) pero no se había
+aplicado a estas regiones.
+
+## Nota de método
+Los tres intentos previos (H8c/H8d: longitudes rx/tx, número de puertos 0/1/6/7/8) **no movieron
+nada** porque estaban tocando los descriptores **TTY** cuando la tabla era de **red**. El error fue
+fiarse del nombre del fichero (`ccci_uart_drv.c`) en vez de seguir el dato hasta su origen. Lo que lo
+resolvió fue localizar **quién escribe** el campo, no qué lo lee.
+
+## Estado
+```
+kernel #72 — defaults puros
+  894 respuestas FS · HS2 LOGRADO: NORMAL_BOOT_ID · registro de excepción VACÍO
+```
+⚠️ Registro vacío significa que **no ha petado**, no que esté operativo. `boot_mode` pasa de 1 a 0,
+lo que conviene entender. Siguiente pregunta: ya no "por qué muere" sino **hasta dónde llega** —
+comprobar si el MD sigue vivo y si responde por algún canal CCCI.
