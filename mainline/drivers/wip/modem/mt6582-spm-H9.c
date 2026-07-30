@@ -2527,6 +2527,14 @@ fs_noreply:
 
 static struct tty_driver *spm_tty_drv;
 static bool spm_tty_ready;	/* H13b: el tty_port ya existe */
+
+/*
+ * H13e: mapeados UNA sola vez al registrar el tty.  Antes se hacia ioremap por
+ * evento dentro del camino caliente (spm_ccci_pass corre a ~200 us en la fase
+ * rapida), que es caro y toma cerrojos: candidato al cuelgue duro observado.
+ */
+static void __iomem *spm_tty_ring;	/* anillo del puerto TTY_MODEM_PORT */
+static void __iomem *spm_tty_ccif;
 static struct tty_port spm_tty_p;
 static DEFINE_MUTEX(spm_ccif_tx);	/* el CCIF lo tocan el hilo y el write */
 static struct task_struct *spm_ccci_task;
@@ -2534,26 +2542,19 @@ static struct task_struct *spm_ccci_task;
 /* Copia al tx_buffer del puerto y toca el timbre.  Devuelve los bytes puestos. */
 static int spm_tty_ring_write(struct mt6582_spm *s, const u8 *buf, size_t n)
 {
-	u32 base = MD_SMEM_PHYS + CCCI_TTY_BASE + TTY_MODEM_PORT * CCCI_TTY_STRIDE;
-	void __iomem *t, *ccif;
+	void __iomem *t = spm_tty_ring, *ccif = spm_tty_ccif;
 	u32 tw, tl, i;
 	int ret;
 
 	if (!n)
 		return 0;
-	t = ioremap(base, CCCI_TTY_SMEM_SIZE);
-	ccif = ioremap(0x1020A000, 0x200);
-	if (!t || !ccif) {
-		if (t) iounmap(t);
-		if (ccif) iounmap(ccif);
-		return -ENOMEM;
-	}
+	if (!t || !ccif)			/* H13e: mapeados al registrar */
+		return -ENODEV;
 	mutex_lock(&spm_ccif_tx);
 	tw = readl(t + 0x10);
 	tl = readl(t + 0x14);
 	if (!tl) {
 		mutex_unlock(&spm_ccif_tx);
-		iounmap(ccif); iounmap(t);
 		return -EIO;
 	}
 	if (n > tl / 2)
@@ -2564,8 +2565,6 @@ static int spm_tty_ring_write(struct mt6582_spm *s, const u8 *buf, size_t n)
 	wmb();
 	ret = spm_ccci_send(s, ccif, 0, n, 12, 0);	/* CCCI_UART2_TX */
 	mutex_unlock(&spm_ccif_tx);
-	iounmap(ccif);
-	iounmap(t);
 	return ret ? ret : (int)n;
 }
 
@@ -2576,8 +2575,7 @@ static int spm_tty_ring_write(struct mt6582_spm *s, const u8 *buf, size_t n)
  */
 static void spm_tty_rx(struct mt6582_spm *s, void __iomem *ccif)
 {
-	u32 base = MD_SMEM_PHYS + CCCI_TTY_BASE + TTY_MODEM_PORT * CCCI_TTY_STRIDE;
-	void __iomem *t = ioremap(base, CCCI_TTY_SMEM_SIZE);
+	void __iomem *t = spm_tty_ring;		/* H13e: mapeado al registrar */
 	u32 rr, rw, rl, i, n;
 
 	if (!t)
@@ -2586,7 +2584,7 @@ static void spm_tty_rx(struct mt6582_spm *s, void __iomem *ccif)
 	rw = readl(t + 0x04);
 	rl = readl(t + 0x08);
 	if (!rl || rr == rw)
-		goto fuera;
+		return;
 
 	n = (rw > rr) ? rw - rr : rl - rr;	/* hasta el final; la vuelta, al proximo timbre */
 	/*
@@ -2607,13 +2605,18 @@ static void spm_tty_rx(struct mt6582_spm *s, void __iomem *ccif)
 	spm_ccci_send(s, ccif, 0xffffffff, 1, 11, 0);	/* CCCI_UART2_RX_ACK */
 	mutex_unlock(&spm_ccif_tx);
 	fs_dbg(s->dev, "H13 tty RX %u B (read %u -> %u)\n", n, rr, (rr + n) % rl);
-fuera:
-	iounmap(t);
 }
 
 static int spm_tty_op_open(struct tty_struct *tty, struct file *f)
 {
-	return tty_port_open(&spm_tty_p, tty, f);
+	int r;
+
+	if (gspm)
+		dev_info(gspm->dev, "H13f open: entrando\n");
+	r = tty_port_open(&spm_tty_p, tty, f);
+	if (gspm)
+		dev_info(gspm->dev, "H13f open: -> %d\n", r);
+	return r;
 }
 
 static void spm_tty_op_close(struct tty_struct *tty, struct file *f)
@@ -2623,13 +2626,26 @@ static void spm_tty_op_close(struct tty_struct *tty, struct file *f)
 
 static ssize_t spm_tty_op_write(struct tty_struct *tty, const u8 *buf, size_t n)
 {
+	int r;
+
 	if (!gspm)
 		return -ENODEV;
-	return spm_tty_ring_write(gspm, buf, n);
+	dev_info(gspm->dev, "H13f write: %u bytes\n", (unsigned int)n);
+	r = spm_tty_ring_write(gspm, buf, n);
+	dev_info(gspm->dev, "H13f write: -> %d\n", r);
+	/*
+	 * H13f: avisar a la capa de linea de que ya hay sitio.  Sin esto
+	 * n_tty_write se queda esperando un despertar que nadie manda.
+	 */
+	if (r > 0)
+		tty_wakeup(tty);
+	return r;
 }
 
 static unsigned int spm_tty_op_write_room(struct tty_struct *tty)
 {
+	if (gspm)
+		dev_info(gspm->dev, "H13f write_room\n");
 	return CCCI_TTY_BUF_SIZE / 2;
 }
 
@@ -2667,6 +2683,20 @@ static int spm_tty_register(struct mt6582_spm *s)
 	spm_tty_drv->init_termios = tty_std_termios;
 	spm_tty_drv->init_termios.c_cflag = B115200 | CS8 | CREAD | CLOCAL;
 	tty_set_operations(spm_tty_drv, &spm_tty_ops);
+
+	/* H13e: los mapeos, una sola vez y para siempre */
+	spm_tty_ring = ioremap(MD_SMEM_PHYS + CCCI_TTY_BASE +
+			       TTY_MODEM_PORT * CCCI_TTY_STRIDE, CCCI_TTY_SMEM_SIZE);
+	spm_tty_ccif = ioremap(0x1020A000, 0x200);
+	if (!spm_tty_ring || !spm_tty_ccif) {
+		if (spm_tty_ring) iounmap(spm_tty_ring);
+		if (spm_tty_ccif) iounmap(spm_tty_ccif);
+		spm_tty_ring = NULL;
+		spm_tty_ccif = NULL;
+		tty_driver_kref_put(spm_tty_drv);
+		spm_tty_drv = NULL;
+		return -ENOMEM;
+	}
 
 	tty_port_init(&spm_tty_p);
 	spm_tty_p.ops = &spm_tty_port_ops;	/* H13c: imprescindible */
