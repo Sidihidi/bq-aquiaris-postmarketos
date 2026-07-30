@@ -2387,7 +2387,9 @@ static u32 spm_fs_serve(struct mt6582_spm *s, void __iomem *fs, u32 idx)
 	return length;
 }
 
+/* H13k: spm_ccci_pass() va antes del bloque del tty y necesita ambas. */
 static void spm_tty_rx(struct mt6582_spm *s, void __iomem *ccif);
+static bool spm_tty_serve;	/* H13j: solo el hilo atiende el TTY */
 
 /*
  * H13: UNA pasada de servicio del CCCI (leer RCHNUM, despachar y ACKear).
@@ -2436,7 +2438,15 @@ static int spm_ccci_pass(struct mt6582_spm *s, void __iomem *ccif,
 		 * NOTA: el CONTENIDO de la respuesta (resultado del fs_op) lo define
 		 * ccci_fsd userspace -> HIPOTESIS aqui (result=0); ground-truth pendiente
 		 * de la snoop de LineageOS (fs_rx/tx_debug_enable). */
-		if (lch == 10)		/* H13: CCCI_UART2_RX -> el tty */
+		/*
+		 * H13j: el TTY lo atiende SOLO el hilo (20 ms), no la cascada.
+		 * Medido: el mismo kernel con spm_tty_enable=0 completa el ciclo
+		 * (HS2 + 1572 ops) y con =1 reinicia el movil.  En la fase rapida
+		 * este bucle corre a ~5000 pasadas/s y no aguanta el empuje al
+		 * tty_port mas un ACK por evento.  El canal AT solo importa tras el
+		 * HS2, que es cuando arranca el hilo.
+		 */
+		if (lch == 10 && spm_tty_serve)
 			spm_tty_rx(s, ccif);
 		if (lch == 14) {
 			u32 idx = rsv & 0xff;
@@ -2529,6 +2539,15 @@ static struct tty_driver *spm_tty_drv;
 static bool spm_tty_ready;	/* H13b: el tty_port ya existe */
 
 /*
+ * H13h: los logs del camino de RX, apagados por defecto.  Cada dev_info cuesta
+ * decenas de ms; dentro de la fase rapida del bucle eso estanca el servicio y
+ * dispara el watchdog.  Se enciende para medir, no para funcionar.
+ */
+static uint spm_tty_debug;
+module_param(spm_tty_debug, uint, 0644);
+MODULE_PARM_DESC(spm_tty_debug, "H13h: logs del camino de RX del tty (lento: solo para medir)");
+
+/*
  * H13e: mapeados UNA sola vez al registrar el tty.  Antes se hacia ioremap por
  * evento dentro del camino caliente (spm_ccci_pass corre a ~200 us en la fase
  * rapida), que es caro y toma cerrojos: candidato al cuelgue duro observado.
@@ -2585,18 +2604,33 @@ static void spm_tty_rx(struct mt6582_spm *s, void __iomem *ccif)
 	rl = readl(t + 0x08);
 	if (!rl || rr == rw)
 		return;
+	if (spm_tty_debug)
+		dev_info(s->dev, "H13g rx: timbre  rr=%u rw=%u rl=%u tty=%d\n",
+			 rr, rw, rl, spm_tty_ready);
 
 	n = (rw > rr) ? rw - rr : rl - rr;	/* hasta el final; la vuelta, al proximo timbre */
 	/*
 	 * H13b: el tty_port puede no existir todavia (el MD empieza a emitir en
 	 * cuanto arranca).  Se drena y se ACKea igual —que es lo que evita que el
 	 * MD se atasque— y solo se empuja si hay tty.
+	 *
+	 * H13g: con tty_insert_flip_string, que ademas dice cuantos bytes acepto
+	 * la capa de linea.  Si acepta menos de los que sacamos del anillo, la
+	 * diferencia se perderia en silencio.
 	 */
 	if (spm_tty_ready) {
+		/*
+		 * H13i: empuje caracter a caracter, como en el #91, que era el que
+		 * sobrevivia al ciclo.  La version por trozos con buffer en pila
+		 * (H13g) reiniciaba el movil DURANTE la cascada y sin dejar rastro
+		 * -- queda anotada como sospechosa para cuando se retome.
+		 */
 		for (i = 0; i < n; i++)
 			tty_insert_flip_char(&spm_tty_p,
 					     readb(t + 0x18 + rr + i), TTY_NORMAL);
 		tty_flip_buffer_push(&spm_tty_p);
+		if (spm_tty_debug)
+			dev_info(s->dev, "H13i rx: empujados %u\n", n);
 	}
 
 	writel((rr + n) % rl, t + 0x00);
@@ -2604,7 +2638,9 @@ static void spm_tty_rx(struct mt6582_spm *s, void __iomem *ccif)
 	mutex_lock(&spm_ccif_tx);
 	spm_ccci_send(s, ccif, 0xffffffff, 1, 11, 0);	/* CCCI_UART2_RX_ACK */
 	mutex_unlock(&spm_ccif_tx);
-	fs_dbg(s->dev, "H13 tty RX %u B (read %u -> %u)\n", n, rr, (rr + n) % rl);
+	if (spm_tty_debug)
+		dev_info(s->dev, "H13g rx: fin, read %u -> %u, ACK enviado\n",
+			 rr, (rr + n) % rl);
 }
 
 static int spm_tty_op_open(struct tty_struct *tty, struct file *f)
@@ -2612,10 +2648,12 @@ static int spm_tty_op_open(struct tty_struct *tty, struct file *f)
 	int r;
 
 	if (gspm)
-		dev_info(gspm->dev, "H13f open: entrando\n");
+		if (spm_tty_debug)
+			dev_info(gspm->dev, "H13f open: entrando\n");
 	r = tty_port_open(&spm_tty_p, tty, f);
 	if (gspm)
-		dev_info(gspm->dev, "H13f open: -> %d\n", r);
+		if (spm_tty_debug)
+			dev_info(gspm->dev, "H13f open: -> %d\n", r);
 	return r;
 }
 
@@ -2630,9 +2668,11 @@ static ssize_t spm_tty_op_write(struct tty_struct *tty, const u8 *buf, size_t n)
 
 	if (!gspm)
 		return -ENODEV;
-	dev_info(gspm->dev, "H13f write: %u bytes\n", (unsigned int)n);
+	if (spm_tty_debug)
+		dev_info(gspm->dev, "H13f write: %u bytes\n", (unsigned int)n);
 	r = spm_tty_ring_write(gspm, buf, n);
-	dev_info(gspm->dev, "H13f write: -> %d\n", r);
+	if (spm_tty_debug)
+		dev_info(gspm->dev, "H13f write: -> %d\n", r);
 	/*
 	 * H13f: avisar a la capa de linea de que ya hay sitio.  Sin esto
 	 * n_tty_write se queda esperando un despertar que nadie manda.
@@ -2645,7 +2685,8 @@ static ssize_t spm_tty_op_write(struct tty_struct *tty, const u8 *buf, size_t n)
 static unsigned int spm_tty_op_write_room(struct tty_struct *tty)
 {
 	if (gspm)
-		dev_info(gspm->dev, "H13f write_room\n");
+		if (spm_tty_debug)
+			dev_info(gspm->dev, "H13f write_room\n");
 	return CCCI_TTY_BUF_SIZE / 2;
 }
 
@@ -2730,6 +2771,7 @@ static int spm_ccci_fn(void *arg)
 		if (fs) iounmap(fs);
 		return -ENOMEM;
 	}
+	spm_tty_serve = true;		/* H13j: desde aqui si */
 	dev_info(s->dev, "H13: hilo de servicio CCCI en marcha\n");
 	while (!kthread_should_stop()) {
 		spm_ccci_pass(s, ccif, fs, &done);
