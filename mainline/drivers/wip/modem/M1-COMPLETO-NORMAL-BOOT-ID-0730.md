@@ -276,3 +276,66 @@ kernel #72 — defaults puros
 ⚠️ Registro vacío significa que **no ha petado**, no que esté operativo. `boot_mode` pasa de 1 a 0,
 lo que conviene entender. Siguiente pregunta: ya no "por qué muere" sino **hasta dónde llega** —
 comprobar si el MD sigue vivo y si responde por algún canal CCCI.
+
+---
+
+# ✅ ACTUALIZACIÓN 3 — arranque sin errores de fichero (kernel #75)
+
+```
+OPEN que fallan : 0   (antes 4)     respuestas FS : 900     HS2 ✅   excepción vacía
+El MD crea sus propios ficheros:  X/MP0D_000 (4 B)  X/ST33A004 (2060 B)  Y/ST33B004
+```
+
+## H8f — la traducción de ruta era ciega al DISCO
+
+Con `spm_fs_quiet=0` se vio que tras montar la NVRAM el MD pide ficheros de **otros volúmenes**:
+```
+path=[003a0058 005c005c 0050004d]  ->  "X:\\MP0D_000"
+path=[003a0058 005c005c 00540053]  ->  "X:\\ST33A004"
+path=[003a0059 005c005c 00540053]  ->  "Y:\\ST33B004"
+```
+`spm_fs_path` descartaba los 2 primeros caracteres asumiendo **siempre** `Z:`, así que (a) metía tres
+volúmenes en el mismo directorio —dos ficheros homónimos en discos distintos se habrían pisado— y (b)
+la `\\` doble del original producía rutas con `//`.
+
+Ahora: `Z:` → `/data/nvram/md` (la NVRAM, como antes) y cualquier otro disco a su propio
+subdirectorio (`/X`, `/Y`), colapsando barras repetidas.
+
+## H8g — el mensaje contradictorio del final del bucle
+
+Se imprimía `H4 HS2: sin boot-ready tras 8s` **siempre**, incluso tras un HS2 correcto, dejando dos
+líneas que se contradecían. Ahora distingue según `done`.
+
+**De paso se validó la detección de HS2**, que había quedado en duda: el AP de fábrica usa
+exactamente la misma condición (`ccci_md_main.c:2140`: `msg.id == NORMAL_BOOT_ID` estando en etapa 1
+→ etapa 2), y su log dice literalmente *"receive NORMAL_BOOT_ID"*. El `CCCI_MD_MSG_BOOT_READY`
+(0xFAF50001) que hizo sospechar es una notificación **interna de Linux** que el AP difunde *después*
+de detectar la etapa 2, no un mensaje del MD. **La detección era correcta.**
+
+## H8i — los flags del OPEN se leían del sitio equivocado
+
+```c
+u32 p0 = readl(fs + boff + 4);   /* comentario: "flags (OPEN) / handle" */
+if (p0 & 0x10000)  oflag = O_RDWR | O_CREAT;
+```
+Las constantes del mapeo **eran correctas** (RE con Ghidra), pero `+4` es el **contador de campos**
+(vale 2), así que esos bits nunca se activaban y **jamás pasábamos `O_CREAT`**. Comentario obsoleto:
+escrito antes de descifrar la estructura del buffer y nunca revisado al cambiar el modelo.
+
+Volcado de la petición entera (H8h) para medirlo en vez de deducirlo:
+```
+w0=00001001  w1=00000002  w2=0000001a      op, nfields, len_0
+w3..w9 = "X:\\MP0D_000"                    26 bytes -> align4 = 28
+w10=00000004                               len_1
+w11=01010400                               FLAGS  (bit 0x10000 = crear)
+```
+El offset depende de la longitud del path: **`flags_off = 0xc + align4(len_0) + 4`**.
+
+Con el fix, el MD crea sus ficheros con contenido real (2060 B en `ST33A004`) — inicializa su
+almacenamiento como en un primer arranque de fábrica.
+
+## Patrón común de los bugs de hoy
+Los cuatro (support_mask sin declarar, regiones de red sin zerar, flags del OPEN, traducción ciega al
+disco) son **el mismo error de fondo**: código escrito con un modelo del protocolo que luego resultó
+falso, y que nadie revisó al cambiar el modelo. Todos estaban a la vista una vez conocida la
+estructura de campos.
