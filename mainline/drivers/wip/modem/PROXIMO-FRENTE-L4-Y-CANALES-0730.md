@@ -59,8 +59,8 @@ Cadena `service/nvram/src/nvram_io.c` en `0x47b330`; punteros a ella en `0x28ddc
 Los tres params son, en orden: **error = 10**, **3** (constante del sitio), **161** = el identificador
 de registro que estaba procesando. El enum es `NVRAM_IO_ERRNO_*` (confirmado por la cadena
 `read_cnf->result == NVRAM_IO_ERRNO_OK || read_cnf->result == NVRAM_IO_ERRNO_INIT` en `0x4767b0`),
-pero **en el firmware solo hay strings de `_OK` y `_INIT`**, así que el 10 hay que sacarlo del
-desensamblado de `0x28dc8c` — ese es el siguiente paso de RE.
+pero **en el firmware solo hay strings de `_OK` y `_INIT`**, así que el 10 hubo que sacarlo del
+desensamblado de `0x28dc8c` → **`10` = fallaron las DOS copias del registro** (sección H9b al final).
 
 ---
 
@@ -147,7 +147,8 @@ usamos. Ahora las quiere de verdad.
    `0x290398`** (la validación de UNA copia): qué comprueba y de dónde sale la segunda copia.
 2. **Auditar el ACK del bucle**: confirmar que ACKeamos **todos** los canales que el MD dispara, no
    solo los que leemos de `RCHNUM`. `BUSY=1` al salir dice que algo queda sin ACKear.
-3. **Localizar el registro 161**: correlacionar el assert con el último fichero que el MD toca.
+3. **Confirmar empíricamente que el 161 es `MPA8_000`** (de la tabla sale eso, ver H9b, pero el
+   mapeo no está cerrado): correlacionar el assert con el último fichero que el MD toca.
    ⚠️ `spm_fs_quiet=0` cuesta ~30 ms/op → con 1626 ops hace falta subir `spm_fs_slow_iters` a ~6000
    (150 s de presupuesto). El intento de esta sesión con esos ajustes salió sin arrancar (ver abajo).
 4. **Contestar en los canales CCMNI/PCM**: portar del stock lo mínimo para que el MD no se quede
