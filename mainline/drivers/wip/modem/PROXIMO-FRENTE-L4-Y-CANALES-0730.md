@@ -143,9 +143,8 @@ usamos. Ahora las quiere de verdad.
 
 ## ▶️ SIGUIENTE PASO, en orden de coste
 
-1. **RE de `0x28dc8c`** (barato, offline, sin HW): qué comprueba y qué es el error 10. Con el método
-   ya establecido (`objdump -D -b binary -m armv7 -M force-thumb`, base de carga 0). Da el
-   *qué falta*, que es lo que ahora no sabemos.
+1. ~~RE de `0x28dc8c`~~ **HECHO** — ver la sección siguiente. El paso 1 pasa a ser **RE de
+   `0x290398`** (la validación de UNA copia): qué comprueba y de dónde sale la segunda copia.
 2. **Auditar el ACK del bucle**: confirmar que ACKeamos **todos** los canales que el MD dispara, no
    solo los que leemos de `RCHNUM`. `BUSY=1` al salir dice que algo queda sin ACKear.
 3. **Localizar el registro 161**: correlacionar el assert con el último fichero que el MD toca.
@@ -193,3 +192,85 @@ echo 1 > $S/spm_md_ex                    # decodifica el registro de excepcion
 | Mapeo de volúmenes | `~/modem-fsd/boot-fsd.strace` (rutas reales del fsd) |
 | Nombres de canales CCCI | `~/mainline/downstream/bq-src/mediatek/kernel/drivers/dual_ccci/include/ccci_ch.h` |
 | Firmware a desensamblar | `~/mainline/downstream/stock-firmware-0713/modem.img` (5.172.580 B) |
+
+
+---
+
+# H9b — `0x28dc8c` desensamblado: **error 10 = fallan las DOS copias**
+
+Es la lectura de un registro de NVRAM **con doble copia y auto-reparación**:
+
+```asm
+28dc8c:  stmdb sp!, {r4-r9, sl, lr}
+28dc90:  ldrh  sl, [r0, #16]      ; flags del descriptor del registro
+28dcaa:  and   sl, #4             ; bit 2 = "este registro tiene 2a copia"
+28dcce:  bl    0x290398           ; -> r5 = validacion de la copia A
+28dcd8:  beq   0x28dd92           ; sin bit 2 -> una sola copia y fuera
+28dd4c:  bl    0x290398           ; -> r7 = validacion de la copia B
+28dd70:  cbnz  r5, 0x28dd76       ; A mal?
+28dd72:  cbnz  r7, 0x28dd84       ;   no: B mal?
+28dd74:  b     0x28ddb6           ;   las dos bien -> exito (devuelve 0)
+28dd76:  cbnz  r7, 0x28ddba       ; A mal Y B mal ----------> 10
+28dd7c:  bl    0x290170           ; A mal, B bien -> reconstruir A desde B
+28dd88:  bl    0x290170           ; A bien, B mal -> reconstruir B desde A
+28dd8e:  cbnz  r0, 0x28dd96       ;   si la reparacion falla -> 10
+28ddba:  movs  r5, #10            ; <-- EL ERROR 10
+28ddc0:  ldmia sp!, {r4-r9, sl, pc}
+```
+
+| Dirección | Qué es |
+|---|---|
+| `0x28dc8c` | leer registro con doble copia + auto-reparación (devuelve 0 = OK, 10 = ambas mal) |
+| `0x290398` | **validar UNA copia** — el siguiente objetivo de RE |
+| `0x290170` | reconstruir la copia mala desde la buena |
+| `0x29001c` | accesor usado en los logs (líneas 1391/1404/1421/1451 del mismo fichero) |
+
+Pool del assert: `0x28e4b0` → `"KAL_FALSE"` ⇒ es `EXT_ASSERT(KAL_FALSE, err=10, 3, lid)`, una rama de
+error incondicional. El `3` es el identificador del sitio, no un dato.
+
+## El registro 161 = `CALIBRAT/MPA8_000`
+
+**Tabla de items de NVRAM localizada**: `0x4d41ca`–`0x4d566a`, entradas de **32 bytes**:
+
+```
++0x00  nombre[4] + NUL      "MPA8\0"
++0x05  version[3] + NUL     "000\0"
++0x0e  u16 LID              0xa1 = 161
++0x10..+0x1f                otros campos (tamaño/flags/puntero) NO cuadrados aún
+```
+
+Ejemplo real (`0x4d55aa`):
+```
+4d 50 41 38 00 30 30 30 00 00 00 00 00 00 a1 00
+0a 00 0a 00 00 00 c3 06 45 00 00 20 00 00 0e 00   |MPA8.000................E.. ....|
+```
+
+**El detalle del espejo sale de aquí**: la tabla guarda nombres de **4** caracteres mientras en disco
+son de **8**, porque el 5º carácter es **`A`/`B` en los registros con copia y `_` en los que no**:
+`MT00`→`MT00A000`+`MT00B000`, `ST6T`→`ST6TA001`+`ST6TB001`, `MPA8`→`MPA8_000`. Encaja con el bit 2.
+
+⚠️ **Confianza**: el mapeo LID→nombre se apoya en que los LIDs son **consecutivos en entradas
+consecutivas** (101, 161, 162, 163) y en que los nombres casan con ficheros reales (`MP0B_001` está en
+`NVD_IMEI`, `MPA2_000` y `MPA8_000` en `CALIBRAT`). Los campos de tamaño **no** se han podido cuadrar
+(la fila de `MPA2` contiene `0x548` = 1352, que es exactamente el payload de `MPA8_000` — o hay un
+desfase de una entrada en mi agrupación de campos, o es otro campo). **Confirmarlo empíricamente**
+(traza con `spm_fs_quiet=0`) antes de construir encima.
+
+## ❌ Y el contenido NO es la causa (refutado en el sitio)
+
+`MPA8_000` son **1352 ceros + `ef cd`** (marca de fin `0xCDEF`), idéntico byte a byte al de la
+extracción del Lineage que funciona. Parecía la explicación… y no lo es: **57 de los 165 registros
+están igual de vacíos**, con la misma marca, en la NVRAM del móvil que sí arranca la radio.
+
+```
+CALIBRAT/HL11_000..HL1J_000   (18 registros)   CALIBRAT/UL12_000..ULB9_000  (14)
+CALIBRAT/MPA2_000  314 B      CALIBRAT/MPA8_000 1354 B     NVD_DATA/MT04_000 4234 B  ...
+```
+
+Un registro en blanco con su marca es **lo normal** para lo no calibrado.
+
+## ▶️ Conclusión: el problema está en cómo servimos la SEGUNDA copia
+
+Si las dos copias fallan con un fichero que es correcto y que funciona en el original, el fallo es de
+**nuestra respuesta**, no del dato. Siguiente RE: **`0x290398`** — qué valida exactamente y **de dónde
+sale la copia B** (otro fichero, otro offset del mismo, u otra región). Ahí está el desajuste.
