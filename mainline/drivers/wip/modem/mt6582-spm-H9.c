@@ -2401,6 +2401,18 @@ module_param(spm_tty_rx_on, uint, 0644);
 MODULE_PARM_DESC(spm_tty_rx_on, "H13m: 0 = el hilo corre pero NO atiende el TTY");
 
 /*
+ * H13o: las dos mitades de spm_tty_rx, cada una con su interruptor.  El drenaje
+ * del anillo se hace siempre, para que la prueba solo cambie lo que se mide.
+ */
+static uint spm_tty_push = 1;
+module_param(spm_tty_push, uint, 0644);
+MODULE_PARM_DESC(spm_tty_push, "H13o: 0 = no empujar al tty_port");
+
+static uint spm_tty_ack = 1;
+module_param(spm_tty_ack, uint, 0644);
+MODULE_PARM_DESC(spm_tty_ack, "H13o: 0 = no mandar el ACK por CCCI");
+
+/*
  * H13: UNA pasada de servicio del CCCI (leer RCHNUM, despachar y ACKear).
  *
  * Extraido del bucle de spm_md_hs2 sin tocar su contenido, para que lo usen
@@ -2641,7 +2653,7 @@ static void spm_tty_rx(struct mt6582_spm *s, void __iomem *ccif)
 	 * la capa de linea.  Si acepta menos de los que sacamos del anillo, la
 	 * diferencia se perderia en silencio.
 	 */
-	if (spm_tty_ready) {
+	if (spm_tty_ready && spm_tty_push) {
 		/*
 		 * H13i: empuje caracter a caracter, como en el #91, que era el que
 		 * sobrevivia al ciclo.  La version por trozos con buffer en pila
@@ -2658,9 +2670,11 @@ static void spm_tty_rx(struct mt6582_spm *s, void __iomem *ccif)
 
 	writel((rr + n) % rl, t + 0x00);
 	wmb();
-	mutex_lock(&spm_ccif_tx);
-	spm_ccci_send(s, ccif, 0xffffffff, 1, 11, 0);	/* CCCI_UART2_RX_ACK */
-	mutex_unlock(&spm_ccif_tx);
+	if (spm_tty_ack) {
+		mutex_lock(&spm_ccif_tx);
+		spm_ccci_send(s, ccif, 0xffffffff, 1, 11, 0);	/* CCCI_UART2_RX_ACK */
+		mutex_unlock(&spm_ccif_tx);
+	}
 	if (spm_tty_debug)
 		dev_info(s->dev, "H13g rx: fin, read %u -> %u, ACK enviado\n",
 			 rr, (rr + n) % rl);
