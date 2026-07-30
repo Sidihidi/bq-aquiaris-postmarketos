@@ -862,6 +862,90 @@ static const char *spm_ex_name(u8 t)
  */
 static uint spm_md_uart_ports;	/* H8c, definido con valor mas abajo */
 
+/*
+ * H12: enviar un mensaje CCCI (el "timbre").  Formato del stock: cuatro palabras
+ * {data0, data1, canal_logico, reserved} en un canal fisico TX libre, y luego
+ * TCHNUM para dispararlo.  Es el mismo camino que usa la respuesta del FS.
+ */
+static int spm_ccci_send(struct mt6582_spm *s, void __iomem *ccif,
+			 u32 d0, u32 d1, u32 lch, u32 resv)
+{
+	u32 busy = readl(ccif + 0x04);
+	int tch;
+
+	for (tch = 0; tch < 8; tch++)
+		if (!(busy & (1 << tch)))
+			break;
+	if (tch >= 8) {
+		dev_warn(s->dev, "H12: sin canal TX libre (BUSY=%02x)\n", busy);
+		return -EBUSY;
+	}
+	writel(1 << tch, ccif + 0x04);
+	writel(d0,   ccif + 0x100 + tch * 16 + 0);
+	writel(d1,   ccif + 0x100 + tch * 16 + 4);
+	writel(lch,  ccif + 0x100 + tch * 16 + 8);
+	writel(resv, ccif + 0x100 + tch * 16 + 12);
+	wmb();
+	writel(tch, ccif + 0x0c);
+	return 0;
+}
+
+/*
+ * H12: mandarle una linea al modem por el puerto TTY 1 (UART2 = canal AT).
+ *   echo "AT" > /sys/module/mt6582_spm/parameters/spm_tty_at
+ * Se le anade CR, que es lo que termina un comando AT.
+ */
+static char spm_tty_at_buf[128];
+
+static int spm_tty_at_send(struct mt6582_spm *s, const char *txt)
+{
+	u32 base = MD_SMEM_PHYS + CCCI_TTY_BASE + 1 * CCCI_TTY_STRIDE;
+	void __iomem *t, *ccif;
+	u32 rr, rw, tw, tl, n, i;
+	int ret = 0;
+
+	t = ioremap(base, CCCI_TTY_SMEM_SIZE);
+	ccif = ioremap(0x1020A000, 0x200);
+	if (!t || !ccif) {
+		if (t) iounmap(t);
+		if (ccif) iounmap(ccif);
+		return -ENOMEM;
+	}
+
+	/* 1) consumir lo que el MD tenga pendiente y ACKear (canal 11, id 1) */
+	rr = readl(t + 0x00);
+	rw = readl(t + 0x04);
+	if (rw != rr) {
+		writel(rw, t + 0x00);
+		wmb();
+		spm_ccci_send(s, ccif, 0xffffffff, 1, 11, 0);
+		dev_info(s->dev, "H12 RX drenado: read %u -> %u, ACK por ch11\n", rr, rw);
+	}
+
+	/* 2) copiar al tx_buffer y avanzar tx.write */
+	tw = readl(t + 0x10);
+	tl = readl(t + 0x14);
+	n = strlen(txt);
+	if (!tl || n == 0 || n > CCCI_TTY_BUF_SIZE / 2) {
+		ret = -EINVAL;
+		goto fuera;
+	}
+	for (i = 0; i < n; i++)
+		writeb(txt[i], t + 0x4018 + ((tw + i) % tl));
+	writel((tw + n) % tl, t + 0x10);
+	wmb();
+
+	/* 3) timbre: stream {addr=0, len} en CCCI_UART2_TX = 12 */
+	ret = spm_ccci_send(s, ccif, 0, n, 12, 0);
+	dev_info(s->dev, "H12 TX '%s' (%u B) tx.write %u -> %u, timbre ch12 -> %d\n",
+		 txt, n, tw, (tw + n) % tl, ret);
+
+fuera:
+	iounmap(ccif);
+	iounmap(t);
+	return ret;
+}
+
 static int spm_tty_dump_read(struct mt6582_spm *s)
 {
 	static const char * const nombre[CCCI_TTY_PORTS] = {
@@ -1080,6 +1164,27 @@ static int spm_tty_dump_set(const char *val, const struct kernel_param *kp)
 static const struct kernel_param_ops spm_tty_dump_ops = { .set = spm_tty_dump_set };
 module_param_cb(spm_tty_dump, &spm_tty_dump_ops, NULL, 0200);
 MODULE_PARM_DESC(spm_tty_dump, "H11: vuelca los anillos TTY del CCCI (lo que el MD ha escrito)");
+
+static int spm_tty_at_set(const char *val, const struct kernel_param *kp)
+{
+	int n;
+
+	if (!gspm)
+		return -ENODEV;
+	n = snprintf(spm_tty_at_buf, sizeof(spm_tty_at_buf) - 2, "%s", val);
+	if (n < 0)
+		return -EINVAL;
+	if (n > (int)sizeof(spm_tty_at_buf) - 3)
+		n = sizeof(spm_tty_at_buf) - 3;
+	while (n > 0 && (spm_tty_at_buf[n - 1] == '\n' || spm_tty_at_buf[n - 1] == '\r'))
+		spm_tty_at_buf[--n] = 0;
+	spm_tty_at_buf[n++] = '\r';		/* un comando AT termina en CR */
+	spm_tty_at_buf[n] = 0;
+	return spm_tty_at_send(gspm, spm_tty_at_buf);
+}
+static const struct kernel_param_ops spm_tty_at_ops = { .set = spm_tty_at_set };
+module_param_cb(spm_tty_at, &spm_tty_at_ops, NULL, 0200);
+MODULE_PARM_DESC(spm_tty_at, "H12: manda una linea por el canal AT del modem (UART2)");
 
 
 #define KERN_EMI_BASE	0x80000000
