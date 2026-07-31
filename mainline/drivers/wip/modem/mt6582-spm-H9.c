@@ -2780,8 +2780,18 @@ static int spm_tty_register(struct mt6582_spm *s)
 	spm_tty_drv->major       = 0;		/* dinamico */
 	spm_tty_drv->type        = TTY_DRIVER_TYPE_SERIAL;
 	spm_tty_drv->subtype     = SERIAL_TYPE_NORMAL;
+	/*
+	 * H13r: el puerto nace CRUDO.  Fijar solo c_cflag dejaba el resto de
+	 * tty_std_termios, que trae ECHO e ICANON: la capa de linea hacia eco de
+	 * todo lo que llegaba del modem, se lo devolviamos, el modem respondia
+	 * (ATE1, su propio eco) y se realimentaba hasta tumbar el sistema.
+	 * Es un puerto de modem: quien quiera linea canonica, que la pida con stty.
+	 */
 	spm_tty_drv->init_termios = tty_std_termios;
 	spm_tty_drv->init_termios.c_cflag = B115200 | CS8 | CREAD | CLOCAL;
+	spm_tty_drv->init_termios.c_iflag = 0;
+	spm_tty_drv->init_termios.c_oflag = 0;
+	spm_tty_drv->init_termios.c_lflag = 0;	/* ni ECHO ni ICANON */
 	tty_set_operations(spm_tty_drv, &spm_tty_ops);
 
 	/* H13e: los mapeos, una sola vez y para siempre */
